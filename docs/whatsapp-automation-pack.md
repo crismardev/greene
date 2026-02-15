@@ -1,5 +1,7 @@
 # WhatsApp Automation Pack (Web)
 
+> Nota: para la documentacion operativa actual del proyecto, revisar tambien `docs/README.whatsapp-automation.md`.
+
 Este pack en la extension usa una capa de automatizacion web inspirada en las operaciones base que exponen:
 
 - `whatsapp-web.js` (Client API): `sendMessage`, `getNumberId`, `getChats`.

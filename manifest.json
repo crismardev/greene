@@ -16,6 +16,13 @@
     "http://localhost:11434/*",
     "http://127.0.0.1:11434/*"
   ],
+  "externally_connectable": {
+    "matches": [
+      "http://localhost/*",
+      "http://127.0.0.1/*",
+      "https://*.retool.com/*"
+    ]
+  },
   "icons": {
     "16": "assets/icon-16.png",
     "32": "assets/icon-32.png",
@@ -52,6 +59,16 @@
         "src/content-tab-context.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.retool.com/*"
+      ],
+      "js": [
+        "src/retool-bridge-content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_start"
     },
     {
       "matches": [

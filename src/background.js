@@ -13,7 +13,25 @@
     BROWSER_ACTION: 'GREENSTUDIO_BROWSER_ACTION'
   });
 
+  const EXTERNAL_MESSAGE_TYPES = Object.freeze({
+    OPEN_WHATSAPP: 'OPEN_WHATSAPP',
+    OPEN_URL: 'OPEN_URL',
+    LIST_TABS: 'LIST_TABS',
+    FOCUS_TAB: 'FOCUS_TAB',
+    CLOSE_TAB: 'CLOSE_TAB',
+    GET_RECENT_HISTORY: 'GET_RECENT_HISTORY',
+    CLOSE_NON_PRODUCTIVITY_TABS: 'CLOSE_NON_PRODUCTIVITY_TABS',
+    WHATSAPP_GET_INBOX: 'WHATSAPP_GET_INBOX',
+    WHATSAPP_OPEN_CHAT: 'WHATSAPP_OPEN_CHAT',
+    WHATSAPP_SEND_MESSAGE: 'WHATSAPP_SEND_MESSAGE',
+    WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE: 'WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE',
+    HELP: 'HELP'
+  });
+  const EXTERNAL_MESSAGE_TYPE_SET = new Set(Object.values(EXTERNAL_MESSAGE_TYPES));
+
   const LOG_PREFIX = '[greenstudio-ext/background]';
+  const WHATSAPP_WEB_BASE_URL = 'https://web.whatsapp.com/';
+  const WHATSAPP_WEB_MATCH_PATTERN = 'https://web.whatsapp.com/*';
   const tabContextState = new Map();
   const tabTemporalState = new Map();
   const recentHistoryByUrl = new Map();
@@ -125,6 +143,65 @@
     return text.slice(0, limit);
   }
 
+  function parseSafeUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      return new URL(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function isRetoolHost(hostname) {
+    const host = String(hostname || '').toLowerCase();
+    return host === 'retool.com' || host.endsWith('.retool.com');
+  }
+
+  function isTrustedRetoolSender(sender) {
+    const sourceUrl =
+      String(sender?.origin || '').trim() ||
+      String(sender?.url || '').trim() ||
+      (sender?.tab && typeof sender.tab.url === 'string' ? String(sender.tab.url || '').trim() : '');
+    const parsed = parseSafeUrl(sourceUrl);
+    if (!parsed) {
+      return false;
+    }
+
+    return parsed.protocol === 'https:' && isRetoolHost(parsed.hostname);
+  }
+
+  function isExternalMessageType(value) {
+    const type = String(value || '')
+      .trim()
+      .toUpperCase();
+    return Boolean(type) && EXTERNAL_MESSAGE_TYPE_SET.has(type);
+  }
+
+  function toSafePhone(value) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return '';
+    }
+
+    const digits = raw.replace(/[^\d+]/g, '');
+    if (!digits) {
+      return '';
+    }
+
+    const normalized = digits.startsWith('+') ? `+${digits.slice(1).replace(/[^\d]/g, '')}` : digits.replace(/[^\d]/g, '');
+    const withoutPlus = normalized.replace(/^\+/, '');
+
+    if (!withoutPlus || withoutPlus.length < 7) {
+      return '';
+    }
+
+    return `+${withoutPlus.slice(0, 24)}`;
+  }
+
   function detectSiteByUrl(url) {
     const safeUrl = String(url || '').toLowerCase();
 
@@ -150,6 +227,27 @@
     }
 
     return raw.slice(0, 1200);
+  }
+
+  function isWhatsappWebUrl(url) {
+    return /^https:\/\/web\.whatsapp\.com(\/|$)/i.test(String(url || '').trim());
+  }
+
+  function buildWhatsappSendUrl(phone, text) {
+    const safePhone = toSafePhone(phone).replace(/^\+/, '');
+    const safeText = toSafeText(text || '', 4000);
+    const params = new URLSearchParams();
+
+    if (safePhone) {
+      params.set('phone', safePhone);
+    }
+
+    if (safeText) {
+      params.set('text', safeText);
+    }
+
+    const query = params.toString();
+    return query ? `${WHATSAPP_WEB_BASE_URL}send?${query}` : WHATSAPP_WEB_BASE_URL;
   }
 
   function ensureTabTemporal(tabId) {
@@ -595,6 +693,58 @@
     });
   }
 
+  function queryTabs(queryInfo = {}) {
+    return new Promise((resolve) => {
+      chrome.tabs.query(queryInfo, (tabs) => {
+        if (chrome.runtime.lastError || !Array.isArray(tabs)) {
+          resolve([]);
+          return;
+        }
+
+        resolve(tabs);
+      });
+    });
+  }
+
+  function createTab(createProperties = {}) {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.create(createProperties, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          reject(new Error(chrome.runtime.lastError?.message || 'No se pudo abrir la pestana.'));
+          return;
+        }
+
+        resolve(tab);
+      });
+    });
+  }
+
+  function updateTab(tabId, updateProperties = {}) {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.update(tabId, updateProperties, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          reject(new Error(chrome.runtime.lastError?.message || 'No se pudo actualizar la pestana.'));
+          return;
+        }
+
+        resolve(tab);
+      });
+    });
+  }
+
+  function normalizeExternalTab(tab) {
+    return {
+      id: Number(tab?.id) || -1,
+      windowId: Number(tab?.windowId) || -1,
+      index: Number(tab?.index) || 0,
+      active: Boolean(tab?.active),
+      pinned: Boolean(tab?.pinned),
+      title: toSafeText(tab?.title || '', 220),
+      url: toSafeUrl(tab?.url || ''),
+      site: detectSiteByUrl(tab?.url || '')
+    };
+  }
+
   function writeChromeLocal(patch) {
     return new Promise((resolve) => {
       if (!chrome.storage || !chrome.storage.local) {
@@ -734,6 +884,369 @@
 
         resolve(tab);
       });
+    });
+  }
+
+  function runSiteActionInTab(tabId, site, action, args = {}) {
+    return new Promise((resolve) => {
+      chrome.tabs.sendMessage(
+        tabId,
+        {
+          type: MESSAGE_TYPES.SITE_ACTION,
+          action,
+          site,
+          args
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false, error: chrome.runtime.lastError.message || 'No se pudo ejecutar accion.' });
+            return;
+          }
+
+          resolve(response || { ok: false, error: 'Sin respuesta del content script.' });
+        }
+      );
+    });
+  }
+
+  async function resolveWhatsappTab(tabIdCandidate = -1) {
+    const directTabId = Number(tabIdCandidate);
+    if (Number.isFinite(directTabId) && directTabId >= 0) {
+      const direct = await getTabById(directTabId);
+      if (direct && isWhatsappWebUrl(direct.url || '')) {
+        return direct;
+      }
+    }
+
+    const knownWhatsappTabs = Array.from(tabContextState.values())
+      .filter((tab) => tab && tab.site === 'whatsapp' && Number.isFinite(tab.tabId) && tab.tabId >= 0)
+      .sort((a, b) => {
+        if (a.tabId === activeTabId) {
+          return -1;
+        }
+        if (b.tabId === activeTabId) {
+          return 1;
+        }
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+
+    for (const knownTab of knownWhatsappTabs) {
+      const tab = await getTabById(knownTab.tabId);
+      if (tab && isWhatsappWebUrl(tab.url || '')) {
+        return tab;
+      }
+    }
+
+    const queried = await queryTabs({ url: WHATSAPP_WEB_MATCH_PATTERN });
+    if (!queried.length) {
+      return null;
+    }
+
+    return queried.find((tab) => tab.active) || queried[0] || null;
+  }
+
+  function getExternalMessageArgs(message = {}) {
+    const safeMessage = message && typeof message === 'object' ? message : {};
+    const directArgs = {
+      ...safeMessage
+    };
+
+    delete directArgs.type;
+    delete directArgs.requestId;
+
+    const nestedArgs = safeMessage.args && typeof safeMessage.args === 'object' ? safeMessage.args : {};
+    return {
+      ...directArgs,
+      ...nestedArgs
+    };
+  }
+
+  function buildExternalEnvelope(type, payload = {}) {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const ok = safePayload.ok === true || safePayload.success === true;
+
+    return {
+      ...safePayload,
+      ok,
+      success: ok,
+      type
+    };
+  }
+
+  function buildExternalHelpPayload() {
+    return buildExternalEnvelope(EXTERNAL_MESSAGE_TYPES.HELP, {
+      ok: true,
+      result: {
+        tools: [
+          {
+            type: EXTERNAL_MESSAGE_TYPES.OPEN_WHATSAPP,
+            args: ['phone', 'text', 'reuseExistingTab?', 'tabId?', 'active?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.OPEN_URL,
+            args: ['url', 'reuseExistingTab?', 'active?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.LIST_TABS,
+            args: []
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.FOCUS_TAB,
+            args: ['tabId? | urlContains? | titleContains?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.CLOSE_TAB,
+            args: ['tabId? | url? | urlContains? | titleContains? | preventActive?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.GET_RECENT_HISTORY,
+            args: ['days?', 'limit?', 'text?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.CLOSE_NON_PRODUCTIVITY_TABS,
+            args: ['dryRun?', 'keepPinned?', 'keepActive?', 'onlyCurrentWindow?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.WHATSAPP_GET_INBOX,
+            args: ['tabId?', 'limit?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.WHATSAPP_OPEN_CHAT,
+            args: ['tabId?', 'query? | name? | chat? | phone? | chatIndex?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.WHATSAPP_SEND_MESSAGE,
+            args: ['tabId?', 'text']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE,
+            args: ['tabId?', 'query? | name? | chat? | phone?', 'text']
+          }
+        ]
+      }
+    });
+  }
+
+  async function runExternalBrowserAction(type, action, rawArgs, options = {}) {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const shouldBroadcast = options.broadcast === true;
+    const result = await runBrowserAction(action, args);
+    if (shouldBroadcast && result?.ok === true) {
+      broadcastSnapshot('external_browser_action');
+    }
+
+    return buildExternalEnvelope(type, result || { ok: false, error: 'Sin respuesta de browser action.' });
+  }
+
+  async function handleExternalOpenWhatsapp(rawArgs = {}) {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const url = buildWhatsappSendUrl(args.phone || args.to || args.number, args.text || args.message || '');
+    const requestedTabId = Number(args.tabId);
+    const active = args.active !== false;
+    const reuseExistingTab = args.reuseExistingTab !== false && args.forceNewTab !== true && args.newTab !== true;
+
+    let tab = null;
+    let reused = false;
+
+    if (reuseExistingTab) {
+      const knownTab = await resolveWhatsappTab(Number.isFinite(requestedTabId) ? requestedTabId : -1);
+      if (knownTab && typeof knownTab.id === 'number') {
+        tab = await updateTab(knownTab.id, { url, active });
+        reused = true;
+      }
+    }
+
+    if (!tab) {
+      tab = await createTab({ url, active });
+    }
+
+    if (tab && typeof tab.id === 'number') {
+      if (tab.active) {
+        setActiveTab(tab.id);
+      }
+      requestContextFromTab(tab.id, reused ? 'external_open_whatsapp_update' : 'external_open_whatsapp_create');
+      broadcastSnapshot('external_open_whatsapp');
+    }
+
+    return buildExternalEnvelope(EXTERNAL_MESSAGE_TYPES.OPEN_WHATSAPP, {
+      ok: true,
+      result: {
+        reused,
+        url,
+        tab: normalizeExternalTab(tab)
+      }
+    });
+  }
+
+  async function handleExternalOpenUrl(rawArgs = {}) {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const url = toSafeUrl(args.url || args.href || args.targetUrl);
+    if (!url) {
+      return buildExternalEnvelope(EXTERNAL_MESSAGE_TYPES.OPEN_URL, {
+        ok: false,
+        error: 'URL invalida. Usa http(s)://...'
+      });
+    }
+
+    const active = args.active !== false;
+    const reuseExistingTab = args.reuseExistingTab === true;
+    let tab = null;
+    let reused = false;
+
+    if (reuseExistingTab) {
+      const tabs = await queryTabs({});
+      const matched = tabs.find((item) => toSafeUrl(item?.url || '') === url) || null;
+      if (matched && typeof matched.id === 'number') {
+        tab = await updateTab(matched.id, { url, active });
+        reused = true;
+      }
+    }
+
+    if (!tab) {
+      tab = await createTab({ url, active });
+    }
+
+    if (tab && typeof tab.id === 'number') {
+      if (tab.active) {
+        setActiveTab(tab.id);
+      }
+      requestContextFromTab(tab.id, reused ? 'external_open_url_update' : 'external_open_url_create');
+      broadcastSnapshot('external_open_url');
+    }
+
+    return buildExternalEnvelope(EXTERNAL_MESSAGE_TYPES.OPEN_URL, {
+      ok: true,
+      result: {
+        reused,
+        url,
+        tab: normalizeExternalTab(tab)
+      }
+    });
+  }
+
+  async function runExternalWhatsappAction(type, action, rawArgs = {}) {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const requestedTabId = Number(args.tabId);
+    const targetTab = await resolveWhatsappTab(Number.isFinite(requestedTabId) ? requestedTabId : -1);
+
+    if (!targetTab || typeof targetTab.id !== 'number') {
+      return buildExternalEnvelope(type, {
+        ok: false,
+        error: 'No hay tab de WhatsApp disponible. Abre WhatsApp Web o usa OPEN_WHATSAPP primero.'
+      });
+    }
+
+    const actionArgs = {
+      ...args
+    };
+    delete actionArgs.tabId;
+
+    const response = await runSiteActionInTab(targetTab.id, 'whatsapp', action, actionArgs);
+    if (response?.ok === true) {
+      requestContextFromTab(targetTab.id, 'external_whatsapp_action');
+      broadcastSnapshot('external_whatsapp_action');
+    }
+
+    let resultPayload = response?.result;
+    if (resultPayload && typeof resultPayload === 'object' && !Array.isArray(resultPayload)) {
+      resultPayload = {
+        ...resultPayload,
+        tabId: targetTab.id
+      };
+    } else {
+      resultPayload = {
+        tabId: targetTab.id,
+        value: resultPayload
+      };
+    }
+
+    return buildExternalEnvelope(type, {
+      ok: response?.ok === true,
+      result: resultPayload,
+      error: response?.error || ''
+    });
+  }
+
+  async function runExternalMessage(message, sender) {
+    const safeMessage = message && typeof message === 'object' ? message : {};
+    const rawType = String(safeMessage.type || '').trim();
+    const type = rawType.toUpperCase();
+    const args = getExternalMessageArgs(safeMessage);
+
+    const senderMeta = {
+      id: toSafeText(sender?.id || '', 80),
+      origin: toSafeText(sender?.origin || '', 160),
+      url: toSafeText(sender?.url || '', 220)
+    };
+
+    if (!type) {
+      logWarn('onMessageExternal:invalid', {
+        sender: senderMeta,
+        reason: 'missing_type'
+      });
+      return buildExternalEnvelope('', {
+        ok: false,
+        error: 'type requerido. Usa HELP para ver tools disponibles.'
+      });
+    }
+
+    logDebug('onMessageExternal:received', {
+      type,
+      sender: senderMeta,
+      args
+    });
+
+    if (type === EXTERNAL_MESSAGE_TYPES.HELP) {
+      return buildExternalHelpPayload();
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.OPEN_WHATSAPP) {
+      return handleExternalOpenWhatsapp(args);
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.OPEN_URL) {
+      return handleExternalOpenUrl(args);
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.LIST_TABS) {
+      return runExternalBrowserAction(type, 'listTabs', args, { broadcast: false });
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.FOCUS_TAB) {
+      return runExternalBrowserAction(type, 'focusTab', args, { broadcast: true });
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.CLOSE_TAB) {
+      return runExternalBrowserAction(type, 'closeTab', args, { broadcast: true });
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.GET_RECENT_HISTORY) {
+      return runExternalBrowserAction(type, 'getRecentHistory', args, { broadcast: false });
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.CLOSE_NON_PRODUCTIVITY_TABS) {
+      return runExternalBrowserAction(type, 'closeNonProductivityTabs', args, { broadcast: true });
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.WHATSAPP_GET_INBOX) {
+      return runExternalWhatsappAction(type, 'getInbox', args);
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.WHATSAPP_OPEN_CHAT) {
+      return runExternalWhatsappAction(type, 'openChat', args);
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.WHATSAPP_SEND_MESSAGE) {
+      return runExternalWhatsappAction(type, 'sendMessage', args);
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE) {
+      return runExternalWhatsappAction(type, 'openChatAndSendMessage', args);
+    }
+
+    return buildExternalEnvelope(type, {
+      ok: false,
+      error: `Tool externa no soportada: ${type}. Usa HELP para listado.`
     });
   }
 
@@ -1105,28 +1618,67 @@
         return false;
       }
 
-      chrome.tabs.sendMessage(
-        tabId,
-        {
-          type: MESSAGE_TYPES.SITE_ACTION,
-          action,
-          site,
-          args
-        },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            sendResponse({ ok: false, error: chrome.runtime.lastError.message || 'No se pudo ejecutar accion.' });
-            return;
-          }
+      runSiteActionInTab(tabId, site, action, args).then((response) => {
+        sendResponse(response || { ok: false, error: 'Sin respuesta del content script.' });
+      });
 
-          sendResponse(response || { ok: false, error: 'Sin respuesta del content script.' });
-        }
-      );
+      return true;
+    }
+
+    if (isExternalMessageType(message.type) && isTrustedRetoolSender(sender)) {
+      Promise.resolve(runExternalMessage(message, sender))
+        .then((response) => {
+          sendResponse(response || buildExternalEnvelope('', { ok: false, error: 'Sin respuesta.' }));
+        })
+        .catch((error) => {
+          const messageText = error instanceof Error ? error.message : 'Error ejecutando tool puente Retool.';
+          logWarn('onMessage:retool_bridge:error', {
+            type: String(message?.type || '').trim(),
+            error: messageText
+          });
+          sendResponse({
+            ok: false,
+            success: false,
+            type: String(message?.type || '').trim().toUpperCase(),
+            error: messageText
+          });
+        });
 
       return true;
     }
 
     return false;
+  });
+
+  chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') {
+      sendResponse({
+        ok: false,
+        success: false,
+        error: 'Payload invalido.'
+      });
+      return false;
+    }
+
+    Promise.resolve(runExternalMessage(message, sender))
+      .then((response) => {
+        sendResponse(response || buildExternalEnvelope('', { ok: false, error: 'Sin respuesta.' }));
+      })
+      .catch((error) => {
+        const messageText = error instanceof Error ? error.message : 'Error ejecutando tool externa.';
+        logWarn('onMessageExternal:error', {
+          type: String(message?.type || '').trim(),
+          error: messageText
+        });
+        sendResponse({
+          ok: false,
+          success: false,
+          type: String(message?.type || '').trim().toUpperCase(),
+          error: messageText
+        });
+      });
+
+    return true;
   });
 
   enablePanelOnActionClick();
