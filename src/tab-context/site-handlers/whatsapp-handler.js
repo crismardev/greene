@@ -639,13 +639,191 @@
     return text ? 'text' : 'empty';
   }
 
+  function createEmptyMessageEnrichment() {
+    return {
+      transcript: '',
+      ocrText: '',
+      mediaCaption: '',
+      imageAlt: '',
+      fileName: '',
+      audioDuration: ''
+    };
+  }
+
+  function collectTextValuesFromNode(node, limit = 260) {
+    if (!node || typeof node !== 'object') {
+      return [];
+    }
+
+    const rawValues = [
+      node.getAttribute?.('aria-label') || '',
+      node.getAttribute?.('title') || '',
+      node.getAttribute?.('alt') || '',
+      node.textContent || ''
+    ];
+
+    const unique = [];
+    const seen = new Set();
+    for (const value of rawValues) {
+      const token = toSafeText(value, limit);
+      if (!token || seen.has(token)) {
+        continue;
+      }
+      seen.add(token);
+      unique.push(token);
+    }
+
+    return unique;
+  }
+
+  function collectCandidateTextsFromRow(row, selectors, options = {}) {
+    if (!row) {
+      return [];
+    }
+
+    const list = Array.isArray(selectors) ? selectors : [];
+    const limit = Math.max(20, Number(options.limit) || 260);
+    const maxItems = Math.max(1, Number(options.maxItems) || 8);
+    const unique = [];
+    const seen = new Set();
+
+    for (const selector of list) {
+      if (!selector) {
+        continue;
+      }
+
+      const nodes = row.querySelectorAll(selector);
+      for (const node of nodes) {
+        const values = collectTextValuesFromNode(node, limit);
+        for (const value of values) {
+          const normalized = value.toLowerCase();
+          if (seen.has(normalized)) {
+            continue;
+          }
+
+          seen.add(normalized);
+          unique.push(value);
+          if (unique.length >= maxItems) {
+            return unique;
+          }
+        }
+      }
+    }
+
+    return unique;
+  }
+
+  function isLikelyUiNoiseText(value) {
+    const text = toSafeText(value || '', 320).toLowerCase();
+    if (!text) {
+      return true;
+    }
+
+    const blockedTokens = [
+      'mensaje de voz',
+      'voice message',
+      'play',
+      'pause',
+      'reproducir',
+      'pausar',
+      'download',
+      'descargar',
+      'audio-play',
+      'audio',
+      'reenviado',
+      'forwarded'
+    ];
+
+    return blockedTokens.some((token) => text === token || text.startsWith(`${token} `));
+  }
+
+  function extractMessageEnrichmentByKind(row, kind, baseText = '') {
+    const enrichment = createEmptyMessageEnrichment();
+    if (!row) {
+      return enrichment;
+    }
+
+    const mediaCaption = toSafeText(row.querySelector('[data-testid="media-caption"]')?.textContent || '', 320);
+    if (mediaCaption) {
+      enrichment.mediaCaption = mediaCaption;
+    }
+
+    if (kind === 'audio') {
+      const duration = toSafeText(row.querySelector('.x1fesggd')?.textContent || '', 30);
+      if (duration) {
+        enrichment.audioDuration = duration;
+      }
+
+      const transcriptCandidates = collectCandidateTextsFromRow(
+        row,
+        [
+          '[data-testid*="transcription"]',
+          '[data-testid*="audio-transcription"]',
+          '[aria-label*="transcrip"]',
+          '[aria-label*="transcript"]',
+          'div.copyable-text span.selectable-text',
+          'span.selectable-text span'
+        ],
+        { limit: 320, maxItems: 8 }
+      );
+
+      const baseCandidate = toSafeText(baseText, 320);
+      if (baseCandidate) {
+        transcriptCandidates.unshift(baseCandidate);
+      }
+
+      const transcript = transcriptCandidates
+        .map((item) => toSafeText(item, 320))
+        .filter((item) => item && !isLikelyUiNoiseText(item) && item !== mediaCaption && item !== duration)
+        .join(' ')
+        .trim();
+
+      if (transcript) {
+        enrichment.transcript = toSafeText(transcript, 480);
+      }
+    }
+
+    if (kind === 'image' || kind === 'video' || kind === 'media_caption') {
+      const ocrCandidates = collectCandidateTextsFromRow(
+        row,
+        [
+          'img[alt]',
+          'img[title]',
+          'img[aria-label]',
+          '[role="img"][aria-label]',
+          '[aria-label*="image"]',
+          '[aria-label*="imagen"]',
+          '[data-testid="media-caption"]'
+        ],
+        { limit: 320, maxItems: 8 }
+      ).filter((item) => !isLikelyUiNoiseText(item));
+
+      if (ocrCandidates.length) {
+        enrichment.imageAlt = toSafeText(ocrCandidates[0], 220);
+        enrichment.ocrText = toSafeText(ocrCandidates.join(' | '), 560);
+      }
+    }
+
+    if (kind === 'document') {
+      const fileName = toSafeText(row.querySelector('.x13faqbe._ao3e')?.textContent || '', 140);
+      if (fileName) {
+        enrichment.fileName = fileName;
+      }
+    }
+
+    return enrichment;
+  }
+
   function summarizeMessageForLog(item, index) {
     return {
       idx: index,
       id: toSafeText(item?.id || '', 96),
       role: item?.role === 'me' ? 'me' : 'contact',
+      kind: toSafeText(item?.kind || '', 24),
       timestamp: toSafeText(item?.timestamp || '', 72),
       chars: String(item?.text || '').length,
+      transcriptChars: String(item?.enriched?.transcript || '').length,
+      ocrChars: String(item?.enriched?.ocrText || '').length,
       preview: toSafeText(item?.text || '', 140)
     };
   }
@@ -714,10 +892,16 @@
     );
   }
 
-  function buildMessageTextByKind(row, kind, defaultText) {
+  function buildMessageTextByKind(row, kind, defaultText, enrichment = {}) {
+    const safeEnrichment = enrichment && typeof enrichment === 'object' ? enrichment : createEmptyMessageEnrichment();
     const baseText = toSafeText(defaultText || '', 800);
     if (kind === 'audio') {
-      const duration = toSafeText(row?.querySelector('.x1fesggd')?.textContent || '', 30);
+      const duration = toSafeText(safeEnrichment.audioDuration || row?.querySelector('.x1fesggd')?.textContent || '', 30);
+      const transcript = toSafeText(safeEnrichment.transcript || '', 320);
+      if (transcript) {
+        return duration ? `Mensaje de voz (${duration}) - ${transcript}` : `Mensaje de voz - ${transcript}`;
+      }
+
       return duration ? `Mensaje de voz (${duration})` : 'Mensaje de voz';
     }
 
@@ -726,20 +910,29 @@
     }
 
     if (kind === 'image') {
+      const ocrText = toSafeText(safeEnrichment.ocrText || safeEnrichment.mediaCaption || '', 360);
+      if (ocrText && !baseText) {
+        return `[Imagen] ${ocrText}`;
+      }
       return baseText || '[Imagen]';
     }
 
     if (kind === 'document') {
-      const fileName = toSafeText(row?.querySelector('.x13faqbe._ao3e')?.textContent || '', 120);
+      const fileName = toSafeText(
+        safeEnrichment.fileName || row?.querySelector('.x13faqbe._ao3e')?.textContent || '',
+        120
+      );
       return fileName ? `Documento: ${fileName}` : baseText || 'Documento adjunto';
     }
 
     if (kind === 'video') {
-      return baseText || '[Video]';
+      const mediaCaption = toSafeText(safeEnrichment.mediaCaption || safeEnrichment.ocrText || '', 260);
+      return baseText || (mediaCaption ? `[Video] ${mediaCaption}` : '[Video]');
     }
 
     if (kind === 'media_caption') {
-      return baseText || '[Contenido multimedia]';
+      const mediaCaption = toSafeText(safeEnrichment.mediaCaption || safeEnrichment.ocrText || '', 260);
+      return baseText || mediaCaption || '[Contenido multimedia]';
     }
 
     return baseText;
@@ -761,7 +954,8 @@
         const role = row.classList.contains('message-out') || row.querySelector('.message-out') ? 'me' : 'contact';
         const baseText = getMessageText(row);
         const contentKind = detectMessageContentKind(row, baseText);
-        const text = buildMessageTextByKind(row, contentKind, baseText);
+        const enrichment = extractMessageEnrichmentByKind(row, contentKind, baseText);
+        const text = buildMessageTextByKind(row, contentKind, baseText, enrichment);
         const timestamp = prePlainMeta.time || getFallbackMessageTime(row) || parseMessageTimestamp(prePlain);
         const id = buildStableMessageId({
           row,
@@ -785,7 +979,16 @@
           id,
           role,
           text: toSafeText(text, 800),
-          timestamp
+          timestamp,
+          kind: contentKind,
+          enriched: {
+            transcript: toSafeText(enrichment.transcript || '', 480),
+            ocrText: toSafeText(enrichment.ocrText || '', 560),
+            mediaCaption: toSafeText(enrichment.mediaCaption || '', 320),
+            imageAlt: toSafeText(enrichment.imageAlt || '', 220),
+            fileName: toSafeText(enrichment.fileName || '', 140),
+            audioDuration: toSafeText(enrichment.audioDuration || '', 30)
+          }
         };
       })
       .filter(Boolean);
@@ -860,8 +1063,76 @@
     return tail.some((item) => item && item.role === 'me' && toSafeText(item.text || '', 1200).toLowerCase() === normalizedText);
   }
 
-  function getInboxList(options = {}) {
+  function normalizeLookupToken(value) {
+    const source = toSafeText(value || '', 320).toLowerCase();
+    if (!source) {
+      return '';
+    }
+
+    return source
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function normalizeDigitsToken(value) {
+    const source = String(value || '')
+      .trim()
+      .replace(/\D/g, '');
+    return source || '';
+  }
+
+  function toStringArray(value, limit = 24) {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => toSafeText(item || '', 220))
+        .filter(Boolean)
+        .slice(0, limit);
+    }
+
+    const token = toSafeText(value || '', 220);
+    return token ? [token] : [];
+  }
+
+  function inferInboxItemKind(item, title = '', phone = '') {
+    const safeTitle = normalizeLookupToken(title);
+    const safePhone = normalizeDigitsToken(phone);
+    const rowText = normalizeLookupToken(item?.getAttribute?.('aria-label') || item?.textContent || '');
+
+    const hasGroupIcon = Boolean(
+      item?.querySelector?.(
+        'span[data-icon*="group"], [data-testid*="group"], [aria-label*="group"], [aria-label*="grupo"]'
+      )
+    );
+    const hasPersonIcon = Boolean(
+      item?.querySelector?.(
+        'span[data-icon*="default-user"], span[data-icon*="person"], [data-testid*="default-user"], [data-testid*="person"]'
+      )
+    );
+
+    if (hasGroupIcon) {
+      return 'group';
+    }
+
+    if (safePhone) {
+      return 'contact';
+    }
+
+    if (hasPersonIcon) {
+      return 'contact';
+    }
+
+    if (/\bgrupo\b|\bgroup\b/.test(safeTitle) || /\bgrupo\b|\bgroup\b/.test(rowText)) {
+      return 'group';
+    }
+
+    return 'unknown';
+  }
+
+  function getInboxEntries(options = {}) {
     const limit = Math.max(1, Number(options.limit) || 40);
+    const includeNode = Boolean(options.includeNode);
     const items = Array.from(document.querySelectorAll('#pane-side [role="listitem"]'));
 
     const parsed = items
@@ -884,11 +1155,26 @@
           }
         }
 
+        const phone = extractPhoneCandidate(title);
+        const kind = inferInboxItemKind(item, title, phone);
+        const normalizedTitle = normalizeLookupToken(title);
+        const normalizedPreview = normalizeLookupToken(preview);
+        const phoneDigits = normalizeDigitsToken(phone);
+        const searchHaystack = [normalizedTitle, normalizedPreview, phoneDigits].filter(Boolean).join(' ');
+
         return {
           id: `${index}-${title}`,
+          rank: index,
           title,
-          phone: extractPhoneCandidate(title),
-          preview
+          phone,
+          preview,
+          kind,
+          isGroup: kind === 'group',
+          normalizedTitle,
+          normalizedPreview,
+          phoneDigits,
+          searchHaystack,
+          row: includeNode ? item : null
         };
       })
       .filter(Boolean);
@@ -898,6 +1184,21 @@
     }
 
     return parsed.slice(0, limit);
+  }
+
+  function getInboxList(options = {}) {
+    return getInboxEntries({
+      limit: Math.max(1, Number(options.limit) || 40),
+      includeNode: false
+    }).map((entry) => ({
+      id: entry.id,
+      rank: entry.rank,
+      title: entry.title,
+      phone: entry.phone,
+      preview: entry.preview,
+      kind: entry.kind,
+      isGroup: entry.isGroup
+    }));
   }
 
   function getSendButton() {
@@ -935,6 +1236,33 @@
     return null;
   }
 
+  function dispatchComposerInput(editor, inputType = 'insertText', data = null) {
+    if (!editor) {
+      return;
+    }
+
+    try {
+      editor.dispatchEvent(
+        new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          data,
+          inputType
+        })
+      );
+      return;
+    } catch (_) {
+      // Ignore when InputEvent constructor is not available.
+    }
+
+    editor.dispatchEvent(
+      new Event('input', {
+        bubbles: true,
+        cancelable: true
+      })
+    );
+  }
+
   function insertTextIntoComposer(editor, message) {
     if (!editor) {
       return {
@@ -944,6 +1272,15 @@
     }
 
     const safeMessage = String(message || '');
+    const targetComposerText = toSafeText(safeMessage, 2200);
+    const initialComposerText = toSafeText(editor.textContent || '', 2200);
+    if (targetComposerText && initialComposerText === targetComposerText) {
+      return {
+        inserted: true,
+        mode: 'already_present'
+      };
+    }
+
     editor.focus();
 
     try {
@@ -951,7 +1288,6 @@
       if (selection) {
         const range = document.createRange();
         range.selectNodeContents(editor);
-        range.collapse(false);
         selection.removeAllRanges();
         selection.addRange(range);
       }
@@ -969,18 +1305,14 @@
     }
 
     const currentComposerText = toSafeText(editor.textContent || '', 2200);
-    if (currentComposerText !== toSafeText(safeMessage, 2200)) {
+    if (currentComposerText !== targetComposerText) {
       editor.textContent = safeMessage;
-      editor.dispatchEvent(
-        new InputEvent('input', {
-          bubbles: true,
-          cancelable: true,
-          data: safeMessage,
-          inputType: 'insertText'
-        })
-      );
-      mode = insertedByExec ? 'execCommand+inputFallback' : 'inputFallback';
+      dispatchComposerInput(editor, 'insertReplacementText', null);
+      mode = insertedByExec ? 'execCommand+replaceFallback' : 'replaceFallback';
     } else {
+      if (!insertedByExec) {
+        dispatchComposerInput(editor, 'insertText', null);
+      }
       mode = insertedByExec ? 'execCommand' : 'selectionInsert';
     }
 
@@ -1009,6 +1341,57 @@
     editor.dispatchEvent(new KeyboardEvent('keydown', payload));
     editor.dispatchEvent(new KeyboardEvent('keypress', payload));
     editor.dispatchEvent(new KeyboardEvent('keyup', payload));
+  }
+
+  async function waitForReadySendButton(timeoutMs = 900, intervalMs = 60) {
+    const deadline = Date.now() + Math.max(120, Number(timeoutMs) || 900);
+    const waitMs = Math.max(30, Number(intervalMs) || 60);
+
+    while (Date.now() < deadline) {
+      const button = getSendButton();
+      if (button && !button.disabled) {
+        return button;
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, waitMs);
+      });
+    }
+
+    const finalButton = getSendButton();
+    if (finalButton && !finalButton.disabled) {
+      return finalButton;
+    }
+
+    return null;
+  }
+
+  async function waitForComposerEditor(timeoutMs = 1200, intervalMs = 60) {
+    const deadline = Date.now() + Math.max(200, Number(timeoutMs) || 1200);
+    const waitMs = Math.max(30, Number(intervalMs) || 60);
+
+    while (Date.now() < deadline) {
+      const editor = getComposerEditor();
+      if (editor) {
+        return editor;
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, waitMs);
+      });
+    }
+
+    return getComposerEditor();
+  }
+
+  function composerContainsText(editor, text) {
+    if (!editor) {
+      return false;
+    }
+
+    const normalizedComposer = toSafeText(editor.textContent || '', 1200).toLowerCase();
+    const normalizedText = toSafeText(text || '', 1200).toLowerCase();
+    return Boolean(normalizedText) && normalizedComposer === normalizedText;
   }
 
   async function waitForOutgoingEcho(text, timeoutMs = 2600, intervalMs = 180) {
@@ -1078,7 +1461,7 @@
       };
     }
 
-    const editor = getComposerEditor();
+    const editor = await waitForComposerEditor(1700, 70);
     if (!editor) {
       return {
         ok: false,
@@ -1088,30 +1471,61 @@
 
     const composeResult = insertTextIntoComposer(editor, message);
 
-    const sendButton = getSendButton();
-    const sendButtonDisabled = Boolean(sendButton?.disabled);
+    const initialSendButton = getSendButton();
+    const initialSendButtonDisabled = Boolean(initialSendButton?.disabled);
+    let sendButtonUsed = null;
     let dispatchMethod = 'enter_key';
-    if (sendButton && !sendButtonDisabled) {
+    const readySendButton = await waitForReadySendButton(950, 70);
+    if (readySendButton) {
       dispatchMethod = 'send_button';
-      sendButton.click();
+      sendButtonUsed = readySendButton;
+      readySendButton.click();
     } else {
       dispatchComposerEnter(editor);
+      const fallbackButton = await waitForReadySendButton(550, 70);
+      if (fallbackButton) {
+        dispatchMethod = 'enter_then_send_button';
+        sendButtonUsed = fallbackButton;
+        fallbackButton.click();
+      }
     }
 
     const confirmedInTimeline = await waitForOutgoingEcho(message, 2600, 180);
+    const composerStillHasMessage = composerContainsText(editor, message);
     if (confirmedInTimeline) {
       lastSentFingerprint = fingerprint;
       lastSentAt = Date.now();
     }
 
+    const sendButtonAfterDispatch = getSendButton();
+    const sendButtonDisabled = Boolean(sendButtonAfterDispatch?.disabled);
+
     logDebug('send_message:dispatch_result', {
       chatKey: toSafeText(chatKey, 180),
       composeMode: composeResult.mode,
       dispatchMethod,
-      sendButtonFound: Boolean(sendButton),
+      sendButtonFound: Boolean(initialSendButton),
+      sendButtonUsed: Boolean(sendButtonUsed),
+      sendButtonInitiallyDisabled: initialSendButtonDisabled,
       sendButtonDisabled,
+      composerStillHasMessage,
       confirmedInTimeline
     });
+
+    if (!confirmedInTimeline && composerStillHasMessage) {
+      return {
+        ok: false,
+        error: 'No se pudo enviar automaticamente. El mensaje quedo escrito en el chat.',
+        result: {
+          sent: false,
+          confirmed: false,
+          dispatchMethod,
+          composeMode: composeResult.mode,
+          sendButtonDisabled,
+          text: message
+        }
+      };
+    }
 
     return {
       ok: true,
@@ -1122,6 +1536,717 @@
         composeMode: composeResult.mode,
         sendButtonDisabled,
         text: message
+      }
+    };
+  }
+
+  function isNodeVisible(node) {
+    if (!node || !(node instanceof Element)) {
+      return false;
+    }
+
+    const rect = node.getBoundingClientRect();
+    if (!rect || rect.width < 1 || rect.height < 1) {
+      return false;
+    }
+
+    const style = window.getComputedStyle(node);
+    if (!style) {
+      return true;
+    }
+
+    if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') {
+      return false;
+    }
+
+    return true;
+  }
+
+  function dispatchLeftClick(node) {
+    if (!node || !(node instanceof Element)) {
+      return false;
+    }
+
+    const rect = node.getBoundingClientRect();
+    const clientX = rect.left + Math.max(1, Math.min(rect.width - 1, rect.width / 2));
+    const clientY = rect.top + Math.max(1, Math.min(rect.height - 1, rect.height / 2));
+    const payload = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons: 1,
+      clientX,
+      clientY
+    };
+
+    node.dispatchEvent(new MouseEvent('mouseover', payload));
+    node.dispatchEvent(new MouseEvent('mousemove', payload));
+    node.dispatchEvent(new MouseEvent('mousedown', payload));
+    node.dispatchEvent(new MouseEvent('mouseup', payload));
+    node.dispatchEvent(new MouseEvent('click', payload));
+    return true;
+  }
+
+  function dispatchContextMenu(node) {
+    if (!node || !(node instanceof Element)) {
+      return false;
+    }
+
+    const rect = node.getBoundingClientRect();
+    const clientX = rect.left + Math.max(1, Math.min(rect.width - 1, rect.width / 2));
+    const clientY = rect.top + Math.max(1, Math.min(rect.height - 1, rect.height / 2));
+    const payload = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 2,
+      buttons: 2,
+      clientX,
+      clientY
+    };
+
+    node.dispatchEvent(new MouseEvent('mousedown', payload));
+    node.dispatchEvent(new MouseEvent('mouseup', payload));
+    node.dispatchEvent(new MouseEvent('contextmenu', payload));
+    return true;
+  }
+
+  function sanitizeInboxEntry(entry) {
+    const source = entry && typeof entry === 'object' ? entry : {};
+    return {
+      id: toSafeText(source.id || '', 120),
+      rank: Math.max(0, Number(source.rank) || 0),
+      title: toSafeText(source.title || '', 180),
+      phone: toSafeText(source.phone || '', 48),
+      preview: toSafeText(source.preview || '', 220),
+      kind: toSafeText(source.kind || 'unknown', 24) || 'unknown',
+      isGroup: Boolean(source.kind === 'group')
+    };
+  }
+
+  function getOpenChatQueries(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const set = new Set();
+    const add = (value) => {
+      const token = toSafeText(value || '', 220);
+      if (!token) {
+        return;
+      }
+      set.add(token);
+    };
+
+    add(safeArgs.query);
+    add(safeArgs.chat);
+    add(safeArgs.name);
+    add(safeArgs.title);
+    add(safeArgs.search);
+    for (const item of toStringArray(safeArgs.queries, 20)) {
+      add(item);
+    }
+
+    return Array.from(set);
+  }
+
+  function scoreInboxEntryForQuery(entry, query, phoneDigits, options = {}) {
+    const safeEntry = entry && typeof entry === 'object' ? entry : {};
+    const normalizedQuery = normalizeLookupToken(query);
+    const normalizedPhone = normalizeDigitsToken(phoneDigits);
+    const normalizedTitle = String(safeEntry.normalizedTitle || '');
+    const searchHaystack = String(safeEntry.searchHaystack || '');
+    const entryPhone = String(safeEntry.phoneDigits || '');
+    const preferGroups = Boolean(options.preferGroups);
+    const preferContacts = Boolean(options.preferContacts);
+    let score = 0;
+    let matched = false;
+
+    if (normalizedQuery) {
+      const queryTokens = normalizedQuery.split(' ').filter(Boolean);
+      const exactMatch = normalizedTitle === normalizedQuery;
+      const startsWith = !exactMatch && normalizedTitle.startsWith(normalizedQuery);
+      const includesQuery = !exactMatch && !startsWith && searchHaystack.includes(normalizedQuery);
+      const matchedTokens = queryTokens.filter((token) => searchHaystack.includes(token)).length;
+
+      if (exactMatch) {
+        score += 240;
+        matched = true;
+      } else if (startsWith) {
+        score += 170;
+        matched = true;
+      } else if (includesQuery) {
+        score += 120;
+        matched = true;
+      } else if (matchedTokens > 0) {
+        score += matchedTokens * 45;
+        matched = true;
+      }
+    }
+
+    if (normalizedPhone) {
+      if (entryPhone && normalizedPhone === entryPhone) {
+        score += 260;
+        matched = true;
+      } else if (entryPhone && (entryPhone.endsWith(normalizedPhone) || normalizedPhone.endsWith(entryPhone))) {
+        score += 180;
+        matched = true;
+      }
+    }
+
+    if (!normalizedQuery && !normalizedPhone) {
+      score += 20;
+      matched = true;
+    }
+
+    if (preferGroups) {
+      score += safeEntry.kind === 'group' ? 26 : safeEntry.kind === 'unknown' ? -8 : -18;
+    }
+
+    if (preferContacts) {
+      score += safeEntry.kind === 'contact' ? 26 : safeEntry.kind === 'unknown' ? -8 : -18;
+    }
+
+    const rankBonus = Math.max(0, 18 - Math.max(0, Number(safeEntry.rank) || 0));
+    score += rankBonus;
+
+    return {
+      matched,
+      score
+    };
+  }
+
+  function pickInboxEntry(entries, args = {}) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (!list.length) {
+      return null;
+    }
+
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const chatIndex = Math.round(Number(safeArgs.chatIndex));
+    if (Number.isFinite(chatIndex) && chatIndex >= 1 && chatIndex <= list.length) {
+      return list[chatIndex - 1];
+    }
+
+    const phoneDigits = normalizeDigitsToken(safeArgs.phone || safeArgs.chatPhone || '');
+    const queries = getOpenChatQueries(safeArgs);
+    const preferToken = normalizeLookupToken(safeArgs.prefer || safeArgs.scope || '');
+    const preferGroups = Boolean(safeArgs.preferGroups || preferToken === 'groups' || preferToken === 'group');
+    const preferContacts = Boolean(safeArgs.preferContacts || preferToken === 'contacts' || preferToken === 'contact');
+    let best = null;
+
+    for (const entry of list) {
+      let entryMatched = false;
+      let entryScore = -Infinity;
+
+      if (!queries.length) {
+        const scored = scoreInboxEntryForQuery(entry, '', phoneDigits, { preferGroups, preferContacts });
+        entryMatched = scored.matched;
+        entryScore = scored.score;
+      } else {
+        for (const query of queries) {
+          const scored = scoreInboxEntryForQuery(entry, query, phoneDigits, { preferGroups, preferContacts });
+          if (!scored.matched) {
+            continue;
+          }
+
+          entryMatched = true;
+          if (scored.score > entryScore) {
+            entryScore = scored.score;
+          }
+        }
+      }
+
+      if (!entryMatched) {
+        continue;
+      }
+
+      if (!best || entryScore > best.score) {
+        best = {
+          entry,
+          score: entryScore
+        };
+      }
+    }
+
+    return best ? best.entry : null;
+  }
+
+  async function waitForChatOpen(entry, timeoutMs = 1900, intervalMs = 90) {
+    const deadline = Date.now() + Math.max(300, Number(timeoutMs) || 1900);
+    const waitMs = Math.max(40, Number(intervalMs) || 90);
+    const safeEntry = entry && typeof entry === 'object' ? entry : {};
+    const expectedTitle = String(safeEntry.normalizedTitle || normalizeLookupToken(safeEntry.title || ''));
+    const expectedPhone = String(safeEntry.phoneDigits || normalizeDigitsToken(safeEntry.phone || ''));
+
+    while (Date.now() < deadline) {
+      const currentTitle = normalizeLookupToken(getCurrentChatTitle());
+      const currentPhone = normalizeDigitsToken(getCurrentChatPhone());
+
+      const phoneMatch = Boolean(
+        expectedPhone &&
+          currentPhone &&
+          (expectedPhone === currentPhone || expectedPhone.endsWith(currentPhone) || currentPhone.endsWith(expectedPhone))
+      );
+      const titleMatch = Boolean(
+        expectedTitle &&
+          currentTitle &&
+          (expectedTitle === currentTitle || expectedTitle.includes(currentTitle) || currentTitle.includes(expectedTitle))
+      );
+
+      if (phoneMatch || titleMatch) {
+        return true;
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, waitMs);
+      });
+    }
+
+    return false;
+  }
+
+  async function openChatByQuery(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const searchLimit = Math.max(20, Math.min(260, Number(safeArgs.searchLimit) || 120));
+    const entries = getInboxEntries({ limit: searchLimit, includeNode: true });
+    if (!entries.length) {
+      return {
+        ok: false,
+        error: 'No se pudo leer la lista de chats en WhatsApp.'
+      };
+    }
+
+    const selected = pickInboxEntry(entries, safeArgs);
+    if (!selected || !selected.row) {
+      return {
+        ok: false,
+        error: 'No se encontro un chat que coincida con la busqueda.',
+        result: {
+          available: entries.slice(0, 12).map((item) => sanitizeInboxEntry(item))
+        }
+      };
+    }
+
+    selected.row.scrollIntoView({ block: 'center', inline: 'nearest' });
+    const clicked = dispatchLeftClick(selected.row);
+    if (!clicked) {
+      return {
+        ok: false,
+        error: 'No se pudo abrir el chat seleccionado.',
+        result: {
+          selected: sanitizeInboxEntry(selected)
+        }
+      };
+    }
+
+    const confirmed = await waitForChatOpen(selected, Number(safeArgs.timeoutMs) || 2100, 90);
+    return {
+      ok: true,
+      result: {
+        opened: true,
+        confirmed,
+        selected: sanitizeInboxEntry(selected),
+        query: getOpenChatQueries(safeArgs)
+      }
+    };
+  }
+
+  function getInboxRowMenuButton(row) {
+    if (!row) {
+      return null;
+    }
+
+    const selectors = [
+      'button[aria-label="Menu"]',
+      'button[aria-label="Menú"]',
+      'button[aria-label="Más opciones"]',
+      'button[aria-label="More options"]',
+      '[data-testid="chatlist-item-menu"]',
+      'span[data-icon="down-context"]'
+    ];
+
+    for (const selector of selectors) {
+      const node = row.querySelector(selector);
+      if (!node) {
+        continue;
+      }
+
+      if (node.matches('button')) {
+        return node;
+      }
+
+      const button = node.closest('button');
+      if (button) {
+        return button;
+      }
+
+      return node;
+    }
+
+    return null;
+  }
+
+  function getMenuActionLabel(node) {
+    if (!node) {
+      return '';
+    }
+
+    const pieces = [
+      node.getAttribute?.('aria-label') || '',
+      node.getAttribute?.('title') || '',
+      node.textContent || ''
+    ]
+      .map((value) => normalizeLookupToken(value))
+      .filter(Boolean);
+
+    return pieces.join(' ').trim();
+  }
+
+  function isArchiveActionLabel(value) {
+    const label = normalizeLookupToken(value || '');
+    if (!label) {
+      return false;
+    }
+
+    if (label.includes('desarchivar') || label.includes('unarchive')) {
+      return false;
+    }
+
+    return label.includes('archivar') || label.includes('archive');
+  }
+
+  function isUnarchiveActionLabel(value) {
+    const label = normalizeLookupToken(value || '');
+    if (!label) {
+      return false;
+    }
+
+    return label.includes('desarchivar') || label.includes('unarchive');
+  }
+
+  function getVisibleMenuActionNodes() {
+    const selectors = [
+      'div[role="menu"] [role="button"]',
+      'div[role="menu"] button',
+      'div[role="menu"] [tabindex]',
+      '[data-animate-dropdown] [role="button"]',
+      '[data-animate-dropdown] button',
+      '[data-testid*="menu"] [role="button"]',
+      '[data-testid*="menu"] button',
+      '[data-testid*="menu"] [tabindex]'
+    ];
+
+    const unique = new Set();
+    const result = [];
+    for (const selector of selectors) {
+      for (const node of document.querySelectorAll(selector)) {
+        if (!(node instanceof Element) || unique.has(node) || !isNodeVisible(node)) {
+          continue;
+        }
+
+        const hasMenuParent = Boolean(node.closest('div[role="menu"], [data-animate-dropdown], [data-testid*="menu"]'));
+        if (!hasMenuParent) {
+          continue;
+        }
+
+        const label = getMenuActionLabel(node);
+        if (!label) {
+          continue;
+        }
+
+        unique.add(node);
+        result.push(node);
+      }
+    }
+
+    return result;
+  }
+
+  function findVisibleMenuActionNode(matcher) {
+    const test = typeof matcher === 'function' ? matcher : null;
+    if (!test) {
+      return null;
+    }
+
+    const nodes = getVisibleMenuActionNodes();
+    for (const node of nodes) {
+      const label = getMenuActionLabel(node);
+      if (!label) {
+        continue;
+      }
+
+      if (test(label, node)) {
+        return node;
+      }
+    }
+
+    return null;
+  }
+
+  async function waitForMenuActionNode(matcher, timeoutMs = 900, intervalMs = 70) {
+    const deadline = Date.now() + Math.max(150, Number(timeoutMs) || 900);
+    const waitMs = Math.max(30, Number(intervalMs) || 70);
+
+    while (Date.now() < deadline) {
+      const node = findVisibleMenuActionNode(matcher);
+      if (node) {
+        return node;
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, waitMs);
+      });
+    }
+
+    return findVisibleMenuActionNode(matcher);
+  }
+
+  function closeOpenMenus() {
+    const payload = {
+      bubbles: true,
+      cancelable: true,
+      key: 'Escape',
+      code: 'Escape',
+      which: 27,
+      keyCode: 27
+    };
+    document.dispatchEvent(new KeyboardEvent('keydown', payload));
+    document.dispatchEvent(new KeyboardEvent('keyup', payload));
+  }
+
+  async function openInboxEntryMenu(entry) {
+    const row = entry?.row;
+    if (!row) {
+      return false;
+    }
+
+    const button = getInboxRowMenuButton(row);
+    if (button) {
+      dispatchLeftClick(button);
+      const foundAfterButton = await waitForMenuActionNode((label) => Boolean(label), 700, 70);
+      if (foundAfterButton) {
+        return true;
+      }
+    }
+
+    dispatchContextMenu(row);
+    const foundAfterContextMenu = await waitForMenuActionNode((label) => Boolean(label), 900, 70);
+    return Boolean(foundAfterContextMenu);
+  }
+
+  async function archiveInboxEntry(entry) {
+    const menuOpened = await openInboxEntryMenu(entry);
+    if (!menuOpened) {
+      return {
+        ok: false,
+        archived: false,
+        alreadyArchived: false,
+        error: 'No se pudo abrir el menu del chat.'
+      };
+    }
+
+    const archiveAction = await waitForMenuActionNode((label) => isArchiveActionLabel(label), 800, 70);
+    if (!archiveAction) {
+      const alreadyArchived = Boolean(findVisibleMenuActionNode((label) => isUnarchiveActionLabel(label)));
+      closeOpenMenus();
+      return {
+        ok: alreadyArchived,
+        archived: false,
+        alreadyArchived,
+        error: alreadyArchived ? '' : 'No se encontro la opcion de archivar para este chat.'
+      };
+    }
+
+    dispatchLeftClick(archiveAction);
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, 130);
+    });
+
+    return {
+      ok: true,
+      archived: true,
+      alreadyArchived: false,
+      error: ''
+    };
+  }
+
+  function normalizeArchiveScope(value) {
+    const token = normalizeLookupToken(value || '');
+    if (!token) {
+      return 'all';
+    }
+
+    if (token === 'groups' || token === 'group' || token === 'grupos' || token === 'grupo') {
+      return 'groups';
+    }
+
+    if (token === 'contacts' || token === 'contact' || token === 'personas' || token === 'persona') {
+      return 'contacts';
+    }
+
+    return 'all';
+  }
+
+  function entryMatchesQuery(entry, query) {
+    const safeEntry = entry && typeof entry === 'object' ? entry : {};
+    const normalizedQuery = normalizeLookupToken(query || '');
+    const queryDigits = normalizeDigitsToken(query || '');
+    const haystack = String(safeEntry.searchHaystack || '');
+    const phoneDigits = String(safeEntry.phoneDigits || '');
+
+    if (!normalizedQuery && !queryDigits) {
+      return false;
+    }
+
+    if (normalizedQuery && haystack.includes(normalizedQuery)) {
+      return true;
+    }
+
+    if (queryDigits && phoneDigits && (phoneDigits.endsWith(queryDigits) || queryDigits.endsWith(phoneDigits))) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function filterEntriesForArchive(entries, args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const scope = normalizeArchiveScope(safeArgs.scope || safeArgs.target || '');
+    const includeUnknownAsGroups = Boolean(safeArgs.includeUnknownAsGroups);
+    const queries = toStringArray(safeArgs.queries, 30);
+    if (!queries.length) {
+      const singleQuery = toSafeText(safeArgs.query || safeArgs.search || safeArgs.chat || '', 220);
+      if (singleQuery) {
+        queries.push(singleQuery);
+      }
+    }
+
+    return (Array.isArray(entries) ? entries : []).filter((entry) => {
+      if (!entry || !entry.row) {
+        return false;
+      }
+
+      if (scope === 'groups') {
+        const isGroup = entry.kind === 'group' || (includeUnknownAsGroups && entry.kind === 'unknown');
+        if (!isGroup) {
+          return false;
+        }
+      } else if (scope === 'contacts' && entry.kind !== 'contact') {
+        return false;
+      }
+
+      if (!queries.length) {
+        return true;
+      }
+
+      return queries.some((query) => entryMatchesQuery(entry, query));
+    });
+  }
+
+  async function archiveChatsFromInbox(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const searchLimit = Math.max(20, Math.min(260, Number(safeArgs.searchLimit) || 160));
+    const scope = normalizeArchiveScope(safeArgs.scope || safeArgs.target || '');
+    const dryRun = Boolean(safeArgs.dryRun);
+    const entries = getInboxEntries({ limit: searchLimit, includeNode: true });
+    const filtered = filterEntriesForArchive(entries, safeArgs);
+    const maxItems = Math.max(1, Math.min(80, Number(safeArgs.limit) || filtered.length || 1));
+    const selected = filtered.slice(0, maxItems);
+
+    if (!selected.length) {
+      return {
+        ok: false,
+        error: 'No se encontraron chats que coincidan con el filtro para archivar.',
+        result: {
+          scope,
+          candidates: entries.slice(0, 16).map((item) => sanitizeInboxEntry(item))
+        }
+      };
+    }
+
+    if (dryRun) {
+      return {
+        ok: true,
+        result: {
+          scope,
+          dryRun: true,
+          matched: filtered.length,
+          selected: selected.length,
+          chats: selected.map((item) => sanitizeInboxEntry(item))
+        }
+      };
+    }
+
+    const results = [];
+    let archivedCount = 0;
+    let alreadyArchivedCount = 0;
+    let failedCount = 0;
+
+    for (const entry of selected) {
+      const archiveResult = await archiveInboxEntry(entry);
+      if (archiveResult.archived) {
+        archivedCount += 1;
+      } else if (archiveResult.alreadyArchived) {
+        alreadyArchivedCount += 1;
+      } else if (!archiveResult.ok) {
+        failedCount += 1;
+      }
+
+      results.push({
+        ...sanitizeInboxEntry(entry),
+        ok: Boolean(archiveResult.ok),
+        archived: Boolean(archiveResult.archived),
+        alreadyArchived: Boolean(archiveResult.alreadyArchived),
+        error: toSafeText(archiveResult.error || '', 220)
+      });
+    }
+
+    return {
+      ok: failedCount < selected.length,
+      result: {
+        scope,
+        dryRun: false,
+        requested: maxItems,
+        matched: filtered.length,
+        processed: selected.length,
+        archivedCount,
+        alreadyArchivedCount,
+        failedCount,
+        chats: results
+      }
+    };
+  }
+
+  async function openChatAndSendMessage(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const text = toSafeText(safeArgs.text || safeArgs.message || '', 1800);
+    if (!text) {
+      return {
+        ok: false,
+        error: 'Texto requerido para enviar mensaje.'
+      };
+    }
+
+    const opened = await openChatByQuery(safeArgs);
+    if (!opened || opened.ok !== true) {
+      return opened || { ok: false, error: 'No se pudo abrir el chat para enviar mensaje.' };
+    }
+
+    if (opened.result?.confirmed === false) {
+      return {
+        ok: false,
+        error: 'No se pudo confirmar la apertura del chat objetivo.',
+        result: {
+          openChat: opened.result
+        }
+      };
+    }
+
+    const sent = await sendMessageToCurrentChat(text);
+    return {
+      ...sent,
+      result: {
+        ...(sent?.result && typeof sent.result === 'object' ? sent.result : {}),
+        openChat: opened.result
       }
     };
   }
@@ -1183,15 +2308,33 @@
 
   function buildContextSignature() {
     const context = collectContext({ textLimit: 800 });
-    const chatKey = context.details?.currentChat?.key || '';
-    const messageTail = Array.isArray(context.details?.messages)
-      ? context.details.messages
+    const details = context.details && typeof context.details === 'object' ? context.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const sync = details.sync && typeof details.sync === 'object' ? details.sync : {};
+    const messages = Array.isArray(details.messages) ? details.messages : [];
+    const chatKey = toSafeText(currentChat.key || currentChat.channelId || '', 220);
+    const firstMessageId = toSafeText(messages[0]?.id || '', 220);
+    const lastMessageId = toSafeText(messages.length ? messages[messages.length - 1]?.id || '' : '', 220);
+    const messageTail = messages.length
+      ? messages
           .slice(-3)
-          .map((item) => `${item.role}:${item.text}`)
+          .map((item) => `${item.id || ''}:${item.role}:${item.kind || ''}:${item.text || ''}`)
           .join('|')
       : '';
+    const knownMessageCount = Math.max(0, Number(sync.knownMessageCount) || 0);
+    const missingMessageCount = Math.max(0, Number(sync.missingMessageCount) || 0);
+    const lastVisibleMessageId = toSafeText(sync.lastVisibleMessageId || '', 220);
 
-    return `${chatKey}::${messageTail}`;
+    return [
+      chatKey,
+      `count:${messages.length}`,
+      `known:${knownMessageCount}`,
+      `missing:${missingMessageCount}`,
+      `first:${firstMessageId}`,
+      `last:${lastMessageId}`,
+      `visible:${lastVisibleMessageId}`,
+      `tail:${messageTail}`
+    ].join('::');
   }
 
   function observeContextChanges(onChange) {
@@ -1294,6 +2437,26 @@
 
     if (action === 'sendMessage') {
       return sendMessageToCurrentChat(args.text || '');
+    }
+
+    if (action === 'openChat' || action === 'openChatByQuery') {
+      return openChatByQuery(args);
+    }
+
+    if (action === 'openChatAndSendMessage' || action === 'openAndSendMessage') {
+      return openChatAndSendMessage(args);
+    }
+
+    if (action === 'archiveChats' || action === 'archiveListChats' || action === 'archiveGroups') {
+      const archiveArgs = {
+        ...args
+      };
+
+      if (action === 'archiveGroups' && !archiveArgs.scope) {
+        archiveArgs.scope = 'groups';
+      }
+
+      return archiveChatsFromInbox(archiveArgs);
     }
 
     if (action === 'getAutomationPack') {

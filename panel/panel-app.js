@@ -124,6 +124,8 @@ export function initPanelApp() {
   const MAX_TABS_FOR_AI_SUMMARY = 20;
   const TAB_SUMMARY_MAX_CHARS = 160;
   const INCREMENTAL_HISTORY_INGEST_LIMIT = 80;
+  const MAX_WHATSAPP_PERSISTED_MESSAGES = 640;
+  const WHATSAPP_SUGGESTION_HISTORY_LIMIT = 120;
 
   const DEFAULT_OLLAMA_MODEL = 'gpt-oss:20b';
   const DEFAULT_PRIMARY_MODEL_ID = 'model-local-ollama';
@@ -143,11 +145,12 @@ export function initPanelApp() {
 
   const CHAT_DB = Object.freeze({
     NAME: 'greenstudio-chat-db',
-    VERSION: 4,
+    VERSION: 5,
     CHAT_STORE: 'chat_state',
     CHAT_KEY: 'home_history',
     SETTINGS_STORE: 'panel_settings',
     SETTINGS_KEY: 'panel',
+    WHATSAPP_STORE: 'whatsapp_chat_state',
     SECRET_STORE: 'panel_secrets'
   });
   const INITIAL_CONTEXT_SYNC_STORAGE_KEY = 'greenstudio_initial_context_sync_v1';
@@ -378,7 +381,9 @@ export function initPanelApp() {
   };
   let whatsappSuggestionToken = 0;
   let whatsappSuggestionDismissedSignalKey = '';
+  let whatsappSuggestionExecutionInFlight = false;
   let contextIngestionPromise = Promise.resolve();
+  let whatsappHistorySyncPromise = Promise.resolve();
   let initialContextSyncPromise = null;
 
   const prefersDarkMedia =
@@ -387,7 +392,8 @@ export function initPanelApp() {
     defaultSettings: DEFAULT_SETTINGS,
     panelSettingsDefaults: PANEL_SETTINGS_DEFAULTS,
     chatDb: CHAT_DB,
-    maxChatHistoryMessages: MAX_CHAT_HISTORY_MESSAGES
+    maxChatHistoryMessages: MAX_CHAT_HISTORY_MESSAGES,
+    maxWhatsappChatMessages: MAX_WHATSAPP_PERSISTED_MESSAGES
   });
   const ollamaService = createOllamaService({
     defaultModel: DEFAULT_OLLAMA_MODEL,
@@ -2643,6 +2649,38 @@ export function initPanelApp() {
     return storageService.saveChatHistory(chatHistory);
   }
 
+  async function syncWhatsappChatContext(tabContext, options = {}) {
+    if (!tabContext || !isWhatsappContext(tabContext)) {
+      return {
+        ok: false,
+        synced: false,
+        reason: 'not_whatsapp',
+        messagesUpserted: 0,
+        totalMessages: 0
+      };
+    }
+
+    return storageService.syncWhatsappTabContext(tabContext, options);
+  }
+
+  async function readWhatsappChatHistory(tabContext, options = {}) {
+    if (!tabContext || !isWhatsappContext(tabContext)) {
+      return {
+        found: false,
+        key: '',
+        channelId: '',
+        chatKey: '',
+        title: '',
+        phone: '',
+        lastMessageId: '',
+        updatedAt: 0,
+        messages: []
+      };
+    }
+
+    return storageService.readWhatsappChatHistory(tabContext, options);
+  }
+
   async function readPanelSettings() {
     return storageService.readPanelSettings();
   }
@@ -3068,15 +3106,81 @@ export function initPanelApp() {
     return `Navegacion reciente (historial):\n${lines.join('\n')}`;
   }
 
+  function normalizeWhatsappInboxKind(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+
+    if (token === 'group' || token === 'groups' || token === 'grupo' || token === 'grupos') {
+      return 'group';
+    }
+
+    if (token === 'contact' || token === 'contacts' || token === 'persona' || token === 'personas') {
+      return 'contact';
+    }
+
+    return 'unknown';
+  }
+
+  function getPreferredWhatsappTab(args = {}) {
+    const tabs = Array.isArray(tabContextSnapshot?.tabs) ? tabContextSnapshot.tabs : [];
+    const requestedTabId = Number(args?.tabId);
+    if (Number.isFinite(requestedTabId) && requestedTabId >= 0) {
+      const requested = tabs.find((tab) => tab?.tabId === requestedTabId);
+      if (requested && isWhatsappContext(requested)) {
+        return requested;
+      }
+    }
+
+    const activeTab = getActiveTabContext();
+    if (activeTab && isWhatsappContext(activeTab)) {
+      return activeTab;
+    }
+
+    return tabs.find((tab) => isWhatsappContext(tab)) || null;
+  }
+
+  function buildWhatsappToolsSystemContext(limit = 24) {
+    const whatsappTab = getPreferredWhatsappTab();
+    if (!whatsappTab) {
+      return 'Contexto WhatsApp: no hay tab de WhatsApp disponible para ejecutar tools whatsapp.*.';
+    }
+
+    const details = whatsappTab.details && typeof whatsappTab.details === 'object' ? whatsappTab.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const inbox = Array.isArray(details.inbox) ? details.inbox : [];
+    const safeLimit = Math.max(4, Math.min(60, Number(limit) || 24));
+    const listedChats = inbox.slice(0, safeLimit);
+    const lines = listedChats.map((item, index) => {
+      const title = String(item?.title || '').replace(/\s+/g, ' ').trim().slice(0, 110) || 'Sin titulo';
+      const phone = String(item?.phone || '').trim().slice(0, 40);
+      const preview = String(item?.preview || '').replace(/\s+/g, ' ').trim().slice(0, 110);
+      const kind = normalizeWhatsappInboxKind(item?.kind || (item?.isGroup ? 'group' : ''));
+      const kindLabel = kind === 'group' ? 'group' : kind === 'contact' ? 'contact' : 'unknown';
+      const phonePart = phone ? ` | phone:${phone}` : '';
+      const previewPart = preview ? ` | preview:${preview}` : '';
+      return `${index + 1}. ${title} | kind:${kindLabel}${phonePart}${previewPart}`;
+    });
+
+    return [
+      `Contexto WhatsApp activo: tabId ${Number(whatsappTab.tabId) || -1}.`,
+      `Chat actual: ${buildWhatsappMetaLabel(whatsappTab)}.`,
+      'Inbox disponible para decidir acciones (ej. archivar grupos):',
+      lines.length ? lines.join('\n') : 'Sin chats en inbox detectados.'
+    ].join('\n');
+  }
+
   function buildLocalToolSystemPrompt() {
+    const hasWhatsappTab = Boolean(getPreferredWhatsappTab());
     return [
       'Eres un agente de productividad que opera en el navegador del usuario.',
       'Responde SIEMPRE en Markdown claro.',
       'Si necesitas ejecutar acciones locales del navegador, responde SOLO con un bloque ```tool JSON``` sin texto adicional.',
       'Formato exacto del bloque tool:',
       '```tool',
-      '{"tool":"browser.<accion>","args":{...}}',
+      '{"tool":"browser.<accion>|whatsapp.<accion>","args":{...}}',
       '```',
+      'Puedes devolver un objeto o un array de objetos tool para encadenar acciones.',
       'Tools disponibles:',
       '- browser.listTabs',
       '- browser.getRecentHistory (args: days, limit, text)',
@@ -3086,10 +3190,22 @@ export function initPanelApp() {
       '- browser.focusTab (args: tabId o urlContains/titleContains)',
       '- browser.closeTab (args: tabId o url/urlContains/titleContains, preventActive)',
       '- browser.closeNonProductivityTabs (args: dryRun, keepPinned, keepActive, onlyCurrentWindow)',
+      ...(hasWhatsappTab
+        ? [
+            '- whatsapp.getInbox (args: limit)',
+            '- whatsapp.openChat (args: query|name|chat|phone|chatIndex, tabId opcional)',
+            '- whatsapp.sendMessage (args: text, tabId opcional; envia al chat abierto)',
+            '- whatsapp.openChatAndSendMessage (args: query|name|chat|phone + text)',
+            '- whatsapp.archiveChats (args: scope=groups|contacts|all, queries, limit, dryRun)',
+            '- whatsapp.archiveGroups (alias rapido para scope=groups)'
+          ]
+        : ['- whatsapp.* requiere tener una tab de WhatsApp abierta.']),
       'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
-      'No inventes tools fuera de esa lista.',
+      'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
+      'No inventes tools fuera de esta lista.',
       buildActiveTabsSystemContext(),
-      buildRecentHistorySystemContext()
+      buildRecentHistorySystemContext(),
+      buildWhatsappToolsSystemContext()
     ].join('\n');
   }
 
@@ -3129,7 +3245,24 @@ export function initPanelApp() {
       'browser.close_tab': 'browser.closeTab',
       'browser.closeTab': 'browser.closeTab',
       'browser.close_non_productivity_tabs': 'browser.closeNonProductivityTabs',
-      'browser.closeNonProductivityTabs': 'browser.closeNonProductivityTabs'
+      'browser.closeNonProductivityTabs': 'browser.closeNonProductivityTabs',
+      'whatsapp.get_inbox': 'whatsapp.getInbox',
+      'whatsapp.getListInbox': 'whatsapp.getInbox',
+      'whatsapp.getInbox': 'whatsapp.getInbox',
+      'whatsapp.open_chat': 'whatsapp.openChat',
+      'whatsapp.openChatByQuery': 'whatsapp.openChat',
+      'whatsapp.openChat': 'whatsapp.openChat',
+      'whatsapp.send_message': 'whatsapp.sendMessage',
+      'whatsapp.sendText': 'whatsapp.sendMessage',
+      'whatsapp.sendMessage': 'whatsapp.sendMessage',
+      'whatsapp.open_chat_and_send_message': 'whatsapp.openChatAndSendMessage',
+      'whatsapp.openAndSendMessage': 'whatsapp.openChatAndSendMessage',
+      'whatsapp.openChatAndSendMessage': 'whatsapp.openChatAndSendMessage',
+      'whatsapp.archive_chats': 'whatsapp.archiveChats',
+      'whatsapp.archiveListChats': 'whatsapp.archiveChats',
+      'whatsapp.archiveChats': 'whatsapp.archiveChats',
+      'whatsapp.archive_groups': 'whatsapp.archiveGroups',
+      'whatsapp.archiveGroups': 'whatsapp.archiveGroups'
     };
     const tool = aliases[inputTool] || '';
     const args = source.args && typeof source.args === 'object' ? source.args : {};
@@ -3872,6 +4005,85 @@ export function initPanelApp() {
     return tabContextSnapshot.tabs.find((item) => item.tabId === tabContextSnapshot.activeTabId) || null;
   }
 
+  function mergeWhatsappContextWithHistory(tabContext, historyPayload) {
+    const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
+    const details = context.details && typeof context.details === 'object' ? context.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const history = historyPayload && typeof historyPayload === 'object' ? historyPayload : {};
+    const messages = Array.isArray(history.messages) ? history.messages : [];
+
+    if (!messages.length) {
+      return context;
+    }
+
+    const mergedCurrentChat = {
+      ...currentChat,
+      channelId: String(currentChat.channelId || history.channelId || '').trim(),
+      key: String(currentChat.key || history.chatKey || currentChat.phone || currentChat.title || '').trim(),
+      title: String(currentChat.title || history.title || '').trim(),
+      phone: String(currentChat.phone || history.phone || '').trim(),
+      lastMessageId: String(history.lastMessageId || currentChat.lastMessageId || '').trim()
+    };
+    const nextSync = details.sync && typeof details.sync === 'object' ? { ...details.sync } : {};
+
+    if (!nextSync.lastVisibleMessageId && mergedCurrentChat.lastMessageId) {
+      nextSync.lastVisibleMessageId = mergedCurrentChat.lastMessageId;
+    }
+
+    return {
+      ...context,
+      details: {
+        ...details,
+        currentChat: mergedCurrentChat,
+        messages,
+        sync: {
+          ...nextSync,
+          dbMessageCount: messages.length,
+          dbUpdatedAt: Math.max(0, Number(history.updatedAt) || 0)
+        },
+        whatsappHistory: {
+          found: Boolean(history.found),
+          key: String(history.key || ''),
+          updatedAt: Math.max(0, Number(history.updatedAt) || 0),
+          messageCount: messages.length
+        }
+      }
+    };
+  }
+
+  async function buildWhatsappSuggestionContext(tabContext) {
+    if (!tabContext || !isWhatsappContext(tabContext)) {
+      return tabContext;
+    }
+
+    const syncResult = await syncWhatsappChatContext(tabContext, {
+      messageLimit: MAX_WHATSAPP_PERSISTED_MESSAGES
+    });
+    const historyPayload = await readWhatsappChatHistory(tabContext, {
+      limit: WHATSAPP_SUGGESTION_HISTORY_LIMIT
+    });
+    const mergedContext = mergeWhatsappContextWithHistory(tabContext, historyPayload);
+
+    logDebug('whatsapp_history:sync', {
+      tabId: Number(tabContext.tabId) || -1,
+      chatKey: toSafeLogText(getWhatsappChatKey(tabContext), 160),
+      syncResult: {
+        ok: Boolean(syncResult?.ok),
+        reason: toSafeLogText(syncResult?.reason || '', 40),
+        upserted: Math.max(0, Number(syncResult?.messagesUpserted) || 0),
+        total: Math.max(0, Number(syncResult?.totalMessages) || 0)
+      },
+      db: {
+        found: Boolean(historyPayload?.found),
+        key: toSafeLogText(historyPayload?.key || '', 120),
+        messages: Math.max(0, Number(historyPayload?.messages?.length) || 0),
+        updatedAt: Math.max(0, Number(historyPayload?.updatedAt) || 0)
+      }
+    });
+
+    return mergedContext;
+  }
+
   function summarizeWhatsappSuggestionContext(tabContext, tailLimit = 6) {
     const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
     const details = context.details && typeof context.details === 'object' ? context.details : {};
@@ -3885,9 +4097,13 @@ export function initPanelApp() {
       chatPhone: toSafeLogText(currentChat.phone || '', 42),
       messageCount: messages.length,
       messageTail: messages.slice(-tailLimit).map((item) => ({
+        id: toSafeLogText(item?.id || '', 120),
         role: item?.role === 'me' ? 'me' : 'contact',
+        kind: toSafeLogText(item?.kind || '', 24),
         timestamp: toSafeLogText(item?.timestamp || '', 80),
-        text: toSafeLogText(item?.text || '', 160)
+        text: toSafeLogText(item?.text || '', 160),
+        transcript: toSafeLogText(item?.transcript || item?.enriched?.transcript || '', 120),
+        ocrText: toSafeLogText(item?.ocrText || item?.enriched?.ocrText || '', 120)
       }))
     };
   }
@@ -3991,10 +4207,23 @@ export function initPanelApp() {
       return;
     }
 
-    const chatKey = getWhatsappChatKey(tabContext);
-    const signalKey = buildWhatsappSignalKey(tabContext);
     const force = Boolean(options.force);
-    const contextSummary = summarizeWhatsappSuggestionContext(tabContext);
+    let suggestionContext = tabContext;
+
+    try {
+      suggestionContext = await buildWhatsappSuggestionContext(tabContext);
+    } catch (error) {
+      logWarn('whatsapp_history:context_build_error', {
+        tabId: Number(tabContext.tabId) || -1,
+        chatKey: toSafeLogText(getWhatsappChatKey(tabContext), 160),
+        error: error instanceof Error ? error.message : String(error || '')
+      });
+      suggestionContext = tabContext;
+    }
+
+    const chatKey = getWhatsappChatKey(suggestionContext);
+    const signalKey = buildWhatsappSignalKey(suggestionContext);
+    const contextSummary = summarizeWhatsappSuggestionContext(suggestionContext);
 
     logDebug('whatsapp_suggestion:start', {
       ...contextSummary,
@@ -4012,7 +4241,7 @@ export function initPanelApp() {
       return;
     }
 
-    if (!hasWhatsappConversationHistory(tabContext, 1)) {
+    if (!hasWhatsappConversationHistory(suggestionContext, 1)) {
       logDebug('whatsapp_suggestion:skip_no_messages', {
         ...contextSummary,
         signalKey: toSafeLogText(signalKey, 220)
@@ -4038,7 +4267,7 @@ export function initPanelApp() {
         signalKey: toSafeLogText(signalKey, 220),
         suggestionChars: whatsappSuggestionState.text.length
       });
-      setWhatsappSuggestionResult(tabContext, whatsappSuggestionState.text);
+      setWhatsappSuggestionResult(suggestionContext, whatsappSuggestionState.text);
       return;
     }
 
@@ -4052,11 +4281,11 @@ export function initPanelApp() {
       loading: true
     };
 
-    setWhatsappSuggestionLoading(tabContext);
+    setWhatsappSuggestionLoading(suggestionContext);
     const startedAt = Date.now();
 
     try {
-      const prompt = buildWhatsappReplyPrompt(tabContext);
+      const prompt = buildWhatsappReplyPrompt(suggestionContext);
       const profileForSuggestion = resolveModelProfileForInference();
       if (!profileForSuggestion) {
         throw new Error('No hay modelo disponible para sugerencias.');
@@ -4117,7 +4346,7 @@ export function initPanelApp() {
         loading: false
       };
 
-      setWhatsappSuggestionResult(tabContext, suggestion);
+      setWhatsappSuggestionResult(suggestionContext, suggestion);
     } catch (error) {
       if (token !== whatsappSuggestionToken) {
         return;
@@ -4144,7 +4373,7 @@ export function initPanelApp() {
       }
 
       if (whatsappSuggestionMeta) {
-        whatsappSuggestionMeta.textContent = buildWhatsappMetaLabel(tabContext);
+        whatsappSuggestionMeta.textContent = buildWhatsappMetaLabel(suggestionContext);
       }
 
       if (whatsappSuggestionText) {
@@ -4165,9 +4394,15 @@ export function initPanelApp() {
   }
 
   async function executeWhatsappSuggestion() {
+    if (whatsappSuggestionExecutionInFlight) {
+      return;
+    }
+
     if (!whatsappSuggestionState.text || whatsappSuggestionState.tabId < 0) {
       return;
     }
+
+    whatsappSuggestionExecutionInFlight = true;
 
     if (whatsappSuggestionRunBtn) {
       whatsappSuggestionRunBtn.disabled = true;
@@ -4179,45 +4414,43 @@ export function initPanelApp() {
 
     setStatus(whatsappSuggestionStatus, 'Enviando mensaje...', false, { loading: true });
 
-    const response = await tabContextService.runSiteActionInTab(
-      whatsappSuggestionState.tabId,
-      'whatsapp',
-      'sendMessage',
-      { text: whatsappSuggestionState.text }
-    );
+    try {
+      const response = await tabContextService.runSiteActionInTab(
+        whatsappSuggestionState.tabId,
+        'whatsapp',
+        'sendMessage',
+        { text: whatsappSuggestionState.text }
+      );
 
-    if (!response || response.ok !== true) {
-      const message = response?.error || 'No se pudo enviar mensaje en WhatsApp.';
-      setStatus(whatsappSuggestionStatus, message, true);
+      if (!response || response.ok !== true) {
+        const message = response?.error || 'No se pudo enviar mensaje en WhatsApp.';
+        setStatus(whatsappSuggestionStatus, message, true);
+        return;
+      }
+
+      const confirmed = response?.result?.confirmed !== false;
+      const dispatchMethod = String(response?.result?.dispatchMethod || '').trim();
+      if (confirmed) {
+        setStatus(whatsappSuggestionStatus, 'Mensaje enviado.');
+      } else {
+        setStatus(
+          whatsappSuggestionStatus,
+          `Mensaje despachado (${dispatchMethod || 'sin confirmacion de metodo'}), esperando confirmacion en chat.`
+        );
+      }
+
+      window.setTimeout(() => {
+        tabContextService.requestSnapshot();
+      }, 350);
+    } finally {
+      whatsappSuggestionExecutionInFlight = false;
       if (whatsappSuggestionRunBtn) {
         whatsappSuggestionRunBtn.disabled = false;
       }
       if (whatsappSuggestionRefreshBtn) {
         whatsappSuggestionRefreshBtn.disabled = false;
       }
-      return;
     }
-
-    const confirmed = response?.result?.confirmed !== false;
-    const dispatchMethod = String(response?.result?.dispatchMethod || '').trim();
-    if (confirmed) {
-      setStatus(whatsappSuggestionStatus, 'Mensaje enviado.');
-    } else {
-      setStatus(
-        whatsappSuggestionStatus,
-        `Mensaje despachado (${dispatchMethod || 'sin confirmacion de metodo'}), esperando confirmacion en chat.`
-      );
-    }
-    if (whatsappSuggestionRunBtn) {
-      whatsappSuggestionRunBtn.disabled = false;
-    }
-    if (whatsappSuggestionRefreshBtn) {
-      whatsappSuggestionRefreshBtn.disabled = false;
-    }
-
-    window.setTimeout(() => {
-      tabContextService.requestSnapshot();
-    }, 350);
   }
 
   function queueContextIngestion(snapshot, options = {}) {
@@ -4248,6 +4481,35 @@ export function initPanelApp() {
           }
         }
       });
+  }
+
+  function queueWhatsappHistorySync(snapshot, options = {}) {
+    const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs : [];
+    const whatsappTabs = tabs.filter((tab) => isWhatsappContext(tab));
+    const messageLimit = Math.max(
+      80,
+      Math.min(2000, Number(options.messageLimit) || Number(MAX_WHATSAPP_PERSISTED_MESSAGES) || 640)
+    );
+
+    if (!whatsappTabs.length) {
+      return whatsappHistorySyncPromise;
+    }
+
+    whatsappHistorySyncPromise = whatsappHistorySyncPromise
+      .catch(() => {})
+      .then(async () => {
+        for (const tab of whatsappTabs) {
+          try {
+            await syncWhatsappChatContext(tab, {
+              messageLimit
+            });
+          } catch (_) {
+            // Ignore whatsapp chat sync failures per tab.
+          }
+        }
+      });
+
+    return whatsappHistorySyncPromise;
   }
 
   function normalizeHistoryEntryForSync(item) {
@@ -4442,6 +4704,7 @@ export function initPanelApp() {
     }
 
     queueContextIngestion(tabContextSnapshot);
+    queueWhatsappHistorySync(tabContextSnapshot);
 
     renderTabsContextJson();
 

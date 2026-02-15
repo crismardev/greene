@@ -2,11 +2,299 @@ export function createPanelStorageService({
   defaultSettings,
   panelSettingsDefaults,
   chatDb,
-  maxChatHistoryMessages
+  maxChatHistoryMessages,
+  maxWhatsappChatMessages = 640
 }) {
   let settings = { ...defaultSettings };
   let panelSettingsCache = { ...panelSettingsDefaults };
   let chatDbPromise = null;
+
+  function toSafeText(value, limit = 1200) {
+    const text = String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!text) {
+      return '';
+    }
+
+    return text.slice(0, limit);
+  }
+
+  function toChatToken(value, limit = 200) {
+    const normalized = toSafeText(value || '', limit)
+      .toLowerCase()
+      .replace(/[^a-z0-9@._:+-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+
+    return normalized;
+  }
+
+  function compactUniqueTail(values, limit = 320) {
+    const source = Array.isArray(values) ? values : [];
+    const unique = [];
+    const seen = new Set();
+
+    for (let index = source.length - 1; index >= 0; index -= 1) {
+      const token = toSafeText(source[index] || '', 220);
+      if (!token || seen.has(token)) {
+        continue;
+      }
+
+      seen.add(token);
+      unique.push(token);
+      if (unique.length >= limit) {
+        break;
+      }
+    }
+
+    return unique.reverse();
+  }
+
+  function normalizeWhatsappRole(value) {
+    return value === 'me' || value === 'user' ? 'me' : 'contact';
+  }
+
+  function normalizeWhatsappKind(value) {
+    const allowed = new Set(['text', 'audio', 'image', 'video', 'document', 'media_caption', 'sticker', 'unknown', 'empty']);
+    const token = toSafeText(value || '', 32).toLowerCase();
+    return allowed.has(token) ? token : 'text';
+  }
+
+  function pickBetterValue(incomingValue, currentValue, limit = 1200) {
+    const incoming = toSafeText(incomingValue, limit);
+    const current = toSafeText(currentValue, limit);
+
+    if (!current) {
+      return incoming;
+    }
+    if (!incoming) {
+      return current;
+    }
+
+    if (incoming.length > current.length + 8) {
+      return incoming;
+    }
+
+    const incomingWords = incoming.split(' ').length;
+    const currentWords = current.split(' ').length;
+    if (incomingWords > currentWords + 2) {
+      return incoming;
+    }
+
+    return current;
+  }
+
+  function normalizeWhatsappMessage(record) {
+    if (!record || typeof record !== 'object') {
+      return null;
+    }
+
+    const enriched = record.enriched && typeof record.enriched === 'object' ? record.enriched : {};
+    const id = toSafeText(record.id || '', 220);
+    if (!id) {
+      return null;
+    }
+
+    const role = normalizeWhatsappRole(record.role);
+    const kind = normalizeWhatsappKind(record.kind);
+    const transcript = toSafeText(record.transcript || enriched.transcript || '', 560);
+    const ocrText = toSafeText(record.ocrText || enriched.ocrText || '', 620);
+    const mediaCaption = toSafeText(record.mediaCaption || enriched.mediaCaption || '', 360);
+    const imageAlt = toSafeText(record.imageAlt || enriched.imageAlt || '', 220);
+    const fileName = toSafeText(record.fileName || enriched.fileName || '', 160);
+    const audioDuration = toSafeText(record.audioDuration || enriched.audioDuration || '', 40);
+    const timestamp = toSafeText(record.timestamp || '', 80);
+    let text = toSafeText(record.text || '', 1200);
+
+    if (!text) {
+      text = pickBetterValue(transcript, text, 1200);
+      text = pickBetterValue(ocrText, text, 1200);
+      text = pickBetterValue(mediaCaption, text, 1200);
+      if (!text && kind === 'audio') {
+        text = audioDuration ? `Mensaje de voz (${audioDuration})` : 'Mensaje de voz';
+      } else if (!text && kind === 'image') {
+        text = '[Imagen]';
+      } else if (!text && kind === 'video') {
+        text = '[Video]';
+      } else if (!text && kind === 'document') {
+        text = fileName ? `Documento: ${fileName}` : 'Documento adjunto';
+      }
+    }
+
+    if (!text) {
+      return null;
+    }
+
+    const createdAt = Math.max(0, Number(record.createdAt) || 0);
+    const firstSeenAt = Math.max(0, Number(record.firstSeenAt) || createdAt || Date.now());
+    const lastSeenAt = Math.max(firstSeenAt, Number(record.lastSeenAt) || Date.now());
+
+    return {
+      id,
+      role,
+      kind,
+      text,
+      timestamp,
+      transcript,
+      ocrText,
+      mediaCaption,
+      imageAlt,
+      fileName,
+      audioDuration,
+      firstSeenAt,
+      lastSeenAt
+    };
+  }
+
+  function mergeWhatsappMessage(current, incoming, observedAt = Date.now()) {
+    const known = normalizeWhatsappMessage(current);
+    const next = normalizeWhatsappMessage(incoming);
+    if (!next && !known) {
+      return null;
+    }
+
+    if (!known) {
+      return {
+        ...next,
+        firstSeenAt: Math.max(0, Number(next.firstSeenAt) || observedAt),
+        lastSeenAt: Math.max(observedAt, Number(next.lastSeenAt) || observedAt)
+      };
+    }
+
+    if (!next) {
+      return {
+        ...known,
+        lastSeenAt: Math.max(known.lastSeenAt || 0, observedAt)
+      };
+    }
+
+    return {
+      id: known.id,
+      role: next.role || known.role,
+      kind: next.kind && next.kind !== 'text' ? next.kind : known.kind || next.kind,
+      text: pickBetterValue(next.text, known.text, 1200),
+      timestamp: pickBetterValue(next.timestamp, known.timestamp, 80),
+      transcript: pickBetterValue(next.transcript, known.transcript, 560),
+      ocrText: pickBetterValue(next.ocrText, known.ocrText, 620),
+      mediaCaption: pickBetterValue(next.mediaCaption, known.mediaCaption, 360),
+      imageAlt: pickBetterValue(next.imageAlt, known.imageAlt, 220),
+      fileName: pickBetterValue(next.fileName, known.fileName, 160),
+      audioDuration: pickBetterValue(next.audioDuration, known.audioDuration, 40),
+      firstSeenAt: Math.max(0, Number(known.firstSeenAt) || Number(next.firstSeenAt) || observedAt),
+      lastSeenAt: Math.max(Number(known.lastSeenAt) || 0, Number(next.lastSeenAt) || 0, observedAt)
+    };
+  }
+
+  function buildWhatsappStoreKey(value) {
+    const token = toChatToken(value || '', 220);
+    return token ? `wa-chat:${token}` : '';
+  }
+
+  function buildWhatsappStoreKeys(meta) {
+    const source = meta && typeof meta === 'object' ? meta : {};
+    const candidates = [source.channelId, source.chatKey, source.phone, source.title];
+    const keys = candidates.map((value) => buildWhatsappStoreKey(value)).filter(Boolean);
+    return compactUniqueTail(keys, 6);
+  }
+
+  function extractWhatsappChatMeta(tabContext) {
+    const tab = tabContext && typeof tabContext === 'object' ? tabContext : {};
+    const details = tab.details && typeof tab.details === 'object' ? tab.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+
+    const channelId = toSafeText(currentChat.channelId || '', 220);
+    const chatKey = toSafeText(currentChat.key || currentChat.phone || currentChat.title || '', 220);
+    const title = toSafeText(currentChat.title || '', 220);
+    const phone = toSafeText(currentChat.phone || '', 60);
+    const messages = Array.isArray(details.messages) ? details.messages : [];
+
+    if (!channelId && !chatKey && !title && !phone) {
+      return null;
+    }
+
+    const storeKeys = buildWhatsappStoreKeys({
+      channelId,
+      chatKey,
+      title,
+      phone
+    });
+    const storeKey = storeKeys[0] || '';
+
+    if (!storeKey) {
+      return null;
+    }
+
+    return {
+      storeKey,
+      storeKeys,
+      channelId,
+      chatKey,
+      title,
+      phone,
+      messages
+    };
+  }
+
+  function normalizeWhatsappChatRecord(rawRecord, fallbackKey = '') {
+    const record = rawRecord && typeof rawRecord === 'object' ? rawRecord : {};
+    const key = toSafeText(record.key || fallbackKey || '', 220);
+    if (!key) {
+      return null;
+    }
+
+    const rawMessages = Array.isArray(record.messages) ? record.messages : [];
+    const messages = rawMessages
+      .map((item) => normalizeWhatsappMessage(item))
+      .filter(Boolean)
+      .sort((a, b) => (a.firstSeenAt || 0) - (b.firstSeenAt || 0))
+      .slice(-Math.max(80, Number(maxWhatsappChatMessages) || 640));
+    const knownIds = new Set(messages.map((item) => item.id));
+    const orderedMessageIds = compactUniqueTail(record.orderedMessageIds || record.messageIds || [], maxWhatsappChatMessages).filter(
+      (id) => knownIds.has(id)
+    );
+
+    return {
+      key,
+      channelId: toSafeText(record.channelId || '', 220),
+      chatKey: toSafeText(record.chatKey || '', 220),
+      title: toSafeText(record.title || '', 220),
+      phone: toSafeText(record.phone || '', 60),
+      lastMessageId: toSafeText(record.lastMessageId || '', 220),
+      orderedMessageIds,
+      messages,
+      updatedAt: Math.max(0, Number(record.updatedAt) || 0)
+    };
+  }
+
+  function orderWhatsappMessages(record, limit = 120) {
+    const chat = normalizeWhatsappChatRecord(record);
+    if (!chat) {
+      return [];
+    }
+
+    const byId = new Map(chat.messages.map((item) => [item.id, item]));
+    const ordered = [];
+    const seen = new Set();
+
+    for (const id of chat.orderedMessageIds) {
+      const message = byId.get(id);
+      if (!message || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ordered.push(message);
+    }
+
+    const remaining = chat.messages
+      .filter((item) => item && !seen.has(item.id))
+      .sort((a, b) => (a.firstSeenAt || 0) - (b.firstSeenAt || 0));
+
+    const merged = [...ordered, ...remaining];
+    const safeLimit = Math.max(1, Math.min(Math.max(80, Number(maxWhatsappChatMessages) || 640), Number(limit) || 120));
+    return merged.slice(-safeLimit);
+  }
 
   function normalizeMessage(record) {
     if (!record || typeof record !== 'object') {
@@ -94,6 +382,9 @@ export function createPanelStorageService({
           }
           if (!db.objectStoreNames.contains(chatDb.SETTINGS_STORE)) {
             db.createObjectStore(chatDb.SETTINGS_STORE, { keyPath: 'key' });
+          }
+          if (chatDb.WHATSAPP_STORE && !db.objectStoreNames.contains(chatDb.WHATSAPP_STORE)) {
+            db.createObjectStore(chatDb.WHATSAPP_STORE, { keyPath: 'key' });
           }
           if (chatDb.SECRET_STORE && !db.objectStoreNames.contains(chatDb.SECRET_STORE)) {
             db.createObjectStore(chatDb.SECRET_STORE, { keyPath: 'key' });
@@ -205,6 +496,302 @@ export function createPanelStorageService({
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
       tx.objectStore(chatDb.CHAT_STORE).put(payload);
+    });
+  }
+
+  async function syncWhatsappTabContext(tabContext, options = {}) {
+    const meta = extractWhatsappChatMeta(tabContext);
+    if (!meta) {
+      return {
+        ok: false,
+        synced: false,
+        reason: 'missing_chat_meta',
+        key: '',
+        messagesUpserted: 0,
+        totalMessages: 0
+      };
+    }
+
+    const db = await getChatDatabase();
+    const messageLimit = Math.max(
+      80,
+      Math.min(2000, Number(options.messageLimit) || Number(maxWhatsappChatMessages) || 640)
+    );
+    const incomingMessages = (Array.isArray(meta.messages) ? meta.messages : [])
+      .map((item) => normalizeWhatsappMessage(item))
+      .filter(Boolean)
+      .slice(-messageLimit);
+
+    if (!db || !chatDb.WHATSAPP_STORE || !hasDbStore(db, chatDb.WHATSAPP_STORE)) {
+      return {
+        ok: false,
+        synced: false,
+        reason: 'store_unavailable',
+        key: meta.storeKey,
+        messagesUpserted: incomingMessages.length,
+        totalMessages: incomingMessages.length
+      };
+    }
+
+    return new Promise((resolve) => {
+      let tx;
+      try {
+        tx = db.transaction(chatDb.WHATSAPP_STORE, 'readwrite');
+      } catch {
+        resolve({
+          ok: false,
+          synced: false,
+          reason: 'transaction_unavailable',
+          key: meta.storeKey,
+          messagesUpserted: incomingMessages.length,
+          totalMessages: incomingMessages.length
+        });
+        return;
+      }
+
+      const store = tx.objectStore(chatDb.WHATSAPP_STORE);
+      const req = store.get(meta.storeKey);
+      let settled = false;
+      let result = {
+        ok: false,
+        synced: false,
+        reason: 'not_committed',
+        key: meta.storeKey,
+        messagesUpserted: 0,
+        totalMessages: 0
+      };
+
+      const finish = (payload) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        resolve(payload);
+      };
+
+      req.onerror = () => {
+        result = {
+          ok: false,
+          synced: false,
+          reason: 'read_failed',
+          key: meta.storeKey,
+          messagesUpserted: incomingMessages.length,
+          totalMessages: 0
+        };
+      };
+
+      req.onsuccess = () => {
+        const observedAt = Date.now();
+        const existingRecord = normalizeWhatsappChatRecord(req.result, meta.storeKey) || {
+          key: meta.storeKey,
+          channelId: '',
+          chatKey: '',
+          title: '',
+          phone: '',
+          lastMessageId: '',
+          orderedMessageIds: [],
+          messages: [],
+          updatedAt: 0
+        };
+        const byId = new Map(existingRecord.messages.map((item) => [item.id, item]));
+        const orderedIncomingIds = [];
+
+        for (const incoming of incomingMessages) {
+          orderedIncomingIds.push(incoming.id);
+          const merged = mergeWhatsappMessage(byId.get(incoming.id), incoming, observedAt);
+          if (merged) {
+            byId.set(incoming.id, merged);
+          }
+        }
+
+        let mergedMessages = Array.from(byId.values())
+          .filter(Boolean)
+          .sort((a, b) => (a.firstSeenAt || 0) - (b.firstSeenAt || 0));
+
+        if (mergedMessages.length > messageLimit) {
+          mergedMessages = mergedMessages.slice(mergedMessages.length - messageLimit);
+        }
+
+        const keepIds = new Set(mergedMessages.map((item) => item.id));
+        const mergedOrderedIds = compactUniqueTail(
+          [...existingRecord.orderedMessageIds, ...orderedIncomingIds],
+          messageLimit
+        ).filter((id) => keepIds.has(id));
+        const orderedMessageIds = mergedOrderedIds.length ? mergedOrderedIds : mergedMessages.map((item) => item.id);
+        const lastMessageId = orderedMessageIds.length ? orderedMessageIds[orderedMessageIds.length - 1] : '';
+
+        const payload = {
+          key: meta.storeKey,
+          channelId: meta.channelId || existingRecord.channelId || '',
+          chatKey: meta.chatKey || existingRecord.chatKey || '',
+          title: meta.title || existingRecord.title || '',
+          phone: meta.phone || existingRecord.phone || '',
+          lastMessageId,
+          orderedMessageIds,
+          messages: mergedMessages,
+          updatedAt: observedAt
+        };
+
+        try {
+          store.put(payload);
+          result = {
+            ok: true,
+            synced: true,
+            reason: 'ok',
+            key: meta.storeKey,
+            channelId: payload.channelId,
+            chatKey: payload.chatKey,
+            title: payload.title,
+            phone: payload.phone,
+            lastMessageId: payload.lastMessageId,
+            messagesUpserted: incomingMessages.length,
+            totalMessages: mergedMessages.length
+          };
+        } catch {
+          result = {
+            ok: false,
+            synced: false,
+            reason: 'write_failed',
+            key: meta.storeKey,
+            channelId: payload.channelId,
+            chatKey: payload.chatKey,
+            title: payload.title,
+            phone: payload.phone,
+            lastMessageId: payload.lastMessageId,
+            messagesUpserted: incomingMessages.length,
+            totalMessages: mergedMessages.length
+          };
+          finish(result);
+        }
+      };
+
+      tx.oncomplete = () => {
+        finish(result);
+      };
+      tx.onerror = () => {
+        finish({
+          ...result,
+          ok: false,
+          synced: false,
+          reason: result.reason === 'ok' ? 'transaction_failed' : result.reason || 'transaction_failed'
+        });
+      };
+    });
+  }
+
+  async function readWhatsappChatHistory(tabContext, options = {}) {
+    const meta = extractWhatsappChatMeta(tabContext);
+    const emptyResult = {
+      found: false,
+      key: '',
+      channelId: '',
+      chatKey: '',
+      title: '',
+      phone: '',
+      lastMessageId: '',
+      updatedAt: 0,
+      messages: []
+    };
+
+    if (!meta) {
+      return emptyResult;
+    }
+
+    const db = await getChatDatabase();
+    const limit = Math.max(1, Math.min(2000, Number(options.limit) || Number(maxWhatsappChatMessages) || 640));
+    const keys = Array.isArray(meta.storeKeys) && meta.storeKeys.length ? meta.storeKeys : [meta.storeKey];
+
+    if (!db || !chatDb.WHATSAPP_STORE || !hasDbStore(db, chatDb.WHATSAPP_STORE)) {
+      return {
+        ...emptyResult,
+        key: meta.storeKey,
+        channelId: meta.channelId,
+        chatKey: meta.chatKey,
+        title: meta.title,
+        phone: meta.phone
+      };
+    }
+
+    return new Promise((resolve) => {
+      let tx;
+      try {
+        tx = db.transaction(chatDb.WHATSAPP_STORE, 'readonly');
+      } catch {
+        resolve({
+          ...emptyResult,
+          key: meta.storeKey,
+          channelId: meta.channelId,
+          chatKey: meta.chatKey,
+          title: meta.title,
+          phone: meta.phone
+        });
+        return;
+      }
+
+      const store = tx.objectStore(chatDb.WHATSAPP_STORE);
+      let settled = false;
+
+      const finish = (payload) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        resolve(payload);
+      };
+
+      const readAt = (index) => {
+        if (index >= keys.length) {
+          finish({
+            ...emptyResult,
+            key: meta.storeKey,
+            channelId: meta.channelId,
+            chatKey: meta.chatKey,
+            title: meta.title,
+            phone: meta.phone
+          });
+          return;
+        }
+
+        const key = keys[index];
+        const req = store.get(key);
+        req.onerror = () => {
+          readAt(index + 1);
+        };
+        req.onsuccess = () => {
+          const record = normalizeWhatsappChatRecord(req.result, key);
+          if (!record) {
+            readAt(index + 1);
+            return;
+          }
+
+          finish({
+            found: true,
+            key: record.key,
+            channelId: record.channelId || meta.channelId || '',
+            chatKey: record.chatKey || meta.chatKey || '',
+            title: record.title || meta.title || '',
+            phone: record.phone || meta.phone || '',
+            lastMessageId: record.lastMessageId || '',
+            updatedAt: Math.max(0, Number(record.updatedAt) || 0),
+            messages: orderWhatsappMessages(record, limit)
+          });
+        };
+      };
+
+      readAt(0);
+
+      tx.onerror = () => {
+        finish({
+          ...emptyResult,
+          key: meta.storeKey,
+          channelId: meta.channelId,
+          chatKey: meta.chatKey,
+          title: meta.title,
+          phone: meta.phone
+        });
+      };
     });
   }
 
@@ -366,6 +953,8 @@ export function createPanelStorageService({
     saveSettings,
     readChatHistory,
     saveChatHistory,
+    syncWhatsappTabContext,
+    readWhatsappChatHistory,
     readPanelSettings,
     savePanelSettings,
     readSecret,

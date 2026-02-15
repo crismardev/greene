@@ -42,7 +42,10 @@ export function toJsonTabRecord(tabContext, aiSummary = '') {
       id: String(item?.id || ''),
       role: String(item?.role || ''),
       text: toSafeText(item?.text || '', 240),
-      timestamp: toSafeText(item?.timestamp || '', 40)
+      timestamp: toSafeText(item?.timestamp || '', 40),
+      kind: toSafeText(item?.kind || '', 24),
+      transcript: toSafeText(item?.enriched?.transcript || item?.transcript || '', 180),
+      ocrText: toSafeText(item?.enriched?.ocrText || item?.ocrText || '', 180)
     }));
   }
 

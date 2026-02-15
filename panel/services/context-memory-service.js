@@ -174,7 +174,12 @@ function normalizeWhatsappMessages(rawMessages, limit = WHATSAPP_MESSAGE_DOC_LIM
   return trimmed
     .map((item, index) => {
       const role = item?.role === 'me' ? 'me' : 'contact';
-      const text = toSafeText(item?.text || '', 820);
+      const enriched = item?.enriched && typeof item.enriched === 'object' ? item.enriched : {};
+      const transcript = toSafeText(item?.transcript || enriched.transcript || '', 520);
+      const ocrText = toSafeText(item?.ocrText || enriched.ocrText || '', 520);
+      const mediaCaption = toSafeText(item?.mediaCaption || enriched.mediaCaption || '', 320);
+      const kind = toSafeText(item?.kind || '', 24).toLowerCase() || 'text';
+      const text = toSafeText(item?.text || transcript || ocrText || mediaCaption || '', 820);
       const id = toSafeText(item?.id || `row-${index}`, 220);
       if (!text || !id) {
         return null;
@@ -184,7 +189,11 @@ function normalizeWhatsappMessages(rawMessages, limit = WHATSAPP_MESSAGE_DOC_LIM
         id,
         role,
         text,
-        timestampLabel: toSafeText(item?.timestamp || '', 80)
+        timestampLabel: toSafeText(item?.timestamp || '', 80),
+        kind,
+        transcript,
+        ocrText,
+        mediaCaption
       };
     })
     .filter(Boolean);
@@ -256,7 +265,11 @@ function buildWhatsappDocs(tabContext) {
       chatTitle ? `Chat: ${chatTitle}` : '',
       chatPhone ? `Telefono: ${chatPhone}` : '',
       item.timestampLabel ? `Hora UI: ${item.timestampLabel}` : '',
+      item.kind ? `Tipo: ${item.kind}` : '',
       `${item.role === 'me' ? 'Yo' : 'Contacto'}: ${item.text}`,
+      item.transcript ? `Transcripcion: ${item.transcript}` : '',
+      item.ocrText ? `OCR/Descripcion visual: ${item.ocrText}` : '',
+      item.mediaCaption ? `Caption: ${item.mediaCaption}` : '',
       `Message ID: ${item.id}`
     ]
       .filter(Boolean)
@@ -277,13 +290,13 @@ function buildWhatsappDocs(tabContext) {
       timestamp: updatedAt + index,
       durationMs: 0,
       importanceScore,
-      entities: normalizeArray([chatTitle, chatPhone, item.id, item.text], 10),
+      entities: normalizeArray([chatTitle, chatPhone, item.id, item.kind, item.text, item.transcript, item.ocrText], 10),
       metadata: {
         url,
         source: 'whatsapp',
         category: 'messaging',
         importance_score: importanceScore,
-        entities: normalizeArray([chatTitle, chatPhone, item.id, item.text], 10)
+        entities: normalizeArray([chatTitle, chatPhone, item.id, item.kind, item.text, item.transcript, item.ocrText], 10)
       }
     });
   }

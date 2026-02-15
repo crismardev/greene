@@ -8,16 +8,52 @@ export function isWhatsappContext(tabContext) {
   return site === 'whatsapp' || url.includes('web.whatsapp.com');
 }
 
+function normalizeWhatsappMessageEntry(item, index = 0) {
+  const source = item && typeof item === 'object' ? item : {};
+  const enriched = source.enriched && typeof source.enriched === 'object' ? source.enriched : {};
+  const id = toSafeText(source.id || `row-${index}`, 220);
+  if (!id) {
+    return null;
+  }
+
+  const role = source.role === 'me' ? 'me' : 'contact';
+  const kind = toSafeText(source.kind || '', 24).toLowerCase() || 'text';
+  const transcript = toSafeText(source.transcript || enriched.transcript || '', 420);
+  const ocrText = toSafeText(source.ocrText || enriched.ocrText || '', 420);
+  const mediaCaption = toSafeText(source.mediaCaption || enriched.mediaCaption || '', 260);
+  let text = toSafeText(source.text || '', 360);
+
+  if (!text) {
+    text = transcript || mediaCaption || ocrText || (kind === 'audio' ? 'Mensaje de voz' : '');
+  }
+
+  if (!text) {
+    return null;
+  }
+
+  return {
+    id,
+    role,
+    kind,
+    text,
+    timestamp: toSafeText(source.timestamp || '', 60),
+    transcript,
+    ocrText,
+    mediaCaption
+  };
+}
+
 export function getWhatsappMessages(tabContext, limit = 24) {
   const details = tabContext && typeof tabContext.details === 'object' ? tabContext.details : {};
   const raw = Array.isArray(details.messages) ? details.messages : [];
   const safeLimit = Math.max(1, Number(limit) || 24);
+  const normalized = raw.map((item, index) => normalizeWhatsappMessageEntry(item, index)).filter(Boolean);
 
-  if (raw.length <= safeLimit) {
-    return raw;
+  if (normalized.length <= safeLimit) {
+    return normalized;
   }
 
-  return raw.slice(raw.length - safeLimit);
+  return normalized.slice(normalized.length - safeLimit);
 }
 
 export function hasWhatsappConversationHistory(tabContext, minMessages = 1) {
@@ -92,37 +128,102 @@ export function buildWhatsappMetaLabel(tabContext) {
 export function buildWhatsappSignalKey(tabContext) {
   const details = tabContext && typeof tabContext.details === 'object' ? tabContext.details : {};
   const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+  const sync = details.sync && typeof details.sync === 'object' ? details.sync : {};
   const channelId = String(currentChat.channelId || '').trim();
   const chatKey = channelId || getWhatsappChatKey(tabContext);
-  const messages = getWhatsappMessages(tabContext, 3);
+  const messages = getWhatsappMessages(tabContext, 40);
+  const firstMessageId = toSafeText(messages[0]?.id || '', 220);
+  const lastMessageId = toSafeText(messages.length ? messages[messages.length - 1]?.id || '' : '', 220);
   const tail = messages
-    .map((item) => `${item?.id || ''}:${item?.text || ''}`)
+    .slice(-6)
+    .map((item) =>
+      [item?.id || '', item?.kind || '', item?.text || '', item?.transcript || '', item?.ocrText || '']
+        .filter(Boolean)
+        .join(':')
+    )
     .join('|');
+  const knownMessageCount = Math.max(0, Number(sync.knownMessageCount) || 0);
+  const missingMessageCount = Math.max(0, Number(sync.missingMessageCount) || 0);
+  const lastVisibleMessageId = toSafeText(sync.lastVisibleMessageId || '', 220);
 
-  return `${chatKey}::${tail}`;
+  return [
+    chatKey,
+    `count:${messages.length}`,
+    `known:${knownMessageCount}`,
+    `missing:${missingMessageCount}`,
+    `first:${firstMessageId}`,
+    `last:${lastMessageId}`,
+    `visible:${lastVisibleMessageId}`,
+    `tail:${tail}`
+  ].join('::');
+}
+
+function describeMyResponseStyle(messages) {
+  const mine = (Array.isArray(messages) ? messages : []).filter((item) => item?.role === 'me').slice(-6);
+  if (!mine.length) {
+    return 'Sin suficientes mensajes mios para inferir estilo.';
+  }
+
+  const avgLength = Math.round(mine.reduce((acc, item) => acc + String(item.text || '').length, 0) / mine.length);
+  const questionCount = mine.filter((item) => String(item.text || '').includes('?')).length;
+  const directness = avgLength <= 75 ? 'directo y corto' : avgLength <= 140 ? 'equilibrado' : 'detallado';
+  const asksQuestions = questionCount >= Math.ceil(mine.length / 2) ? 'hace preguntas frecuente' : 'hace pocas preguntas';
+
+  return `Estilo detectado de "Yo": ${directness}; ${asksQuestions}; largo promedio ${avgLength} chars.`;
+}
+
+function formatMessageForPrompt(item) {
+  const message = item && typeof item === 'object' ? item : {};
+  const role = message.role === 'me' ? 'Yo' : 'Contacto';
+  const timestamp = toSafeText(message.timestamp || '', 40);
+  const kind = toSafeText(message.kind || '', 24);
+  const text = toSafeText(message.text || '', 320);
+  const transcript = toSafeText(message.transcript || '', 260);
+  const ocrText = toSafeText(message.ocrText || '', 260);
+  const mediaCaption = toSafeText(message.mediaCaption || '', 200);
+  const extras = [];
+
+  if (kind && kind !== 'text') {
+    extras.push(`tipo:${kind}`);
+  }
+  if (transcript) {
+    extras.push(`transcripcion:${transcript}`);
+  }
+  if (ocrText) {
+    extras.push(`ocr:${ocrText}`);
+  }
+  if (mediaCaption && mediaCaption !== text) {
+    extras.push(`caption:${mediaCaption}`);
+  }
+
+  const prefix = `${timestamp ? `[${timestamp}] ` : ''}${role}: ${text}`;
+  if (!extras.length) {
+    return prefix;
+  }
+
+  return `${prefix} (${extras.join(' | ')})`;
 }
 
 export function buildWhatsappReplyPrompt(tabContext) {
   const details = tabContext && typeof tabContext.details === 'object' ? tabContext.details : {};
   const myNumber = toSafeText(details.myNumber || '', 64);
   const chatLabel = buildWhatsappMetaLabel(tabContext);
-  const messages = getWhatsappMessages(tabContext, 20)
-    .map((item) => {
-      const role = item?.role === 'me' ? 'Yo' : 'Contacto';
-      const timestamp = toSafeText(item?.timestamp || '', 40);
-      const text = toSafeText(item?.text || '', 320);
-      return `${timestamp ? `[${timestamp}] ` : ''}${role}: ${text}`;
-    })
-    .join('\n');
+  const messagesList = getWhatsappMessages(tabContext, 28);
+  const messages = messagesList.map((item) => formatMessageForPrompt(item)).join('\n');
+  const styleHint = describeMyResponseStyle(messagesList);
 
   return [
     'Eres asistente para responder WhatsApp.',
     'Devuelve un unico mensaje corto listo para enviar (maximo 180 caracteres).',
+    'No siempre debes ser proactiva: adapta tono y nivel de iniciativa al historial.',
+    'Solo haz una pregunta cuando realmente desbloquee el chat.',
+    'Si conviene, sugiere una respuesta neutral o no comprometida en vez de prometer.',
     'No expliques ni uses encabezados.',
     'Si el contexto no alcanza, devuelve una pregunta corta para pedir claridad.',
     '',
     `Mi numero: ${myNumber || 'N/A'}`,
     `Chat: ${chatLabel}`,
+    styleHint,
     'Conversacion reciente:',
     messages || 'Sin mensajes recientes.',
     '',
