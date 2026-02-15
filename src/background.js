@@ -7,11 +7,15 @@
     GET_TAB_CONTEXT_SNAPSHOT: 'GREENSTUDIO_GET_TAB_CONTEXT_SNAPSHOT',
     TAB_CONTEXT_UPDATED: 'GREENSTUDIO_TAB_CONTEXT_UPDATED',
     SITE_ACTION_IN_TAB: 'GREENSTUDIO_SITE_ACTION_IN_TAB',
-    SITE_ACTION: 'GREENSTUDIO_SITE_ACTION'
+    SITE_ACTION: 'GREENSTUDIO_SITE_ACTION',
+    BROWSER_ACTION: 'GREENSTUDIO_BROWSER_ACTION'
   });
 
   const LOG_PREFIX = '[greenstudio-ext/background]';
   const tabContextState = new Map();
+  const tabTemporalState = new Map();
+  const recentHistoryByUrl = new Map();
+  const HISTORY_CACHE_LIMIT = 240;
   let activeTabId = -1;
 
   function logDebug(message, payload) {
@@ -21,6 +25,15 @@
     }
 
     console.debug(`${LOG_PREFIX} ${message}`, payload);
+  }
+
+  function logWarn(message, payload) {
+    if (payload === undefined) {
+      console.warn(`${LOG_PREFIX} ${message}`);
+      return;
+    }
+
+    console.warn(`${LOG_PREFIX} ${message}`, payload);
   }
 
   async function enablePanelOnActionClick() {
@@ -57,10 +70,569 @@
     return 'generic';
   }
 
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function toSafeUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return '';
+    }
+
+    if (!/^https?:\/\//i.test(raw)) {
+      return '';
+    }
+
+    return raw.slice(0, 1200);
+  }
+
+  function ensureTabTemporal(tabId) {
+    if (typeof tabId !== 'number' || tabId < 0) {
+      return null;
+    }
+
+    const now = Date.now();
+    const known = tabTemporalState.get(tabId);
+
+    if (known) {
+      return known;
+    }
+
+    const created = {
+      tabId,
+      url: '',
+      visitStartedAt: now,
+      lastSeenAt: now,
+      activeSince: null,
+      accumulatedActiveMs: 0
+    };
+
+    tabTemporalState.set(tabId, created);
+    return created;
+  }
+
+  function getTabTemporalPayload(tabId, url, capturedAt = Date.now()) {
+    const state = ensureTabTemporal(tabId);
+    if (!state) {
+      return {
+        visitStartedAt: capturedAt,
+        lastSeenAt: capturedAt,
+        activeDurationMs: 0,
+        dwellTimeMs: 0
+      };
+    }
+
+    if (url && state.url !== url) {
+      state.url = url;
+      state.visitStartedAt = capturedAt;
+      state.accumulatedActiveMs = 0;
+      state.activeSince = tabId === activeTabId ? capturedAt : null;
+    }
+
+    state.lastSeenAt = capturedAt;
+
+    const activeDelta = state.activeSince ? Math.max(0, capturedAt - state.activeSince) : 0;
+    const activeDurationMs = state.accumulatedActiveMs + activeDelta;
+    const dwellTimeMs = Math.max(0, capturedAt - state.visitStartedAt);
+
+    return {
+      visitStartedAt: state.visitStartedAt,
+      lastSeenAt: state.lastSeenAt,
+      activeDurationMs,
+      dwellTimeMs
+    };
+  }
+
+  function pauseTabActiveSession(tabId, now = Date.now()) {
+    const state = ensureTabTemporal(tabId);
+    if (!state || !state.activeSince) {
+      return;
+    }
+
+    state.accumulatedActiveMs += Math.max(0, now - state.activeSince);
+    state.activeSince = null;
+    state.lastSeenAt = now;
+  }
+
+  function resumeTabActiveSession(tabId, now = Date.now()) {
+    const state = ensureTabTemporal(tabId);
+    if (!state) {
+      return;
+    }
+
+    if (!state.activeSince) {
+      state.activeSince = now;
+    }
+
+    state.lastSeenAt = now;
+  }
+
+  function setActiveTab(tabId) {
+    const nextTabId = typeof tabId === 'number' && tabId >= 0 ? tabId : -1;
+    const now = Date.now();
+
+    if (activeTabId !== nextTabId && activeTabId >= 0) {
+      pauseTabActiveSession(activeTabId, now);
+    }
+
+    activeTabId = nextTabId;
+
+    if (activeTabId >= 0) {
+      resumeTabActiveSession(activeTabId, now);
+    }
+  }
+
+  function computeImportanceScore(temporal) {
+    const activeMs = Number(temporal?.activeDurationMs) || 0;
+    const dwellMs = Number(temporal?.dwellTimeMs) || 0;
+    const activeScore = clamp(activeMs / 180000, 0, 1);
+    const dwellScore = clamp(dwellMs / 300000, 0, 1);
+    return Number((activeScore * 0.7 + dwellScore * 0.3).toFixed(3));
+  }
+
+  function trimHistoryCache() {
+    if (recentHistoryByUrl.size <= HISTORY_CACHE_LIMIT) {
+      return;
+    }
+
+    const sorted = Array.from(recentHistoryByUrl.values()).sort((a, b) => (b.lastVisitTime || 0) - (a.lastVisitTime || 0));
+    recentHistoryByUrl.clear();
+
+    for (const item of sorted.slice(0, HISTORY_CACHE_LIMIT)) {
+      recentHistoryByUrl.set(item.url, item);
+    }
+  }
+
+  function upsertHistoryRecord(entry) {
+    const url = toSafeUrl(entry?.url);
+    if (!url) {
+      return;
+    }
+
+    const lastVisitTime = Number(entry?.lastVisitTime) || Date.now();
+    const visitCount = Number(entry?.visitCount) || 1;
+    const typedCount = Number(entry?.typedCount) || 0;
+    const title = toSafeText(entry?.title || '', 240);
+
+    const previous = recentHistoryByUrl.get(url);
+    const next = {
+      url,
+      title: title || previous?.title || '',
+      lastVisitTime: Math.max(lastVisitTime, previous?.lastVisitTime || 0),
+      visitCount: Math.max(visitCount, previous?.visitCount || 0),
+      typedCount: Math.max(typedCount, previous?.typedCount || 0)
+    };
+
+    recentHistoryByUrl.set(url, next);
+    trimHistoryCache();
+  }
+
+  function getHistoryPayload(url) {
+    const safeUrl = toSafeUrl(url);
+    if (!safeUrl) {
+      return null;
+    }
+
+    const item = recentHistoryByUrl.get(safeUrl);
+    if (!item) {
+      return null;
+    }
+
+    return {
+      url: item.url,
+      title: item.title,
+      lastVisitTime: item.lastVisitTime,
+      visitCount: item.visitCount,
+      typedCount: item.typedCount
+    };
+  }
+
+  function buildRecentHistory(limit = 40) {
+    return Array.from(recentHistoryByUrl.values())
+      .sort((a, b) => (b.lastVisitTime || 0) - (a.lastVisitTime || 0))
+      .slice(0, limit)
+      .map((item) => ({
+        url: item.url,
+        title: item.title,
+        lastVisitTime: item.lastVisitTime,
+        visitCount: item.visitCount,
+        typedCount: item.typedCount
+      }));
+  }
+
+  function queryTabs(queryInfo = {}) {
+    return new Promise((resolve) => {
+      chrome.tabs.query(queryInfo, (tabs) => {
+        if (chrome.runtime.lastError || !Array.isArray(tabs)) {
+          resolve([]);
+          return;
+        }
+
+        resolve(tabs);
+      });
+    });
+  }
+
+  function createTab(createProperties) {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.create(createProperties, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          reject(new Error(chrome.runtime.lastError?.message || 'No se pudo abrir la pestana.'));
+          return;
+        }
+
+        resolve(tab);
+      });
+    });
+  }
+
+  function removeTabs(tabIds) {
+    const ids = (Array.isArray(tabIds) ? tabIds : [tabIds]).map((id) => Number(id)).filter((id) => Number.isFinite(id));
+    if (!ids.length) {
+      return Promise.resolve(false);
+    }
+
+    return new Promise((resolve, reject) => {
+      chrome.tabs.remove(ids, () => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || 'No se pudo cerrar la pestana.'));
+          return;
+        }
+        resolve(true);
+      });
+    });
+  }
+
+  function updateTab(tabId, updateProperties) {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.update(tabId, updateProperties, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          reject(new Error(chrome.runtime.lastError?.message || 'No se pudo actualizar la pestana.'));
+          return;
+        }
+
+        resolve(tab);
+      });
+    });
+  }
+
+  function normalizeTabForTool(tab) {
+    return {
+      id: Number(tab?.id) || -1,
+      index: Number(tab?.index) || 0,
+      windowId: Number(tab?.windowId) || -1,
+      active: Boolean(tab?.active),
+      pinned: Boolean(tab?.pinned),
+      title: toSafeText(tab?.title || '', 220),
+      url: toSafeUrl(tab?.url || ''),
+      site: detectSiteByUrl(tab?.url || ''),
+      lastAccessed: Number(tab?.lastAccessed) || 0
+    };
+  }
+
+  function summarizeTabsForLogs(tabs, limit = 20) {
+    return (Array.isArray(tabs) ? tabs : []).slice(0, limit).map((tab) => ({
+      id: Number(tab?.id) || -1,
+      active: Boolean(tab?.active),
+      pinned: Boolean(tab?.pinned),
+      title: toSafeText(tab?.title || '', 120),
+      url: toSafeText(tab?.url || '', 160)
+    }));
+  }
+
+  function isProductivityTab(tab) {
+    if (!tab) {
+      return false;
+    }
+
+    if (tab.pinned) {
+      return true;
+    }
+
+    const url = String(tab.url || '').toLowerCase();
+    const title = String(tab.title || '').toLowerCase();
+    const productivityHostHints = [
+      'notion.so',
+      'calendar.google.com',
+      'docs.google.com',
+      'sheets.google.com',
+      'slides.google.com',
+      'drive.google.com',
+      'github.com',
+      'gitlab.com',
+      'linear.app',
+      'jira',
+      'retool.com',
+      'figma.com',
+      'slack.com',
+      'clickup.com',
+      'asana.com',
+      'trello.com'
+    ];
+    const productivityTitleHints = [
+      'dashboard',
+      'admin',
+      'project',
+      'workspace',
+      'kanban',
+      'sprint',
+      'issue',
+      'task',
+      'documentacion',
+      'docs'
+    ];
+
+    if (productivityHostHints.some((hint) => url.includes(hint))) {
+      return true;
+    }
+
+    if (productivityTitleHints.some((hint) => title.includes(hint))) {
+      return true;
+    }
+
+    return false;
+  }
+
+  async function runBrowserAction(action, args = {}) {
+    const safeAction = String(action || '').trim();
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const requestId = `browser-action-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
+
+    logDebug(`runBrowserAction:start:${safeAction}`, {
+      requestId,
+      action: safeAction,
+      args: safeArgs
+    });
+
+    if (safeAction === 'listTabs') {
+      const tabs = await queryTabs({});
+      logDebug(`runBrowserAction:done:${safeAction}`, {
+        requestId,
+        tabCount: tabs.length
+      });
+      return {
+        ok: true,
+        result: tabs.map(normalizeTabForTool)
+      };
+    }
+
+    if (safeAction === 'openNewTab') {
+      const targetUrl = toSafeUrl(safeArgs.url);
+      const createOptions = {
+        active: safeArgs.active !== false
+      };
+
+      if (targetUrl) {
+        createOptions.url = targetUrl;
+      }
+
+      const tab = await createTab(createOptions);
+      logDebug(`runBrowserAction:done:${safeAction}`, {
+        requestId,
+        openedTab: normalizeTabForTool(tab)
+      });
+      return {
+        ok: true,
+        result: normalizeTabForTool(tab)
+      };
+    }
+
+    if (safeAction === 'focusTab') {
+      const tabId = Number(safeArgs.tabId);
+      let selected = null;
+
+      if (Number.isFinite(tabId) && tabId >= 0) {
+        selected = await getTabById(tabId);
+      }
+
+      if (!selected) {
+        const tabs = await queryTabs({});
+        const urlContains = String(safeArgs.urlContains || '').toLowerCase();
+        const titleContains = String(safeArgs.titleContains || '').toLowerCase();
+
+        selected =
+          tabs.find((tab) => {
+            const title = String(tab.title || '').toLowerCase();
+            const url = String(tab.url || '').toLowerCase();
+            const byUrl = urlContains ? url.includes(urlContains) : true;
+            const byTitle = titleContains ? title.includes(titleContains) : true;
+            return byUrl && byTitle;
+          }) || null;
+      }
+
+      if (!selected || typeof selected.id !== 'number') {
+        logWarn(`runBrowserAction:fail:${safeAction}`, {
+          requestId,
+          reason: 'No tab matched for focus.',
+          args: safeArgs,
+          tabs: summarizeTabsForLogs(await queryTabs({}), 30)
+        });
+        return { ok: false, error: 'No se encontro pestana para enfocar.' };
+      }
+
+      const updated = await updateTab(selected.id, { active: true });
+      setActiveTab(updated.id);
+      logDebug(`runBrowserAction:done:${safeAction}`, {
+        requestId,
+        focusedTab: normalizeTabForTool(updated)
+      });
+      return {
+        ok: true,
+        result: normalizeTabForTool(updated)
+      };
+    }
+
+    if (safeAction === 'closeTab') {
+      const tabId = Number(safeArgs.tabId);
+      const tabs = await queryTabs({});
+      let targetTab = null;
+
+      if (Number.isFinite(tabId) && tabId >= 0) {
+        targetTab = tabs.find((tab) => tab.id === tabId) || null;
+      }
+
+      if (!targetTab) {
+        const urlContains = String(safeArgs.urlContains || '').toLowerCase();
+        const titleContains = String(safeArgs.titleContains || '').toLowerCase();
+        const exactUrl = toSafeUrl(safeArgs.url);
+        const closeQuery = String(safeArgs.query || '').toLowerCase().trim();
+
+        targetTab =
+          tabs.find((tab) => {
+            const title = String(tab.title || '').toLowerCase();
+            const url = String(tab.url || '').toLowerCase();
+            const byExactUrl = exactUrl ? url === exactUrl.toLowerCase() : true;
+            const byUrl = urlContains ? url.includes(urlContains) : true;
+            const byTitle = titleContains ? title.includes(titleContains) : true;
+            const byQuery = closeQuery ? title.includes(closeQuery) || url.includes(closeQuery) : true;
+            return byExactUrl && byUrl && byTitle && byQuery;
+          }) || null;
+
+        logDebug('runBrowserAction:closeTab:search', {
+          requestId,
+          criteria: {
+            tabId: Number.isFinite(tabId) ? tabId : null,
+            exactUrl: exactUrl || '',
+            urlContains,
+            titleContains,
+            query: closeQuery
+          },
+          tabCount: tabs.length,
+          tabs: summarizeTabsForLogs(tabs, 30)
+        });
+      }
+
+      if (!targetTab || typeof targetTab.id !== 'number') {
+        logWarn(`runBrowserAction:fail:${safeAction}`, {
+          requestId,
+          reason: 'No tab matched for close.',
+          args: safeArgs,
+          tabs: summarizeTabsForLogs(tabs, 30)
+        });
+        return { ok: false, error: 'No se encontro pestana para cerrar.' };
+      }
+
+      if (safeArgs.preventActive === true && targetTab.active) {
+        logWarn(`runBrowserAction:fail:${safeAction}`, {
+          requestId,
+          reason: 'Target tab active and preventActive=true.',
+          targetTab: normalizeTabForTool(targetTab)
+        });
+        return { ok: false, error: 'La pestana objetivo esta activa y preventActive=true.' };
+      }
+
+      await removeTabs(targetTab.id);
+      tabContextState.delete(targetTab.id);
+      tabTemporalState.delete(targetTab.id);
+      if (activeTabId === targetTab.id) {
+        setActiveTab(-1);
+        syncActiveTabFromWindow();
+      }
+
+      logDebug(`runBrowserAction:done:${safeAction}`, {
+        requestId,
+        closedTab: normalizeTabForTool(targetTab)
+      });
+
+      return {
+        ok: true,
+        result: normalizeTabForTool(targetTab)
+      };
+    }
+
+    if (safeAction === 'closeNonProductivityTabs') {
+      const keepActive = safeArgs.keepActive !== false;
+      const keepPinned = safeArgs.keepPinned !== false;
+      const dryRun = safeArgs.dryRun === true;
+      const onlyCurrentWindow = safeArgs.onlyCurrentWindow !== false;
+
+      const tabs = await queryTabs(onlyCurrentWindow ? { currentWindow: true } : {});
+      const candidates = tabs.filter((tab) => {
+        if (keepActive && tab.active) {
+          return false;
+        }
+        if (keepPinned && tab.pinned) {
+          return false;
+        }
+        return !isProductivityTab(tab);
+      });
+
+      if (!candidates.length) {
+        logDebug(`runBrowserAction:done:${safeAction}`, {
+          requestId,
+          closed: 0,
+          reason: 'No candidate tabs for closure.'
+        });
+        return {
+          ok: true,
+          result: {
+            closed: 0,
+            tabs: []
+          }
+        };
+      }
+
+      if (!dryRun) {
+        await removeTabs(candidates.map((tab) => tab.id));
+        for (const tab of candidates) {
+          tabContextState.delete(tab.id);
+          tabTemporalState.delete(tab.id);
+        }
+      }
+
+      logDebug(`runBrowserAction:done:${safeAction}`, {
+        requestId,
+        closed: dryRun ? 0 : candidates.length,
+        dryRun,
+        tabs: candidates.map(normalizeTabForTool)
+      });
+      return {
+        ok: true,
+        result: {
+          closed: dryRun ? 0 : candidates.length,
+          dryRun,
+          tabs: candidates.map(normalizeTabForTool)
+        }
+      };
+    }
+
+    logWarn(`runBrowserAction:fail:${safeAction}`, {
+      requestId,
+      reason: 'Unsupported browser action.'
+    });
+    return {
+      ok: false,
+      error: `Accion de browser no soportada: ${safeAction || 'unknown'}`
+    };
+  }
+
   function normalizeContext(tab, context = {}) {
     const safeTab = tab && typeof tab === 'object' ? tab : {};
     const safeContext = context && typeof context === 'object' ? context : {};
 
+    const tabId =
+      typeof safeTab.id === 'number' ? safeTab.id : typeof safeContext.tabId === 'number' ? safeContext.tabId : -1;
     const url = String(safeContext.url || safeTab.url || '');
     const title = toSafeText(safeContext.title || safeTab.title || '');
     const description = toSafeText(safeContext.description || '', 360);
@@ -70,10 +642,19 @@
         ? safeContext.site.trim().toLowerCase()
         : detectSiteByUrl(url);
 
-    const details = safeContext.details && typeof safeContext.details === 'object' ? safeContext.details : {};
+    const baseDetails = safeContext.details && typeof safeContext.details === 'object' ? safeContext.details : {};
+    const temporal = getTabTemporalPayload(tabId, url, Date.now());
+    const history = getHistoryPayload(url);
+    const importanceScore = computeImportanceScore(temporal);
+    const details = {
+      ...baseDetails,
+      temporal,
+      history,
+      importanceScore
+    };
 
     return {
-      tabId: typeof safeTab.id === 'number' ? safeTab.id : typeof safeContext.tabId === 'number' ? safeContext.tabId : -1,
+      tabId,
       url,
       title,
       description,
@@ -92,6 +673,7 @@
     return {
       reason,
       activeTabId,
+      history: buildRecentHistory(60),
       tabs,
       updatedAt: Date.now()
     };
@@ -142,7 +724,7 @@
     tabContextState.set(normalized.tabId, normalized);
 
     if (activeTabId === -1 && tab.active) {
-      activeTabId = normalized.tabId;
+      setActiveTab(normalized.tabId);
     }
 
     broadcastSnapshot(reason);
@@ -177,6 +759,7 @@
     const tab = await getTabById(tabId);
     if (!tab) {
       tabContextState.delete(tabId);
+      tabTemporalState.delete(tabId);
       broadcastSnapshot('tab_removed');
       return;
     }
@@ -197,17 +780,21 @@
         return;
       }
 
+      let nextActive = -1;
+
       for (const tab of tabs) {
         if (!tab || typeof tab.id !== 'number') {
           continue;
         }
 
         if (tab.active && tab.highlighted) {
-          activeTabId = tab.id;
+          nextActive = tab.id;
         }
 
         requestContextFromTab(tab.id, reason);
       }
+
+      setActiveTab(nextActive);
     });
   }
 
@@ -215,10 +802,11 @@
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs && tabs[0];
       if (!tab || typeof tab.id !== 'number') {
+        setActiveTab(-1);
         return;
       }
 
-      activeTabId = tab.id;
+      setActiveTab(tab.id);
       requestContextFromTab(tab.id, 'active_window_changed');
     });
   }
@@ -234,7 +822,8 @@
   });
 
   chrome.tabs.onActivated.addListener((activeInfo) => {
-    activeTabId = activeInfo && typeof activeInfo.tabId === 'number' ? activeInfo.tabId : -1;
+    const nextTabId = activeInfo && typeof activeInfo.tabId === 'number' ? activeInfo.tabId : -1;
+    setActiveTab(nextTabId);
     if (activeTabId >= 0) {
       requestContextFromTab(activeTabId, 'tab_activated');
       broadcastSnapshot('tab_activated');
@@ -256,16 +845,28 @@
     }
 
     if (tab && tab.active) {
-      activeTabId = tabId;
+      setActiveTab(tabId);
+    }
+
+    if (typeof changeInfo.url === 'string') {
+      const temporal = ensureTabTemporal(tabId);
+      if (temporal) {
+        temporal.url = changeInfo.url;
+        temporal.visitStartedAt = Date.now();
+        temporal.accumulatedActiveMs = 0;
+        temporal.activeSince = tab && tab.active ? Date.now() : null;
+      }
     }
 
     requestContextFromTab(tabId, 'tab_updated');
   });
 
   chrome.tabs.onRemoved.addListener((tabId) => {
+    pauseTabActiveSession(tabId, Date.now());
     tabContextState.delete(tabId);
+    tabTemporalState.delete(tabId);
     if (activeTabId === tabId) {
-      activeTabId = -1;
+      setActiveTab(-1);
       syncActiveTabFromWindow();
     }
 
@@ -277,6 +878,7 @@
       return;
     }
 
+    ensureTabTemporal(tab.id);
     requestContextFromTab(tab.id, 'tab_created');
   });
 
@@ -288,6 +890,52 @@
 
       syncActiveTabFromWindow();
     });
+  }
+
+  if (chrome.history && chrome.history.onVisited) {
+    chrome.history.onVisited.addListener((entry) => {
+      upsertHistoryRecord(entry);
+      broadcastSnapshot('history_visited');
+    });
+
+    if (chrome.history.onVisitRemoved) {
+      chrome.history.onVisitRemoved.addListener((entry) => {
+        if (entry && entry.allHistory) {
+          recentHistoryByUrl.clear();
+          broadcastSnapshot('history_cleared');
+          return;
+        }
+
+        const removedUrls = Array.isArray(entry?.urls) ? entry.urls : [];
+        for (const url of removedUrls) {
+          const safe = toSafeUrl(url);
+          if (safe) {
+            recentHistoryByUrl.delete(safe);
+          }
+        }
+
+        broadcastSnapshot('history_pruned');
+      });
+    }
+
+    chrome.history.search(
+      {
+        text: '',
+        maxResults: HISTORY_CACHE_LIMIT,
+        startTime: Date.now() - 1000 * 60 * 60 * 24 * 14
+      },
+      (items) => {
+        if (chrome.runtime.lastError || !Array.isArray(items)) {
+          return;
+        }
+
+        for (const item of items) {
+          upsertHistoryRecord(item);
+        }
+
+        broadcastSnapshot('history_bootstrap');
+      }
+    );
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -302,7 +950,7 @@
       }
 
       if (senderTab.active) {
-        activeTabId = senderTab.id;
+        setActiveTab(senderTab.id);
       }
 
       upsertContextFromTab(senderTab, message.context || {}, message.reason || 'context_push');
@@ -312,6 +960,7 @@
     if (message.type === MESSAGE_TYPES.GET_TAB_CONTEXT_SNAPSHOT) {
       chrome.tabs.query({}, (tabs) => {
         const known = new Set();
+        let nextActive = -1;
 
         for (const tab of tabs || []) {
           if (!tab || typeof tab.id !== 'number') {
@@ -339,18 +988,61 @@
           requestContextFromTab(tab.id, 'snapshot_refresh');
 
           if (tab.active && tab.highlighted) {
-            activeTabId = tab.id;
+            nextActive = tab.id;
           }
         }
+
+        setActiveTab(nextActive);
 
         for (const tabId of tabContextState.keys()) {
           if (!known.has(tabId)) {
             tabContextState.delete(tabId);
+            tabTemporalState.delete(tabId);
           }
         }
 
         sendResponse({ ok: true, snapshot: buildSnapshot('snapshot_request') });
       });
+
+      return true;
+    }
+
+    if (message.type === MESSAGE_TYPES.BROWSER_ACTION) {
+      const action = typeof message.action === 'string' ? message.action : '';
+      const args = message.args && typeof message.args === 'object' ? message.args : {};
+      const requestMeta = {
+        senderTabId: Number(sender?.tab?.id) || -1,
+        action,
+        args
+      };
+
+      logDebug('onMessage:BROWSER_ACTION:received', requestMeta);
+
+      if (!action) {
+        logWarn('onMessage:BROWSER_ACTION:invalid', requestMeta);
+        sendResponse({ ok: false, error: 'Accion de browser requerida.' });
+        return false;
+      }
+
+      Promise.resolve(runBrowserAction(action, args))
+        .then((result) => {
+          logDebug('onMessage:BROWSER_ACTION:resolved', {
+            ...requestMeta,
+            result
+          });
+          sendResponse(result || { ok: false, error: 'Sin respuesta de browser action.' });
+          broadcastSnapshot('browser_action');
+        })
+        .catch((error) => {
+          logWarn('onMessage:BROWSER_ACTION:error', {
+            ...requestMeta,
+            error: error instanceof Error ? error.message : String(error || '')
+          });
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : 'Error ejecutando browser action.'
+          });
+        });
 
       return true;
     }

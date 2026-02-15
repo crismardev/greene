@@ -23,6 +23,33 @@
     return text.slice(0, limit);
   }
 
+  function extractEntities(text, limit = 8) {
+    const source = String(text || '');
+    if (!source) {
+      return [];
+    }
+
+    const matches = source.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b/g) || [];
+    const unique = [];
+
+    for (const item of matches) {
+      const token = toSafeText(item, 80);
+      if (!token || token.length < 3) {
+        continue;
+      }
+
+      if (!unique.includes(token)) {
+        unique.push(token);
+      }
+
+      if (unique.length >= limit) {
+        break;
+      }
+    }
+
+    return unique;
+  }
+
   function getDescriptionFromDom() {
     const candidates = [
       document.querySelector('meta[name="description"]'),
@@ -51,18 +78,60 @@
     return toSafeText(text, limit);
   }
 
+  function parseWithReadability() {
+    const Reader = window.Readability || globalThis.Readability;
+    if (typeof Reader !== 'function') {
+      return null;
+    }
+
+    let docClone = null;
+
+    try {
+      docClone = document.cloneNode(true);
+    } catch (_) {
+      return null;
+    }
+
+    if (!docClone) {
+      return null;
+    }
+
+    try {
+      const parser = new Reader(docClone, {
+        charThreshold: 120,
+        keepClasses: false
+      });
+      const article = parser.parse();
+      return article && typeof article === 'object' ? article : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function collectContext(options = {}) {
     const textLimit = Number(options.textLimit) || 2000;
+    const article = parseWithReadability();
+    const readabilityText = toSafeText(article?.textContent || '', textLimit);
+    const fallbackText = getBodyTextExcerpt(textLimit);
+    const mergedText = readabilityText || fallbackText;
+    const titleFromReadability = toSafeText(article?.title || '', 280);
+    const descriptionFromReadability = toSafeText(article?.excerpt || '', 360);
+    const author = toSafeText(article?.byline || '', 160);
 
     return {
       site: 'generic',
       url: location.href,
-      title: toSafeText(document.title || '', 280),
-      description: getDescriptionFromDom(),
-      textExcerpt: getBodyTextExcerpt(textLimit),
+      title: titleFromReadability || toSafeText(document.title || '', 280),
+      description: descriptionFromReadability || getDescriptionFromDom(),
+      textExcerpt: mergedText,
       details: {
         language: document.documentElement?.lang || '',
-        pathname: location.pathname || ''
+        pathname: location.pathname || '',
+        author,
+        articleLength: Number(article?.length) || mergedText.length || 0,
+        siteName: toSafeText(article?.siteName || '', 140),
+        entities: extractEntities(mergedText, 10),
+        semanticSource: article ? 'readability' : 'fallback_dom'
       }
     };
   }

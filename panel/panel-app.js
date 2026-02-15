@@ -2,6 +2,7 @@ import {
   buildDefaultChatSystemPrompt,
   DEFAULT_ASSISTANT_LANGUAGE
 } from './services/prompt-service.js';
+import { marked } from '../node_modules/marked/lib/marked.esm.js';
 import { setStatus } from './services/status-service.js';
 import { createPanelStorageService } from './services/panel-storage-service.js';
 import { createOllamaService } from './services/ollama-service.js';
@@ -9,6 +10,7 @@ import { createAiProviderService, AI_PROVIDER_IDS } from './services/ai-provider
 import { createPinCryptoService } from './services/pin-crypto-service.js';
 import { createSettingsScreenController } from './screens/settings-screen.js';
 import { createTabContextService } from './services/tab-context-service.js';
+import { createContextMemoryService } from './services/context-memory-service.js';
 import { buildTabSummaryPrompt, toJsonTabRecord } from './services/site-context/generic-site-context.js';
 import {
   buildWhatsappMetaLabel,
@@ -25,6 +27,8 @@ export function initPanelApp() {
   if (!cfg) {
     return;
   }
+
+  const LOG_PREFIX = '[greenstudio-ext/panel]';
 
   const { TOOL_KEYS, PREFERENCE_KEYS, DEFAULT_SETTINGS, APPLY_MESSAGE_TYPE } = cfg;
 
@@ -111,6 +115,7 @@ export function initPanelApp() {
   const MAX_CHAT_INPUT_ROWS = 8;
   const MAX_CHAT_CONTEXT_MESSAGES = 20;
   const MAX_CHAT_HISTORY_MESSAGES = 160;
+  const MAX_LOCAL_TOOL_CALLS = 3;
   const MAX_IMAGE_FILES = 10;
   const MAX_TABS_FOR_AI_SUMMARY = 20;
   const TAB_SUMMARY_MAX_CHARS = 160;
@@ -339,7 +344,7 @@ export function initPanelApp() {
   let stageResizeObserver = null;
   let settingsScreenController = null;
   let settingsScreenState = null;
-  let tabContextSnapshot = { activeTabId: -1, tabs: [], updatedAt: Date.now(), reason: 'init' };
+  let tabContextSnapshot = { activeTabId: -1, tabs: [], history: [], updatedAt: Date.now(), reason: 'init' };
   let tabSummaryByKey = new Map();
   let tabSummaryQueue = [];
   let tabSummaryQueueRunning = false;
@@ -351,6 +356,7 @@ export function initPanelApp() {
     loading: false
   };
   let whatsappSuggestionToken = 0;
+  let contextIngestionPromise = Promise.resolve();
 
   const prefersDarkMedia =
     typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -376,6 +382,29 @@ export function initPanelApp() {
   const tabContextService = createTabContextService({
     onSnapshot: handleTabContextSnapshot
   });
+  const contextMemoryService = createContextMemoryService();
+  marked.setOptions({
+    gfm: true,
+    breaks: true
+  });
+
+  function logDebug(message, payload) {
+    if (payload === undefined) {
+      console.debug(`${LOG_PREFIX} ${message}`);
+      return;
+    }
+
+    console.debug(`${LOG_PREFIX} ${message}`, payload);
+  }
+
+  function logWarn(message, payload) {
+    if (payload === undefined) {
+      console.warn(`${LOG_PREFIX} ${message}`);
+      return;
+    }
+
+    console.warn(`${LOG_PREFIX} ${message}`, payload);
+  }
 
   function focusChatInput() {
     try {
@@ -500,6 +529,98 @@ export function initPanelApp() {
     const withoutStart = raw.replace(/^\s*\[?\s*(?:emotion|emocion)\s*[:=]\s*[a-z_]+\s*\]?\s*/i, '');
     const withoutEnd = withoutStart.replace(/\s*\[?\s*(?:emotion|emocion)\s*[:=]\s*[a-z_]+\s*\]?\s*$/i, '');
     return withoutEnd.trim();
+  }
+
+  function escapeHtml(text) {
+    const raw = String(text || '');
+    return raw
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function sanitizeMarkdownHtml(html) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(String(html || ''), 'text/html');
+    const blockedTags = new Set([
+      'script',
+      'style',
+      'iframe',
+      'object',
+      'embed',
+      'link',
+      'meta',
+      'base',
+      'form',
+      'input',
+      'button',
+      'textarea',
+      'select',
+      'option'
+    ]);
+
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT);
+    const toRemove = [];
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const tag = String(node.tagName || '').toLowerCase();
+
+      if (blockedTags.has(tag)) {
+        toRemove.push(node);
+        continue;
+      }
+
+      const attributes = Array.from(node.attributes || []);
+      for (const attribute of attributes) {
+        const name = String(attribute.name || '').toLowerCase();
+        const value = String(attribute.value || '');
+
+        if (name.startsWith('on') || name === 'srcdoc') {
+          node.removeAttribute(attribute.name);
+          continue;
+        }
+
+        if ((name === 'href' || name === 'src') && /^\s*javascript:/i.test(value)) {
+          node.removeAttribute(attribute.name);
+          continue;
+        }
+      }
+
+      if (tag === 'a') {
+        node.setAttribute('target', '_blank');
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    }
+
+    for (const node of toRemove) {
+      node.remove();
+    }
+
+    return doc.body.innerHTML;
+  }
+
+  function renderMarkdownInto(element, markdownText) {
+    const safeTarget = element;
+    const source = String(markdownText || '').trim();
+
+    if (!safeTarget) {
+      return;
+    }
+
+    if (!source) {
+      safeTarget.textContent = '';
+      return;
+    }
+
+    try {
+      const rawHtml = marked.parse(source);
+      safeTarget.innerHTML = sanitizeMarkdownHtml(rawHtml);
+    } catch (_) {
+      safeTarget.innerHTML = `<p>${escapeHtml(source)}</p>`;
+    }
   }
 
   function ensureBrandEmotionMetricsPath() {
@@ -2152,7 +2273,11 @@ export function initPanelApp() {
 
       bubble.append(loader, label);
     } else {
-      bubble.textContent = visibleText || message.content;
+      if (message.role === 'assistant') {
+        renderMarkdownInto(bubble, visibleText || message.content);
+      } else {
+        bubble.textContent = visibleText || message.content;
+      }
     }
 
     article.appendChild(bubble);
@@ -2197,19 +2322,64 @@ export function initPanelApp() {
     });
   }
 
-  async function pushChatMessage(role, content) {
+  async function pushChatMessage(role, content, options = {}) {
     const text = content.trim();
     if (!text) {
       return;
     }
 
-    chatHistory.push({
+    const contextUsedRaw = Array.isArray(options.context_used)
+      ? options.context_used
+      : Array.isArray(options.contextUsed)
+        ? options.contextUsed
+        : [];
+    const extractedFactsRaw = Array.isArray(options.extracted_facts)
+      ? options.extracted_facts
+      : Array.isArray(options.extractedFacts)
+        ? options.extractedFacts
+        : [];
+
+    const contextUsed = contextUsedRaw
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 12);
+
+    const extractedFacts = extractedFactsRaw
+      .map((item) => {
+        if (typeof item === 'string') {
+          const textValue = item.trim();
+          return textValue ? { type: 'user_fact', text: textValue } : null;
+        }
+
+        if (!item || typeof item !== 'object') {
+          return null;
+        }
+
+        const type = String(item.type || 'user_fact').trim() || 'user_fact';
+        const textValue = String(item.text || '').trim();
+        if (!textValue) {
+          return null;
+        }
+
+        return {
+          type,
+          text: textValue
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 8);
+
+    const messageRecord = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       role,
       content: text,
       tool: selectedChatTool,
+      context_used: contextUsed,
+      extracted_facts: extractedFacts,
       createdAt: Date.now()
-    });
+    };
+
+    chatHistory.push(messageRecord);
 
     if (chatHistory.length > MAX_CHAT_HISTORY_MESSAGES) {
       chatHistory = chatHistory.slice(-MAX_CHAT_HISTORY_MESSAGES);
@@ -2218,6 +2388,7 @@ export function initPanelApp() {
     renderChatMessages();
     scrollChatToBottom();
     await saveChatHistory();
+    return messageRecord;
   }
 
   async function resetChatHistory() {
@@ -2228,7 +2399,224 @@ export function initPanelApp() {
     startRandomEmotionCycle({ immediate: true });
   }
 
-  function buildChatConversation() {
+  function buildActiveTabsSystemContext(limit = 10) {
+    const tabs = Array.isArray(tabContextSnapshot?.tabs) ? tabContextSnapshot.tabs : [];
+    const trimmed = tabs.slice(0, limit);
+
+    if (!trimmed.length) {
+      return 'Navegacion activa (tabs abiertas): sin tabs detectadas.';
+    }
+
+    const lines = trimmed.map((tab, index) => {
+      const tabId = Number(tab?.tabId) || -1;
+      const site = String(tab?.site || 'generic');
+      const title = String(tab?.title || 'Sin titulo').replace(/\s+/g, ' ').trim().slice(0, 120);
+      const url = String(tab?.url || '').slice(0, 160);
+      const marker = tabId === tabContextSnapshot.activeTabId ? ' (activa)' : '';
+      return `${index + 1}. [tabId:${tabId}] ${title}${marker} | site:${site} | ${url}`;
+    });
+
+    return `Navegacion activa (tabs abiertas):\n${lines.join('\n')}`;
+  }
+
+  function buildRecentHistorySystemContext(limit = 10) {
+    const history = Array.isArray(tabContextSnapshot?.history) ? tabContextSnapshot.history : [];
+    const trimmed = history.slice(0, limit);
+
+    if (!trimmed.length) {
+      return 'Navegacion reciente (historial): sin registros.';
+    }
+
+    const lines = trimmed.map((item, index) => {
+      const title = String(item?.title || item?.url || 'Sin titulo').replace(/\s+/g, ' ').trim().slice(0, 110);
+      const url = String(item?.url || '').slice(0, 150);
+      const visits = Math.max(0, Number(item?.visitCount) || 0);
+      return `${index + 1}. ${title} | visitas:${visits} | ${url}`;
+    });
+
+    return `Navegacion reciente (historial):\n${lines.join('\n')}`;
+  }
+
+  function buildLocalToolSystemPrompt() {
+    return [
+      'Eres un agente de productividad que opera en el navegador del usuario.',
+      'Responde SIEMPRE en Markdown claro.',
+      'Si necesitas ejecutar acciones locales del navegador, responde SOLO con un bloque ```tool JSON``` sin texto adicional.',
+      'Formato exacto del bloque tool:',
+      '```tool',
+      '{"tool":"browser.<accion>","args":{...}}',
+      '```',
+      'Tools disponibles:',
+      '- browser.listTabs',
+      '- browser.openNewTab (args: url, active)',
+      '- browser.focusTab (args: tabId o urlContains/titleContains)',
+      '- browser.closeTab (args: tabId o url/urlContains/titleContains, preventActive)',
+      '- browser.closeNonProductivityTabs (args: dryRun, keepPinned, keepActive, onlyCurrentWindow)',
+      'No inventes tools fuera de esa lista.',
+      buildActiveTabsSystemContext(),
+      buildRecentHistorySystemContext()
+    ].join('\n');
+  }
+
+  function normalizeLocalToolCall(raw) {
+    const source = raw && typeof raw === 'object' ? raw : {};
+    const inputTool = String(source.tool || source.action || '').trim();
+    const aliases = {
+      'browser.list_tabs': 'browser.listTabs',
+      'browser.listTabs': 'browser.listTabs',
+      'browser.open_new_tab': 'browser.openNewTab',
+      'browser.openTab': 'browser.openNewTab',
+      'browser.openNewTab': 'browser.openNewTab',
+      'browser.focus_tab': 'browser.focusTab',
+      'browser.focusTab': 'browser.focusTab',
+      'browser.close_tab': 'browser.closeTab',
+      'browser.closeTab': 'browser.closeTab',
+      'browser.close_non_productivity_tabs': 'browser.closeNonProductivityTabs',
+      'browser.closeNonProductivityTabs': 'browser.closeNonProductivityTabs'
+    };
+    const tool = aliases[inputTool] || '';
+    const args = source.args && typeof source.args === 'object' ? source.args : {};
+
+    if (!tool) {
+      return null;
+    }
+
+    return { tool, args };
+  }
+
+  function extractToolCallsFromText(text) {
+    const source = String(text || '');
+    if (!source) {
+      logDebug('extractToolCallsFromText:empty');
+      return [];
+    }
+
+    const calls = [];
+    const blockRegex = /```(?:tool|json)\s*([\s\S]*?)```/gi;
+    const xmlRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
+    const chunks = [];
+
+    let match = null;
+    while ((match = blockRegex.exec(source))) {
+      if (match[1]) {
+        chunks.push(match[1].trim());
+      }
+    }
+
+    while ((match = xmlRegex.exec(source))) {
+      if (match[1]) {
+        chunks.push(match[1].trim());
+      }
+    }
+
+    for (const chunk of chunks) {
+      if (!chunk) {
+        continue;
+      }
+
+      const normalizedChunk = chunk.replace(/^json\s*/i, '').trim();
+
+      try {
+        const parsed = JSON.parse(normalizedChunk);
+        const list = Array.isArray(parsed) ? parsed : [parsed];
+        for (const item of list) {
+          const normalized = normalizeLocalToolCall(item);
+          if (normalized) {
+            calls.push(normalized);
+          }
+        }
+      } catch (_) {
+        // Ignore invalid blocks.
+        logWarn('extractToolCallsFromText:invalid_block', {
+          chunk: normalizedChunk.slice(0, 360)
+        });
+      }
+
+      if (calls.length >= MAX_LOCAL_TOOL_CALLS) {
+        break;
+      }
+    }
+
+    const parsed = calls.slice(0, MAX_LOCAL_TOOL_CALLS);
+    logDebug('extractToolCallsFromText:parsed', {
+      parsedCount: parsed.length,
+      parsed
+    });
+    return parsed;
+  }
+
+  async function executeLocalToolCalls(toolCalls) {
+    const calls = Array.isArray(toolCalls) ? toolCalls.slice(0, MAX_LOCAL_TOOL_CALLS) : [];
+    const results = [];
+
+    logDebug('executeLocalToolCalls:start', {
+      callCount: calls.length,
+      calls
+    });
+
+    for (const call of calls) {
+      const tool = String(call?.tool || '').trim();
+      const args = call?.args && typeof call.args === 'object' ? call.args : {};
+      const browserAction = tool.replace(/^browser\./, '');
+
+      if (!browserAction) {
+        results.push({
+          tool,
+          ok: false,
+          error: 'Tool invalida.'
+        });
+        continue;
+      }
+
+      try {
+        logDebug('executeLocalToolCalls:invoke', {
+          tool,
+          browserAction,
+          args
+        });
+        const response = await tabContextService.runBrowserAction(browserAction, args);
+        results.push({
+          tool,
+          ok: response?.ok === true,
+          result: response?.result,
+          error: response?.error || ''
+        });
+        logDebug('executeLocalToolCalls:result', {
+          tool,
+          response
+        });
+      } catch (error) {
+        results.push({
+          tool,
+          ok: false,
+          error: error instanceof Error ? error.message : 'Error ejecutando tool local.'
+        });
+        logWarn('executeLocalToolCalls:error', {
+          tool,
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+      }
+    }
+
+    logDebug('executeLocalToolCalls:done', {
+      resultCount: results.length,
+      results
+    });
+    return results;
+  }
+
+  function buildToolResultsFollowupPrompt(toolResults) {
+    return [
+      'Resultado de tools locales ejecutadas:',
+      '```json',
+      JSON.stringify(Array.isArray(toolResults) ? toolResults : [], null, 2),
+      '```',
+      'Con este resultado, responde al usuario en Markdown.',
+      'No repitas ni vuelvas a invocar tools si ya se ejecutaron correctamente.'
+    ].join('\n');
+  }
+
+  async function buildChatConversation(userQuery) {
     const languageAwareDefaultPrompt = buildDefaultChatSystemPrompt(
       panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE
     );
@@ -2236,6 +2624,23 @@ export function initPanelApp() {
       selectedChatTool === 'chat'
         ? panelSettings.systemPrompt || languageAwareDefaultPrompt
         : CHAT_TOOLS[selectedChatTool].systemPrompt;
+    let dynamicSystemPrompt = systemPrompt;
+    let contextUsed = [];
+    const localToolPrompt = selectedChatTool === 'chat' ? buildLocalToolSystemPrompt() : '';
+
+    try {
+      const identityPayload = await contextMemoryService.buildDynamicIdentityHeader(userQuery, {
+        user_name: panelSettings.displayName || ''
+      });
+      const contextHeader = String(identityPayload?.header || '').trim();
+      const contextHits = Array.isArray(identityPayload?.contextHits) ? identityPayload.contextHits : [];
+      contextUsed = contextHits.map((item) => String(item?.id || '').trim()).filter(Boolean);
+
+      dynamicSystemPrompt = [contextHeader, localToolPrompt, systemPrompt].filter(Boolean).join('\n\n').trim();
+    } catch (_) {
+      dynamicSystemPrompt = [localToolPrompt, systemPrompt].filter(Boolean).join('\n\n').trim();
+    }
+
     const context = chatHistory
       .slice(-MAX_CHAT_CONTEXT_MESSAGES)
       .map((msg) => ({
@@ -2243,13 +2648,31 @@ export function initPanelApp() {
         content: msg.content
       }));
 
-    return [{ role: 'system', content: systemPrompt }, ...context];
+    return {
+      messages: [{ role: 'system', content: dynamicSystemPrompt }, ...context],
+      contextUsed
+    };
   }
 
-  async function streamChatResponse(onChunk) {
+  async function streamChatResponse(userQuery, onChunk, options = {}) {
     const temperature = Number(settings[PREFERENCE_KEYS.AI_TEMPERATURE] ?? DEFAULT_SETTINGS[PREFERENCE_KEYS.AI_TEMPERATURE]);
     const safeTemp = Number.isFinite(temperature) ? temperature : DEFAULT_SETTINGS[PREFERENCE_KEYS.AI_TEMPERATURE];
-    const messages = buildChatConversation();
+    const conversation = await buildChatConversation(userQuery);
+    const additionalMessages = Array.isArray(options.additionalMessages)
+      ? options.additionalMessages
+          .map((item) => {
+            const role = item?.role === 'assistant' || item?.role === 'system' ? item.role : 'user';
+            const content = String(item?.content || '').trim();
+            if (!content) {
+              return null;
+            }
+
+            return { role, content };
+          })
+          .filter(Boolean)
+      : [];
+    const messages = [...(Array.isArray(conversation?.messages) ? conversation.messages : []), ...additionalMessages];
+    const contextUsed = Array.isArray(conversation?.contextUsed) ? conversation.contextUsed : [];
     const activeProfile = getActiveModelProfile();
 
     if (!activeProfile) {
@@ -2266,13 +2689,18 @@ export function initPanelApp() {
       onChunk(chunk);
     };
 
-    return aiProviderService.streamWithProfile({
+    const output = await aiProviderService.streamWithProfile({
       profile: activeProfile,
       messages,
       temperature: safeTemp,
       apiKey,
       onChunk: handleChunk
     });
+
+    return {
+      output,
+      contextUsed
+    };
   }
 
   async function sendChatMessage() {
@@ -2294,7 +2722,7 @@ export function initPanelApp() {
     try {
       const activeProfile = getActiveModelProfile();
       const activeModel = activeProfile ? `${activeProfile.name} · ${activeProfile.model}` : getActiveModel();
-      await pushChatMessage('user', content);
+      const userMessage = await pushChatMessage('user', content);
       chatInput.value = '';
       updateChatInputSize();
       setStatus(chatStatus, `Conectando con ${activeModel}...`, false, { loading: true });
@@ -2307,13 +2735,15 @@ export function initPanelApp() {
         content: '',
         pending: true,
         tool: selectedChatTool,
+        context_used: [],
+        extracted_facts: [],
         createdAt: Date.now()
       };
       chatHistory.push(assistantMessage);
       renderChatMessages();
       scrollChatToBottom();
 
-      const output = await streamChatResponse((chunk) => {
+      const streamPayload = await streamChatResponse(content, (chunk) => {
         if (!assistantMessage || !chunk) {
           return;
         }
@@ -2324,10 +2754,91 @@ export function initPanelApp() {
         scheduleChatRender();
       });
 
+      const output = String(streamPayload?.output || '').trim();
+      const contextUsed = Array.isArray(streamPayload?.contextUsed)
+        ? streamPayload.contextUsed.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 12)
+        : [];
+      const detectedToolCalls = selectedChatTool === 'chat' ? extractToolCallsFromText(output) : [];
+      let finalAssistantOutput = output;
+
+      logDebug('sendChatMessage:model_output', {
+        tool: selectedChatTool,
+        outputPreview: output.slice(0, 600),
+        outputLength: output.length,
+        detectedToolCalls
+      });
+
+      assistantMessage.context_used = contextUsed;
+      if (userMessage && Array.isArray(userMessage.context_used)) {
+        userMessage.context_used = contextUsed;
+      }
+
+      if (detectedToolCalls.length) {
+        setStatus(chatStatus, 'Ejecutando acciones locales del navegador...', false, { loading: true });
+        assistantMessage.pending = true;
+        assistantMessage.content = 'Ejecutando tools locales...';
+        scheduleChatRender();
+
+        const toolResults = await executeLocalToolCalls(detectedToolCalls);
+        const followupPrompt = buildToolResultsFollowupPrompt(toolResults);
+
+        logDebug('sendChatMessage:tool_results', {
+          toolResults
+        });
+
+        assistantMessage.content = '';
+        assistantMessage.pending = true;
+        scheduleChatRender();
+
+        const finalStream = await streamChatResponse(
+          content,
+          (chunk) => {
+            if (!assistantMessage || !chunk) {
+              return;
+            }
+
+            assistantMessage.pending = false;
+            assistantMessage.content += chunk;
+            setStatus(chatStatus, 'Generando respuesta final...', false, { loading: true });
+            scheduleChatRender();
+          },
+          {
+            additionalMessages: [
+              { role: 'assistant', content: output },
+              { role: 'user', content: followupPrompt }
+            ]
+          }
+        );
+
+        const fallbackFromTools = [
+          '### Resultado de acciones locales',
+          '',
+          '```json',
+          JSON.stringify(toolResults, null, 2),
+          '```'
+        ].join('\n');
+
+        finalAssistantOutput = String(finalStream?.output || '').trim() || fallbackFromTools;
+        logDebug('sendChatMessage:final_after_tools', {
+          outputPreview: finalAssistantOutput.slice(0, 600),
+          outputLength: finalAssistantOutput.length
+        });
+      }
+
       assistantMessage.pending = false;
-      assistantMessage.content = assistantMessage.content.trim() || output.trim();
+      assistantMessage.content = assistantMessage.content.trim() || finalAssistantOutput.trim();
       if (!assistantMessage.content) {
         throw new Error('El provider no devolvio contenido.');
+      }
+
+      const turnMemory = await contextMemoryService.rememberChatTurn({
+        userMessage: content,
+        assistantMessage: assistantMessage.content,
+        contextUsed
+      });
+      assistantMessage.extracted_facts = Array.isArray(turnMemory?.extracted_facts) ? turnMemory.extracted_facts : [];
+      if (userMessage && Array.isArray(userMessage.extracted_facts) && assistantMessage.extracted_facts.length) {
+        userMessage.extracted_facts = assistantMessage.extracted_facts;
       }
 
       const parsedEmotion = extractEmotionFromText(assistantMessage.content);
@@ -2412,6 +2923,7 @@ export function initPanelApp() {
       activeTabId: tabContextSnapshot.activeTabId,
       reason: tabContextSnapshot.reason,
       updatedAt: tabContextSnapshot.updatedAt,
+      history: Array.isArray(tabContextSnapshot.history) ? tabContextSnapshot.history : [],
       tabs: tabsPayload
     };
 
@@ -2724,16 +3236,43 @@ export function initPanelApp() {
     }, 350);
   }
 
+  function queueContextIngestion(snapshot) {
+    const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs.slice(0, MAX_TABS_FOR_AI_SUMMARY) : [];
+    const historyItems = Array.isArray(snapshot?.history) ? snapshot.history.slice(0, 80) : [];
+
+    contextIngestionPromise = contextIngestionPromise
+      .catch(() => {})
+      .then(async () => {
+        for (const tab of tabs) {
+          try {
+            await contextMemoryService.ingestTabContext(tab);
+          } catch (_) {
+            // Ignore ingestion failures per tab.
+          }
+        }
+
+        if (historyItems.length) {
+          try {
+            await contextMemoryService.ingestHistoryEntries(historyItems);
+          } catch (_) {
+            // Ignore history ingestion failures.
+          }
+        }
+      });
+  }
+
   function handleTabContextSnapshot(snapshot) {
     if (!snapshot || typeof snapshot !== 'object') {
       return;
     }
 
     const tabs = Array.isArray(snapshot.tabs) ? snapshot.tabs : [];
+    const history = Array.isArray(snapshot.history) ? snapshot.history : [];
     tabContextSnapshot = {
       activeTabId: typeof snapshot.activeTabId === 'number' ? snapshot.activeTabId : -1,
       reason: String(snapshot.reason || 'snapshot'),
       updatedAt: Number(snapshot.updatedAt) || Date.now(),
+      history,
       tabs
     };
 
@@ -2743,6 +3282,8 @@ export function initPanelApp() {
     for (const tab of tabsForSummary) {
       enqueueTabSummary(tab);
     }
+
+    queueContextIngestion(tabContextSnapshot);
 
     renderTabsContextJson();
 
@@ -3383,6 +3924,9 @@ export function initPanelApp() {
     syncModelSelectors();
     renderAiModelsSettings();
     renderPinStatus();
+    await contextMemoryService.syncIdentityProfile({
+      user_name: panelSettings.displayName || ''
+    });
   }
 
   async function handleOnboardingContinue() {
@@ -3396,6 +3940,9 @@ export function initPanelApp() {
     });
     panelSettings = { ...settingsScreenController.getPanelSettings() };
     currentChatModelProfileId = resolvePrimaryProfileId();
+    await contextMemoryService.syncIdentityProfile({
+      user_name: panelSettings.displayName || ''
+    });
   }
 
   async function saveUserSettingsScreen() {
@@ -3405,6 +3952,9 @@ export function initPanelApp() {
 
     await settingsScreenController.saveUserSettings();
     panelSettings = { ...settingsScreenController.getPanelSettings() };
+    await contextMemoryService.syncIdentityProfile({
+      user_name: panelSettings.displayName || ''
+    });
   }
 
   async function saveAssistantSettingsScreen() {
@@ -3802,6 +4352,7 @@ export function initPanelApp() {
 
     window.addEventListener('beforeunload', () => {
       tabContextService.stop();
+      void contextMemoryService.shutdown();
       stopRandomEmotionCycle();
       for (const item of imageQueue) {
         releaseQueueItem(item);
@@ -3869,6 +4420,7 @@ export function initPanelApp() {
     hideWhatsappSuggestion();
     renderTabsContextJson();
 
+    await contextMemoryService.init();
     await tabContextService.start();
 
     await hydrateSettings();

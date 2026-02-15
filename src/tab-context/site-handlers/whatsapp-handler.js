@@ -199,7 +199,14 @@
     }
 
     const chunks = [];
-    const textNodes = row.querySelectorAll('span.selectable-text span, div.copyable-text span.selectable-text');
+    const textNodes = row.querySelectorAll(
+      [
+        'span.selectable-text span',
+        'div.copyable-text span.selectable-text',
+        'div.copyable-text span[dir="auto"]',
+        'div.copyable-text span[dir="ltr"]'
+      ].join(', ')
+    );
 
     for (const node of textNodes) {
       const value = toSafeText(node.textContent || '', 380);
@@ -228,7 +235,7 @@
       .map((row, index) => {
         const text = getMessageText(row);
         const prePlain = row.querySelector('[data-pre-plain-text]')?.getAttribute('data-pre-plain-text') || '';
-        const role = row.classList.contains('message-out') ? 'me' : 'contact';
+        const role = row.classList.contains('message-out') || row.querySelector('.message-out') ? 'me' : 'contact';
         const id = row.getAttribute('data-id') || `${Date.now()}-${index}`;
 
         if (!text) {
@@ -249,6 +256,26 @@
     }
 
     return parsed.slice(parsed.length - limit);
+  }
+
+  let lastSentFingerprint = '';
+  let lastSentAt = 0;
+  const SEND_DEDUPE_WINDOW_MS = 6000;
+
+  function buildOutgoingFingerprint(text) {
+    const normalizedText = toSafeText(text || '', 1200).toLowerCase();
+    const chatKey = getCurrentChatPhone() || getCurrentChatTitle() || location.href;
+    return `${String(chatKey || '').toLowerCase()}::${normalizedText}`;
+  }
+
+  function hasRecentOutgoingMessage(text) {
+    const normalizedText = toSafeText(text || '', 1200).toLowerCase();
+    if (!normalizedText) {
+      return false;
+    }
+
+    const tail = getConversationMessages({ limit: 10 }).slice(-6);
+    return tail.some((item) => item && item.role === 'me' && toSafeText(item.text || '', 1200).toLowerCase() === normalizedText);
   }
 
   function getInboxList(options = {}) {
@@ -335,6 +362,33 @@
       };
     }
 
+    const now = Date.now();
+    const fingerprint = buildOutgoingFingerprint(message);
+    if (fingerprint && lastSentFingerprint === fingerprint && now - lastSentAt < SEND_DEDUPE_WINDOW_MS) {
+      return {
+        ok: true,
+        result: {
+          sent: false,
+          duplicatePrevented: true,
+          text: message
+        }
+      };
+    }
+
+    if (hasRecentOutgoingMessage(message)) {
+      lastSentFingerprint = fingerprint;
+      lastSentAt = now;
+      return {
+        ok: true,
+        result: {
+          sent: false,
+          duplicatePrevented: true,
+          alreadyInChat: true,
+          text: message
+        }
+      };
+    }
+
     const editor = getComposerEditor();
     if (!editor) {
       return {
@@ -388,6 +442,15 @@
           keyCode: 13
         })
       );
+    }
+
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, 460);
+    });
+
+    if (hasRecentOutgoingMessage(message)) {
+      lastSentFingerprint = fingerprint;
+      lastSentAt = Date.now();
     }
 
     return {

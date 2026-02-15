@@ -1,8 +1,29 @@
 const MESSAGE_TYPES = Object.freeze({
   GET_TAB_CONTEXT_SNAPSHOT: 'GREENSTUDIO_GET_TAB_CONTEXT_SNAPSHOT',
   TAB_CONTEXT_UPDATED: 'GREENSTUDIO_TAB_CONTEXT_UPDATED',
-  SITE_ACTION_IN_TAB: 'GREENSTUDIO_SITE_ACTION_IN_TAB'
+  SITE_ACTION_IN_TAB: 'GREENSTUDIO_SITE_ACTION_IN_TAB',
+  BROWSER_ACTION: 'GREENSTUDIO_BROWSER_ACTION'
 });
+
+const LOG_PREFIX = '[greenstudio-ext/tab-context-service]';
+
+function logDebug(message, payload) {
+  if (payload === undefined) {
+    console.debug(`${LOG_PREFIX} ${message}`);
+    return;
+  }
+
+  console.debug(`${LOG_PREFIX} ${message}`, payload);
+}
+
+function logWarn(message, payload) {
+  if (payload === undefined) {
+    console.warn(`${LOG_PREFIX} ${message}`);
+    return;
+  }
+
+  console.warn(`${LOG_PREFIX} ${message}`, payload);
+}
 
 function toNumber(value, fallback = -1) {
   const numeric = Number(value);
@@ -27,11 +48,26 @@ function normalizeTabRecord(item) {
 function normalizeSnapshot(rawSnapshot) {
   const snapshot = rawSnapshot && typeof rawSnapshot === 'object' ? rawSnapshot : {};
   const tabs = Array.isArray(snapshot.tabs) ? snapshot.tabs.map(normalizeTabRecord).filter((item) => item.tabId >= 0) : [];
+  const history = Array.isArray(snapshot.history)
+    ? snapshot.history
+        .map((item) => {
+          const entry = item && typeof item === 'object' ? item : {};
+          return {
+            url: String(entry.url || ''),
+            title: String(entry.title || ''),
+            lastVisitTime: toNumber(entry.lastVisitTime, 0),
+            visitCount: toNumber(entry.visitCount, 0),
+            typedCount: toNumber(entry.typedCount, 0)
+          };
+        })
+        .filter((item) => item.url)
+    : [];
 
   return {
     reason: String(snapshot.reason || 'snapshot'),
     activeTabId: toNumber(snapshot.activeTabId, -1),
     updatedAt: toNumber(snapshot.updatedAt, Date.now()),
+    history,
     tabs
   };
 }
@@ -97,6 +133,40 @@ export function createTabContextService({ onSnapshot }) {
     });
   }
 
+  function runBrowserAction(action, args = {}) {
+    return new Promise((resolve) => {
+      if (!chrome.runtime || !chrome.runtime.sendMessage) {
+        logWarn('runBrowserAction:runtime_unavailable', { action, args });
+        resolve({ ok: false, error: 'chrome.runtime no disponible.' });
+        return;
+      }
+
+      logDebug('runBrowserAction:send', { action, args });
+
+      chrome.runtime.sendMessage(
+        {
+          type: MESSAGE_TYPES.BROWSER_ACTION,
+          action,
+          args
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            logWarn('runBrowserAction:runtime_error', {
+              action,
+              args,
+              error: chrome.runtime.lastError.message || 'runtime_error'
+            });
+            resolve({ ok: false, error: chrome.runtime.lastError.message || 'No se pudo ejecutar browser action.' });
+            return;
+          }
+
+          logDebug('runBrowserAction:response', { action, args, response });
+          resolve(response || { ok: false, error: 'Sin respuesta del background.' });
+        }
+      );
+    });
+  }
+
   function start() {
     if (started) {
       return requestSnapshot();
@@ -133,6 +203,7 @@ export function createTabContextService({ onSnapshot }) {
     start,
     stop,
     requestSnapshot,
-    runSiteActionInTab
+    runSiteActionInTab,
+    runBrowserAction
   };
 }

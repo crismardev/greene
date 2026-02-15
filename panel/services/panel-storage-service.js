@@ -29,12 +29,47 @@ export function createPanelStorageService({
         : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
     const createdAt = Number(record.createdAt);
+    const contextUsed = Array.isArray(record.context_used)
+      ? record.context_used
+      : Array.isArray(record.contextUsed)
+        ? record.contextUsed
+        : [];
+    const extractedFacts = Array.isArray(record.extracted_facts)
+      ? record.extracted_facts
+      : Array.isArray(record.extractedFacts)
+        ? record.extractedFacts
+        : [];
 
     return {
       id,
       role,
       content,
       tool: typeof record.tool === 'string' ? record.tool : 'chat',
+      context_used: contextUsed
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, 12),
+      extracted_facts: extractedFacts
+        .map((item) => {
+          if (typeof item === 'string') {
+            const text = item.trim();
+            return text ? { type: 'user_fact', text } : null;
+          }
+
+          if (!item || typeof item !== 'object') {
+            return null;
+          }
+
+          const type = String(item.type || 'user_fact').trim() || 'user_fact';
+          const text = String(item.text || '').trim();
+          if (!text) {
+            return null;
+          }
+
+          return { type, text };
+        })
+        .filter(Boolean)
+        .slice(0, 8),
       createdAt: Number.isFinite(createdAt) ? createdAt : Date.now()
     };
   }
