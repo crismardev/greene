@@ -217,9 +217,36 @@
 
             <section class="settings-body">
               <article class="tool-card settings-card">
+                <div class="settings-card__head">
+                  <h3>User settings</h3>
+                  <p class="tool-copy">Estos datos personalizan el saludo y el contexto base del asistente.</p>
+                </div>
+
                 <label class="field">
                   <span>Tu nombre</span>
                   <input id="settingsNameInput" type="text" placeholder="Tu nombre" />
+                </label>
+
+                <label class="field">
+                  <span>Birthday</span>
+                  <input id="settingsBirthdayInput" type="date" />
+                </label>
+              </article>
+
+              <article class="tool-card settings-card">
+                <div class="settings-card__head">
+                  <h3>Assistant</h3>
+                  <p class="tool-copy">Define lenguaje, prompt y modelo por defecto para las respuestas.</p>
+                </div>
+
+                <label class="field">
+                  <span>Language</span>
+                  <select id="settingsLanguageSelect">
+                    <option value="es">Español</option>
+                    <option value="en">English</option>
+                    <option value="pt">Português</option>
+                    <option value="fr">Français</option>
+                  </select>
                 </label>
 
                 <label class="field">
@@ -260,7 +287,7 @@
   </main>
 
   <script src="../src/tool-config.js"></script>
-  <script src="panel.js"></script>
+  <script type="module" src="panel.js"></script>
 </body>
 
 </html>
