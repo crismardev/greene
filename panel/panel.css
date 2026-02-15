@@ -372,7 +372,7 @@ a {
 
 .chat-composer {
   position: relative;
-  padding: 10px;
+  padding: 10px 10px 10px 18px;
   display: grid;
   gap: 8px;
 }
