@@ -60,6 +60,9 @@ export function createPanelStorageService({
           if (!db.objectStoreNames.contains(chatDb.SETTINGS_STORE)) {
             db.createObjectStore(chatDb.SETTINGS_STORE, { keyPath: 'key' });
           }
+          if (chatDb.SECRET_STORE && !db.objectStoreNames.contains(chatDb.SECRET_STORE)) {
+            db.createObjectStore(chatDb.SECRET_STORE, { keyPath: 'key' });
+          }
         };
 
         request.onsuccess = () => {
@@ -232,12 +235,106 @@ export function createPanelStorageService({
     });
   }
 
+  async function readSecret(secretKey) {
+    const key = String(secretKey || '').trim();
+    if (!key) {
+      return null;
+    }
+
+    const db = await getChatDatabase();
+    if (!db || !chatDb.SECRET_STORE || !hasDbStore(db, chatDb.SECRET_STORE)) {
+      return null;
+    }
+
+    return new Promise((resolve) => {
+      let tx;
+      try {
+        tx = db.transaction(chatDb.SECRET_STORE, 'readonly');
+      } catch {
+        resolve(null);
+        return;
+      }
+
+      const req = tx.objectStore(chatDb.SECRET_STORE).get(key);
+
+      req.onsuccess = () => {
+        const value = req.result && typeof req.result.value === 'object' ? req.result.value : null;
+        resolve(value ? { ...value } : null);
+      };
+
+      req.onerror = () => {
+        resolve(null);
+      };
+    });
+  }
+
+  async function saveSecret(secretKey, value) {
+    const key = String(secretKey || '').trim();
+    if (!key) {
+      return false;
+    }
+
+    const db = await getChatDatabase();
+    if (!db || !chatDb.SECRET_STORE || !hasDbStore(db, chatDb.SECRET_STORE)) {
+      return false;
+    }
+
+    const payload = {
+      key,
+      value: value && typeof value === 'object' ? { ...value } : {},
+      updatedAt: Date.now()
+    };
+
+    return new Promise((resolve) => {
+      let tx;
+      try {
+        tx = db.transaction(chatDb.SECRET_STORE, 'readwrite');
+      } catch {
+        resolve(false);
+        return;
+      }
+
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.objectStore(chatDb.SECRET_STORE).put(payload);
+    });
+  }
+
+  async function deleteSecret(secretKey) {
+    const key = String(secretKey || '').trim();
+    if (!key) {
+      return false;
+    }
+
+    const db = await getChatDatabase();
+    if (!db || !chatDb.SECRET_STORE || !hasDbStore(db, chatDb.SECRET_STORE)) {
+      return false;
+    }
+
+    return new Promise((resolve) => {
+      let tx;
+      try {
+        tx = db.transaction(chatDb.SECRET_STORE, 'readwrite');
+      } catch {
+        resolve(false);
+        return;
+      }
+
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.objectStore(chatDb.SECRET_STORE).delete(key);
+    });
+  }
+
   return {
     getSettings,
     saveSettings,
     readChatHistory,
     saveChatHistory,
     readPanelSettings,
-    savePanelSettings
+    savePanelSettings,
+    readSecret,
+    saveSecret,
+    deleteSecret
   };
 }

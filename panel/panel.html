@@ -213,7 +213,7 @@
         </section>
 
         <section class="screen screen--settings" id="settingsScreen" aria-label="Settings">
-          <article class="settings-shell">
+          <article class="settings-shell" id="settingsShell" data-settings-page="home">
             <header class="tools-head">
               <button id="closeSettingsBtn" class="icon-btn icon-btn--ghost icon-btn--back" type="button"
                 aria-label="Volver al chat" title="Volver">
@@ -223,10 +223,53 @@
                 </svg>
               </button>
               <h2>Settings</h2>
+              <button id="settingsSectionBackBtn" class="icon-btn icon-btn--ghost icon-btn--back" type="button"
+                aria-label="Volver al home de settings" title="Volver a settings home" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round"></path>
+                </svg>
+              </button>
             </header>
 
             <section class="settings-body">
-              <article class="tool-card settings-card">
+              <article class="tool-card settings-card settings-page is-active" data-settings-page="home">
+                <div class="settings-card__head">
+                  <h3>Settings Home</h3>
+                </div>
+                <nav class="settings-nav-list" aria-label="Secciones de settings">
+                  <button type="button" class="settings-nav-item" data-settings-target="user">
+                    <span>User</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
+                  <button type="button" class="settings-nav-item" data-settings-target="assistant">
+                    <span>Assistant</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
+                  <button type="button" class="settings-nav-item" data-settings-target="ai_models">
+                    <span>AI Models</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
+                  <button type="button" class="settings-nav-item" data-settings-target="tabs">
+                    <span>Tabs</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
+                </nav>
+              </article>
+
+              <article class="tool-card settings-card settings-page" data-settings-page="user">
                 <div class="settings-card__head">
                   <h3>User settings</h3>
                 </div>
@@ -249,9 +292,14 @@
                     <option value="light">Claro</option>
                   </select>
                 </label>
+
+                <div class="actions">
+                  <button id="settingsUserSaveBtn" class="btn" type="button">Guardar</button>
+                </div>
+                <p id="settingsUserStatus" class="status" role="status"></p>
               </article>
 
-              <article class="tool-card settings-card">
+              <article class="tool-card settings-card settings-page" data-settings-page="assistant">
                 <div class="settings-card__head">
                   <h3>Assistant</h3>
                 </div>
@@ -271,34 +319,56 @@
                   <textarea id="settingsSystemPrompt" rows="7"></textarea>
                 </label>
 
-                <label class="field">
-                  <span>Modelo default</span>
-                  <div class="field-inline">
-                    <select id="settingsModelSelect"></select>
-                    <button id="settingsRefreshModelsBtn" class="icon-btn icon-btn--ghost icon-btn--mini" type="button"
-                      aria-label="Actualizar modelos" title="Actualizar modelos">
-                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                        <path d="M20 6v5h-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
-                          stroke-linejoin="round"></path>
-                        <path d="M4 18v-5h5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
-                          stroke-linejoin="round"></path>
-                        <path d="M19 11a7 7 0 0 0-12-3m-2 5a7 7 0 0 0 12 3" fill="none" stroke="currentColor" stroke-width="1.9"
-                          stroke-linecap="round"></path>
-                      </svg>
-                    </button>
+                <div class="actions">
+                  <button id="settingsAssistantSaveBtn" class="btn" type="button">Guardar</button>
+                </div>
+                <p id="settingsAssistantStatus" class="status" role="status"></p>
+              </article>
+
+              <article class="tool-card settings-card settings-page" data-settings-page="ai_models">
+                <div class="settings-card__head settings-card__head--row">
+                  <div>
+                    <h3>AI Models</h3>
                   </div>
+                  <button id="settingsAddModelBtn" class="icon-btn icon-btn--ghost" type="button"
+                    aria-label="Agregar modelo" title="Agregar modelo">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M12 5v14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                      <path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                    </svg>
+                  </button>
+                </div>
+
+                <label class="field">
+                  <span>Modelo principal global</span>
+                  <select id="aiPrimaryModelSelect"></select>
                 </label>
 
                 <div class="actions">
-                  <button id="settingsSaveBtn" class="btn" type="button">Guardar</button>
+                  <button id="settingsRefreshLocalModelsBtn" class="btn btn--ghost" type="button">Actualizar modelos locales</button>
                 </div>
-                <p id="settingsStatus" class="status" role="status"></p>
+
+                <ul id="aiModelsList" class="ai-models-list" aria-live="polite"></ul>
+
+                <section class="settings-security">
+                  <div class="settings-card__head">
+                    <h3>Seguridad API keys</h3>
+                    <p id="settingsPinStatus" class="tool-copy"></p>
+                  </div>
+                  <div class="actions">
+                    <button id="settingsSetupPinBtn" class="btn btn--ghost" type="button">Configurar PIN</button>
+                    <button id="settingsUnlockPinBtn" class="btn btn--ghost" type="button">Desbloquear</button>
+                    <button id="settingsLockPinBtn" class="btn btn--ghost" type="button">Bloquear</button>
+                  </div>
+                </section>
+
+                <p id="aiModelsStatus" class="status" role="status"></p>
               </article>
 
-              <article class="tool-card settings-card">
+              <article class="tool-card settings-card settings-page" data-settings-page="tabs">
                 <div class="settings-card__head">
                   <h3>Tabs context</h3>
-                  <p class="tool-copy">JSON vivo de tabs abiertas con title, description, extracto y aiSummary local.</p>
+                  <p class="tool-copy">JSON vivo de tabs abiertas con title, description, extracto y aiSummary usando el modelo principal.</p>
                 </div>
                 <pre id="tabsContextJson" class="tabs-context-json"></pre>
               </article>
@@ -307,6 +377,91 @@
         </section>
       </div>
     </section>
+
+    <div id="modelConfigModal" class="modal-backdrop" hidden>
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modelConfigTitle">
+        <header class="modal-card__head">
+          <h3 id="modelConfigTitle">Agregar modelo</h3>
+          <button id="modelConfigCloseBtn" class="icon-btn icon-btn--ghost icon-btn--mini" type="button" aria-label="Cerrar modal">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M18 6L6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                stroke-linejoin="round"></path>
+            </svg>
+          </button>
+        </header>
+
+        <label class="field">
+          <span>Empresa / Provider</span>
+          <select id="modelProviderSelect">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Gemini</option>
+            <option value="openai_compatible">OpenAI Compatible (Third-party)</option>
+            <option value="ollama">Ollama (local)</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Nombre visible</span>
+          <input id="modelDisplayNameInput" type="text" placeholder="Ej. OpenAI producción" />
+        </label>
+
+        <label class="field">
+          <span>Model ID</span>
+          <input id="modelIdInput" type="text" placeholder="Ej. gpt-4o-mini" />
+        </label>
+
+        <label id="modelBaseUrlField" class="field" hidden>
+          <span>Base URL (OpenAI compatible)</span>
+          <input id="modelBaseUrlInput" type="url" placeholder="https://api.tu-provider.com/v1" />
+        </label>
+
+        <label id="modelApiKeyField" class="field">
+          <span>API key</span>
+          <input id="modelApiKeyInput" type="password" placeholder="Pega tu API key" autocomplete="off" />
+        </label>
+
+        <div class="actions">
+          <button id="modelConfigSaveBtn" class="btn" type="button">Guardar</button>
+          <button id="modelConfigCancelBtn" class="btn btn--ghost" type="button">Cancelar</button>
+          <button id="modelConfigClearKeyBtn" class="btn btn--ghost" type="button" hidden>Eliminar API key</button>
+        </div>
+        <p id="modelConfigStatus" class="status" role="status"></p>
+      </section>
+    </div>
+
+    <div id="pinModal" class="modal-backdrop" hidden>
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pinModalTitle">
+        <header class="modal-card__head">
+          <h3 id="pinModalTitle">Configurar PIN</h3>
+          <button id="pinModalCloseBtn" class="icon-btn icon-btn--ghost icon-btn--mini" type="button" aria-label="Cerrar modal">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M18 6L6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                stroke-linejoin="round"></path>
+            </svg>
+          </button>
+        </header>
+
+        <p id="pinModalCopy" class="tool-copy">El PIN se usa para cifrar API keys sensibles en IndexedDB.</p>
+
+        <label class="field">
+          <span>PIN de 4 digitos</span>
+          <input id="pinInput" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="0000" autocomplete="off" />
+        </label>
+
+        <label id="pinConfirmField" class="field">
+          <span>Confirmar PIN</span>
+          <input id="pinConfirmInput" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="0000"
+            autocomplete="off" />
+        </label>
+
+        <div class="actions">
+          <button id="pinModalSaveBtn" class="btn" type="button">Guardar PIN</button>
+          <button id="pinModalCancelBtn" class="btn btn--ghost" type="button">Cancelar</button>
+        </div>
+        <p id="pinModalStatus" class="status" role="status"></p>
+      </section>
+    </div>
 
     <div id="dropOverlay" class="drop-overlay">Suelta archivos para convertir a WebP</div>
   </main>

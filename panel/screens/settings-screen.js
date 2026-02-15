@@ -14,9 +14,7 @@ export function createSettingsScreenController({
   setStatus,
   getThemeMode,
   setThemeMode,
-  normalizeModelName,
-  syncModelSelectors,
-  getActiveModel
+  onAfterHydrate
 }) {
   const {
     onboardingNameInput,
@@ -26,8 +24,8 @@ export function createSettingsScreenController({
     settingsThemeModeSelect,
     settingsLanguageSelect,
     settingsSystemPrompt,
-    settingsModelSelect,
-    settingsStatus,
+    settingsUserStatus,
+    settingsAssistantStatus,
     chatStatus
   } = elements;
 
@@ -86,14 +84,12 @@ export function createSettingsScreenController({
     if (settingsThemeModeSelect && typeof getThemeMode === 'function') {
       settingsThemeModeSelect.value = normalizeThemeMode(getThemeMode());
     }
-
-    state.currentChatModel = normalizeModelName(panelSettings.defaultModel) || defaults.defaultModel;
-    syncModelSelectors();
   }
 
   function populateSettingsForm() {
     applyPanelSettingsToUi();
-    setStatus(settingsStatus, '');
+    setStatus(settingsUserStatus, '');
+    setStatus(settingsAssistantStatus, '');
   }
 
   function isOnboardingComplete() {
@@ -129,7 +125,13 @@ export function createSettingsScreenController({
     merged.language = language;
     merged.onboardingDone = merged.onboardingDone === true || String(merged.onboardingDone).toLowerCase() === 'true';
     merged.systemPrompt = sanitizePromptByLanguage(merged.systemPrompt, language);
-    merged.defaultModel = normalizeModelName(merged.defaultModel) || defaults.defaultModel;
+
+    if (typeof onAfterHydrate === 'function') {
+      const normalized = onAfterHydrate({ ...merged });
+      if (normalized && typeof normalized === 'object') {
+        Object.assign(merged, normalized);
+      }
+    }
 
     setPanelSettings(merged);
     applyPanelSettingsToUi();
@@ -165,23 +167,14 @@ export function createSettingsScreenController({
     requestChatAutofocus(8, 70);
   }
 
-  async function saveSettingsScreen() {
+  async function saveUserSettings() {
     const panelSettings = getPanelSettings();
     const nextName = String(settingsNameInput?.value || '').trim();
     const nextBirthday = String(settingsBirthdayInput?.value || '').trim();
-    const nextLanguage = normalizeAssistantLanguage(settingsLanguageSelect?.value || DEFAULT_ASSISTANT_LANGUAGE);
-    const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
-    const nextModel = normalizeModelName(settingsModelSelect?.value || '') || defaults.defaultModel;
 
     if (!nextName) {
-      setStatus(settingsStatus, 'El nombre no puede estar vacio.', true);
+      setStatus(settingsUserStatus, 'El nombre no puede estar vacio.', true);
       settingsNameInput?.focus();
-      return;
-    }
-
-    if (!nextPrompt) {
-      setStatus(settingsStatus, 'El system prompt no puede estar vacio.', true);
-      settingsSystemPrompt?.focus();
       return;
     }
 
@@ -189,31 +182,58 @@ export function createSettingsScreenController({
       ...panelSettings,
       displayName: nextName,
       birthday: nextBirthday,
-      language: nextLanguage,
-      onboardingDone: true,
-      systemPrompt: nextPrompt,
-      defaultModel: nextModel
+      onboardingDone: true
     };
 
     const ok = await storage.savePanelSettings(nextSettings);
 
     if (!ok) {
-      setStatus(settingsStatus, 'No se pudieron guardar settings.', true);
+      setStatus(settingsUserStatus, 'No se pudieron guardar los datos de usuario.', true);
       return;
     }
 
     if (settingsThemeModeSelect && typeof setThemeMode === 'function') {
       const themeOk = await setThemeMode(normalizeThemeMode(settingsThemeModeSelect.value), { silent: true });
       if (!themeOk) {
-        setStatus(settingsStatus, 'No se pudo guardar apariencia.', true);
+        setStatus(settingsUserStatus, 'No se pudo guardar apariencia.', true);
         return;
       }
     }
 
     setPanelSettings(nextSettings);
     applyPanelSettingsToUi();
-    setStatus(settingsStatus, 'Settings guardados.');
-    setStatus(chatStatus, `Modelo activo: ${getActiveModel()}.`);
+    setStatus(settingsUserStatus, 'Datos de usuario guardados.');
+  }
+
+  async function saveAssistantSettings() {
+    const panelSettings = getPanelSettings();
+    const nextLanguage = normalizeAssistantLanguage(settingsLanguageSelect?.value || DEFAULT_ASSISTANT_LANGUAGE);
+    const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
+
+    if (!nextPrompt) {
+      setStatus(settingsAssistantStatus, 'El system prompt no puede estar vacio.', true);
+      settingsSystemPrompt?.focus();
+      return;
+    }
+
+    const nextSettings = {
+      ...panelSettings,
+      language: nextLanguage,
+      onboardingDone: true,
+      systemPrompt: nextPrompt
+    };
+
+    const ok = await storage.savePanelSettings(nextSettings);
+
+    if (!ok) {
+      setStatus(settingsAssistantStatus, 'No se pudieron guardar los datos del assistant.', true);
+      return;
+    }
+
+    setPanelSettings(nextSettings);
+    applyPanelSettingsToUi();
+    setStatus(settingsAssistantStatus, 'Assistant guardado.');
+    setStatus(chatStatus, 'Assistant actualizado.');
   }
 
   function handleLanguageChange() {
@@ -228,7 +248,8 @@ export function createSettingsScreenController({
     resolveHomeOrOnboardingScreen,
     hydratePanelSettings,
     handleOnboardingContinue,
-    saveSettingsScreen,
+    saveUserSettings,
+    saveAssistantSettings,
     handleLanguageChange,
     getPanelSettings
   };

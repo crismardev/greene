@@ -5,6 +5,8 @@ import {
 import { setStatus } from './services/status-service.js';
 import { createPanelStorageService } from './services/panel-storage-service.js';
 import { createOllamaService } from './services/ollama-service.js';
+import { createAiProviderService, AI_PROVIDER_IDS } from './services/ai-provider-service.js';
+import { createPinCryptoService } from './services/pin-crypto-service.js';
 import { createSettingsScreenController } from './screens/settings-screen.js';
 import { createTabContextService } from './services/tab-context-service.js';
 import { buildTabSummaryPrompt, toJsonTabRecord } from './services/site-context/generic-site-context.js';
@@ -27,6 +29,18 @@ export function initPanelApp() {
   const { TOOL_KEYS, PREFERENCE_KEYS, DEFAULT_SETTINGS, APPLY_MESSAGE_TYPE } = cfg;
 
   const TOOL_SEQUENCE = Object.freeze(['image', 'retool']);
+  const SETTINGS_PAGES = Object.freeze({
+    HOME: 'home',
+    USER: 'user',
+    ASSISTANT: 'assistant',
+    AI_MODELS: 'ai_models',
+    TABS: 'tabs'
+  });
+  const PIN_MODAL_MODES = Object.freeze({
+    SETUP: 'setup',
+    UNLOCK: 'unlock'
+  });
+  const SECRET_KEY_PREFIX = 'ai-key::';
   const SCREEN_INDEX = Object.freeze({
     onboarding: 0,
     home: 1,
@@ -102,6 +116,7 @@ export function initPanelApp() {
   const TAB_SUMMARY_MAX_CHARS = 160;
 
   const DEFAULT_OLLAMA_MODEL = 'gpt-oss:20b';
+  const DEFAULT_PRIMARY_MODEL_ID = 'model-local-ollama';
   const LOCAL_MODEL_KEEP_ALIVE = '20m';
   const OLLAMA_CHAT_ENDPOINTS = Object.freeze([
     'http://localhost:11434/api/chat',
@@ -118,12 +133,59 @@ export function initPanelApp() {
 
   const CHAT_DB = Object.freeze({
     NAME: 'greenstudio-chat-db',
-    VERSION: 3,
+    VERSION: 4,
     CHAT_STORE: 'chat_state',
     CHAT_KEY: 'home_history',
     SETTINGS_STORE: 'panel_settings',
-    SETTINGS_KEY: 'panel'
+    SETTINGS_KEY: 'panel',
+    SECRET_STORE: 'panel_secrets'
   });
+
+  function createPreloadedModelProfiles() {
+    const now = Date.now();
+    return [
+      {
+        id: DEFAULT_PRIMARY_MODEL_ID,
+        name: 'Local Ollama',
+        provider: AI_PROVIDER_IDS.OLLAMA,
+        model: DEFAULT_OLLAMA_MODEL,
+        baseUrl: '',
+        hasApiKey: false,
+        createdAt: now,
+        updatedAt: now
+      },
+      {
+        id: 'model-openai-main',
+        name: 'OpenAI',
+        provider: AI_PROVIDER_IDS.OPENAI,
+        model: 'gpt-4o-mini',
+        baseUrl: '',
+        hasApiKey: false,
+        createdAt: now,
+        updatedAt: now
+      },
+      {
+        id: 'model-anthropic-main',
+        name: 'Anthropic',
+        provider: AI_PROVIDER_IDS.ANTHROPIC,
+        model: 'claude-3-5-sonnet-latest',
+        baseUrl: '',
+        hasApiKey: false,
+        createdAt: now,
+        updatedAt: now
+      },
+      {
+        id: 'model-gemini-main',
+        name: 'Gemini',
+        provider: AI_PROVIDER_IDS.GEMINI,
+        model: 'gemini-2.0-flash',
+        baseUrl: '',
+        hasApiKey: false,
+        createdAt: now,
+        updatedAt: now
+      }
+    ];
+  }
 
   const PANEL_SETTINGS_DEFAULTS = Object.freeze({
     displayName: '',
@@ -131,7 +193,10 @@ export function initPanelApp() {
     language: DEFAULT_ASSISTANT_LANGUAGE,
     onboardingDone: false,
     systemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
-    defaultModel: DEFAULT_OLLAMA_MODEL
+    defaultModel: DEFAULT_OLLAMA_MODEL,
+    aiModelProfiles: createPreloadedModelProfiles(),
+    primaryModelProfileId: DEFAULT_PRIMARY_MODEL_ID,
+    securityConfig: null
   });
 
   const ALLOWED_IMAGE_TYPES = new Set([
@@ -150,6 +215,10 @@ export function initPanelApp() {
   const openSettingsBtn = document.getElementById('openSettingsBtn');
   const goHomeBtn = document.getElementById('goHomeBtn');
   const closeSettingsBtn = document.getElementById('closeSettingsBtn');
+  const settingsSectionBackBtn = document.getElementById('settingsSectionBackBtn');
+  const settingsShell = document.getElementById('settingsShell');
+  const settingsPages = Array.from(document.querySelectorAll('.settings-page'));
+  const settingsNavItems = Array.from(document.querySelectorAll('[data-settings-target]'));
   const toolTabs = Array.from(document.querySelectorAll('.tool-tab'));
 
   const brandEmotion = document.getElementById('brandEmotion');
@@ -173,7 +242,6 @@ export function initPanelApp() {
   const chatToolLabel = document.getElementById('chatToolLabel');
   const chatToolOptions = Array.from(document.querySelectorAll('[data-chat-tool]'));
   const chatModelSelect = document.getElementById('chatModelSelect');
-  const refreshModelsBtn = document.getElementById('refreshModelsBtn');
   const whatsappSuggestionCard = document.getElementById('whatsappSuggestionCard');
   const whatsappSuggestionMeta = document.getElementById('whatsappSuggestionMeta');
   const whatsappSuggestionText = document.getElementById('whatsappSuggestionText');
@@ -202,11 +270,44 @@ export function initPanelApp() {
   const settingsThemeModeSelect = document.getElementById('settingsThemeModeSelect');
   const settingsLanguageSelect = document.getElementById('settingsLanguageSelect');
   const settingsSystemPrompt = document.getElementById('settingsSystemPrompt');
-  const settingsModelSelect = document.getElementById('settingsModelSelect');
-  const settingsSaveBtn = document.getElementById('settingsSaveBtn');
-  const settingsStatus = document.getElementById('settingsStatus');
-  const settingsRefreshModelsBtn = document.getElementById('settingsRefreshModelsBtn');
+  const settingsUserSaveBtn = document.getElementById('settingsUserSaveBtn');
+  const settingsUserStatus = document.getElementById('settingsUserStatus');
+  const settingsAssistantSaveBtn = document.getElementById('settingsAssistantSaveBtn');
+  const settingsAssistantStatus = document.getElementById('settingsAssistantStatus');
+  const aiPrimaryModelSelect = document.getElementById('aiPrimaryModelSelect');
+  const settingsAddModelBtn = document.getElementById('settingsAddModelBtn');
+  const settingsRefreshLocalModelsBtn = document.getElementById('settingsRefreshLocalModelsBtn');
+  const aiModelsList = document.getElementById('aiModelsList');
+  const aiModelsStatus = document.getElementById('aiModelsStatus');
+  const settingsPinStatus = document.getElementById('settingsPinStatus');
+  const settingsSetupPinBtn = document.getElementById('settingsSetupPinBtn');
+  const settingsUnlockPinBtn = document.getElementById('settingsUnlockPinBtn');
+  const settingsLockPinBtn = document.getElementById('settingsLockPinBtn');
   const tabsContextJson = document.getElementById('tabsContextJson');
+  const modelConfigModal = document.getElementById('modelConfigModal');
+  const modelConfigTitle = document.getElementById('modelConfigTitle');
+  const modelProviderSelect = document.getElementById('modelProviderSelect');
+  const modelDisplayNameInput = document.getElementById('modelDisplayNameInput');
+  const modelIdInput = document.getElementById('modelIdInput');
+  const modelBaseUrlField = document.getElementById('modelBaseUrlField');
+  const modelBaseUrlInput = document.getElementById('modelBaseUrlInput');
+  const modelApiKeyField = document.getElementById('modelApiKeyField');
+  const modelApiKeyInput = document.getElementById('modelApiKeyInput');
+  const modelConfigCloseBtn = document.getElementById('modelConfigCloseBtn');
+  const modelConfigSaveBtn = document.getElementById('modelConfigSaveBtn');
+  const modelConfigCancelBtn = document.getElementById('modelConfigCancelBtn');
+  const modelConfigClearKeyBtn = document.getElementById('modelConfigClearKeyBtn');
+  const modelConfigStatus = document.getElementById('modelConfigStatus');
+  const pinModal = document.getElementById('pinModal');
+  const pinModalTitle = document.getElementById('pinModalTitle');
+  const pinModalCopy = document.getElementById('pinModalCopy');
+  const pinInput = document.getElementById('pinInput');
+  const pinConfirmField = document.getElementById('pinConfirmField');
+  const pinConfirmInput = document.getElementById('pinConfirmInput');
+  const pinModalCloseBtn = document.getElementById('pinModalCloseBtn');
+  const pinModalSaveBtn = document.getElementById('pinModalSaveBtn');
+  const pinModalCancelBtn = document.getElementById('pinModalCancelBtn');
+  const pinModalStatus = document.getElementById('pinModalStatus');
 
   let settings = { ...DEFAULT_SETTINGS };
   let imageQueue = [];
@@ -217,9 +318,15 @@ export function initPanelApp() {
 
   let chatHistory = [];
   let selectedChatTool = DEFAULT_CHAT_TOOL;
-  let panelSettings = { ...PANEL_SETTINGS_DEFAULTS };
-  let currentChatModel = PANEL_SETTINGS_DEFAULTS.defaultModel;
-  let availableChatModels = [];
+  let panelSettings = {
+    ...PANEL_SETTINGS_DEFAULTS,
+    aiModelProfiles: createPreloadedModelProfiles()
+  };
+  let currentChatModelProfileId = PANEL_SETTINGS_DEFAULTS.primaryModelProfileId;
+  let localOllamaModels = [];
+  let modelModalState = { mode: 'add', profileId: '' };
+  let pinModalMode = PIN_MODAL_MODES.SETUP;
+  let unlockedPin = '';
   let isGeneratingChat = false;
   let pendingChatRenderRaf = 0;
   let modelWarmupPromise = null;
@@ -260,6 +367,12 @@ export function initPanelApp() {
     generateEndpoints: OLLAMA_GENERATE_ENDPOINTS,
     tagsEndpoints: OLLAMA_TAGS_ENDPOINTS
   });
+  const aiProviderService = createAiProviderService({
+    ollamaService,
+    defaultOllamaModel: DEFAULT_OLLAMA_MODEL,
+    localKeepAlive: LOCAL_MODEL_KEEP_ALIVE
+  });
+  const pinCryptoService = createPinCryptoService();
   const tabContextService = createTabContextService({
     onSnapshot: handleTabContextSnapshot
   });
@@ -899,13 +1012,9 @@ export function initPanelApp() {
 
   function openSettings() {
     populateSettingsForm();
+    setSettingsPage(SETTINGS_PAGES.HOME);
+    renderAiModelsSettings();
     setScreen('settings');
-  }
-
-  function getActiveModel() {
-    const sourceSettings = settingsScreenState ? settingsScreenState.panelSettings : panelSettings;
-    const stateModel = settingsScreenState ? settingsScreenState.currentChatModel : '';
-    return stateModel || currentChatModel || sourceSettings.defaultModel || DEFAULT_OLLAMA_MODEL;
   }
 
   function normalizeModelName(value) {
@@ -913,48 +1022,732 @@ export function initPanelApp() {
     return modelName;
   }
 
-  function getUniqueModelList(additional = '') {
-    const sourceSettings = settingsScreenState ? settingsScreenState.panelSettings : panelSettings;
-    const list = [...availableChatModels];
-    const forced = normalizeModelName(additional);
-    if (forced) {
-      list.push(forced);
+  function normalizePanelModelSettings(sourceSettings = {}) {
+    const next = sourceSettings && typeof sourceSettings === 'object' ? { ...sourceSettings } : {};
+    const legacyDefaultModel = normalizeModelName(next.defaultModel) || DEFAULT_OLLAMA_MODEL;
+    const hasStoredProfiles = Array.isArray(next.aiModelProfiles) && next.aiModelProfiles.length > 0;
+
+    const incomingProfiles = hasStoredProfiles ? next.aiModelProfiles : createPreloadedModelProfiles();
+    const normalizedProfiles = incomingProfiles.map((item, index) => aiProviderService.normalizeProfile(item, index));
+    const preloaded = createPreloadedModelProfiles();
+
+    for (const profile of preloaded) {
+      const exists = normalizedProfiles.some((item) => item.provider === profile.provider);
+      if (!exists) {
+        normalizedProfiles.push(aiProviderService.normalizeProfile(profile, normalizedProfiles.length));
+      }
     }
 
-    if (sourceSettings.defaultModel) {
-      list.push(sourceSettings.defaultModel);
+    const localIndex = normalizedProfiles.findIndex((item) => item.provider === AI_PROVIDER_IDS.OLLAMA);
+    if (localIndex >= 0) {
+      normalizedProfiles[localIndex] = {
+        ...normalizedProfiles[localIndex],
+        model: hasStoredProfiles ? normalizedProfiles[localIndex].model : legacyDefaultModel || normalizedProfiles[localIndex].model,
+        updatedAt: Date.now()
+      };
+    } else {
+      normalizedProfiles.unshift(
+        aiProviderService.normalizeProfile(
+          {
+            id: DEFAULT_PRIMARY_MODEL_ID,
+            name: 'Local Ollama',
+            provider: AI_PROVIDER_IDS.OLLAMA,
+            model: hasStoredProfiles ? DEFAULT_OLLAMA_MODEL : legacyDefaultModel,
+            baseUrl: '',
+            hasApiKey: false
+          },
+          0
+        )
+      );
     }
 
-    list.push(DEFAULT_OLLAMA_MODEL);
-    return Array.from(new Set(list.filter(Boolean)));
+    const primaryCandidate = String(next.primaryModelProfileId || '').trim();
+    const resolvedPrimary = normalizedProfiles.some((item) => item.id === primaryCandidate)
+      ? primaryCandidate
+      : normalizedProfiles[0]?.id || DEFAULT_PRIMARY_MODEL_ID;
+
+    const resolvedPrimaryProfile = normalizedProfiles.find((item) => item.id === resolvedPrimary) || normalizedProfiles[0] || null;
+
+    next.aiModelProfiles = normalizedProfiles;
+    next.primaryModelProfileId = resolvedPrimary;
+    next.defaultModel = resolvedPrimaryProfile ? resolvedPrimaryProfile.model : legacyDefaultModel;
+    next.securityConfig = pinCryptoService.isConfigured(next.securityConfig) ? next.securityConfig : null;
+    return next;
   }
 
-  function fillModelSelect(selectEl, selectedValue) {
-    if (!selectEl) {
-      return;
+  function normalizeSettingsPage(value) {
+    const page = String(value || '').trim();
+    return Object.values(SETTINGS_PAGES).includes(page) ? page : SETTINGS_PAGES.HOME;
+  }
+
+  function setSettingsPage(nextPage) {
+    const safePage = normalizeSettingsPage(nextPage);
+    if (settingsShell) {
+      settingsShell.dataset.settingsPage = safePage;
     }
 
-    const safeSelected = normalizeModelName(selectedValue);
-    const models = getUniqueModelList(safeSelected);
-    const previous = safeSelected || normalizeModelName(selectEl.value);
-
-    selectEl.textContent = '';
-
-    for (const modelName of models) {
-      const option = document.createElement('option');
-      option.value = modelName;
-      option.textContent = modelName;
-      selectEl.appendChild(option);
+    for (const pageNode of settingsPages) {
+      pageNode.classList.toggle('is-active', pageNode.dataset.settingsPage === safePage);
     }
 
-    const resolved = previous && models.includes(previous) ? previous : models[0] || DEFAULT_OLLAMA_MODEL;
-    selectEl.value = resolved;
+    if (settingsSectionBackBtn) {
+      settingsSectionBackBtn.hidden = safePage === SETTINGS_PAGES.HOME;
+    }
+  }
+
+  function getModelProfiles() {
+    const rawList = Array.isArray(panelSettings.aiModelProfiles) ? panelSettings.aiModelProfiles : [];
+    return rawList.map((item, index) => aiProviderService.normalizeProfile(item, index));
+  }
+
+  function setModelProfiles(nextProfiles) {
+    const normalized = (Array.isArray(nextProfiles) ? nextProfiles : []).map((item, index) =>
+      aiProviderService.normalizeProfile(item, index)
+    );
+    panelSettings.aiModelProfiles = normalized;
+    if (settingsScreenState) {
+      settingsScreenState.panelSettings = {
+        ...settingsScreenState.panelSettings,
+        aiModelProfiles: normalized
+      };
+    }
+  }
+
+  function getPrimaryProfileId() {
+    const storedId = String(panelSettings.primaryModelProfileId || '').trim();
+    return storedId || DEFAULT_PRIMARY_MODEL_ID;
+  }
+
+  function getModelProfileById(profileId) {
+    const safeId = String(profileId || '').trim();
+    return getModelProfiles().find((item) => item.id === safeId) || null;
+  }
+
+  function getActiveModelProfile() {
+    const fromState = getModelProfileById(currentChatModelProfileId);
+    if (fromState) {
+      return fromState;
+    }
+
+    const fromPrimary = getModelProfileById(getPrimaryProfileId());
+    if (fromPrimary) {
+      return fromPrimary;
+    }
+
+    const first = getModelProfiles()[0];
+    return first || null;
+  }
+
+  function getActiveModel() {
+    const profile = getActiveModelProfile();
+    return profile ? profile.model : DEFAULT_OLLAMA_MODEL;
+  }
+
+  function getModelProfileLabel(profile) {
+    const safeProfile = aiProviderService.normalizeProfile(profile);
+    const providerMeta = aiProviderService.getProviderMetadata(safeProfile.provider);
+    return `${safeProfile.name} (${providerMeta.label} · ${safeProfile.model})`;
+  }
+
+  function profileCanBeUsed(profile) {
+    const safeProfile = aiProviderService.normalizeProfile(profile);
+    if (!aiProviderService.requiresApiKey(safeProfile.provider)) {
+      return true;
+    }
+
+    if (!safeProfile.hasApiKey || !isPinConfigured()) {
+      return false;
+    }
+
+    return isPinUnlocked();
+  }
+
+  function getProviderDefaultModel(providerId) {
+    const provider = aiProviderService.normalizeProviderId(providerId);
+
+    if (provider === AI_PROVIDER_IDS.OPENAI) {
+      return 'gpt-4o-mini';
+    }
+    if (provider === AI_PROVIDER_IDS.ANTHROPIC) {
+      return 'claude-3-5-sonnet-latest';
+    }
+    if (provider === AI_PROVIDER_IDS.GEMINI) {
+      return 'gemini-2.0-flash';
+    }
+    if (provider === AI_PROVIDER_IDS.OPENAI_COMPATIBLE) {
+      return 'gpt-4o-mini';
+    }
+
+    return localOllamaModels[0] || DEFAULT_OLLAMA_MODEL;
+  }
+
+  function resolvePrimaryProfileId() {
+    const profiles = getModelProfiles();
+    if (!profiles.length) {
+      return '';
+    }
+
+    const preferred = getPrimaryProfileId();
+    const preferredProfile = profiles.find((item) => item.id === preferred) || null;
+    if (preferredProfile && profileCanBeUsed(preferredProfile)) {
+      return preferredProfile.id;
+    }
+
+    const firstReady = profiles.find((item) => profileCanBeUsed(item));
+    return firstReady ? firstReady.id : profiles[0].id;
   }
 
   function syncModelSelectors() {
-    const sourceSettings = settingsScreenState ? settingsScreenState.panelSettings : panelSettings;
-    fillModelSelect(chatModelSelect, getActiveModel());
-    fillModelSelect(settingsModelSelect, sourceSettings.defaultModel || getActiveModel());
+    const profiles = getModelProfiles();
+    const resolvedPrimary = resolvePrimaryProfileId();
+    currentChatModelProfileId = resolvedPrimary || currentChatModelProfileId;
+
+    if (chatModelSelect) {
+      chatModelSelect.textContent = '';
+
+      for (const profile of profiles) {
+        const option = document.createElement('option');
+        option.value = profile.id;
+        option.textContent = getModelProfileLabel(profile);
+        option.disabled = !profileCanBeUsed(profile);
+        chatModelSelect.appendChild(option);
+      }
+
+      chatModelSelect.value = profiles.some((item) => item.id === currentChatModelProfileId)
+        ? currentChatModelProfileId
+        : resolvedPrimary;
+    }
+
+    if (aiPrimaryModelSelect) {
+      aiPrimaryModelSelect.textContent = '';
+
+      for (const profile of profiles) {
+        const option = document.createElement('option');
+        option.value = profile.id;
+        option.textContent = getModelProfileLabel(profile);
+        option.disabled = !profileCanBeUsed(profile);
+        aiPrimaryModelSelect.appendChild(option);
+      }
+
+      aiPrimaryModelSelect.value = resolvedPrimary;
+    }
+  }
+
+  function getSecurityConfig() {
+    return panelSettings.securityConfig && typeof panelSettings.securityConfig === 'object'
+      ? panelSettings.securityConfig
+      : null;
+  }
+
+  function isPinConfigured() {
+    return pinCryptoService.isConfigured(getSecurityConfig());
+  }
+
+  function isPinUnlocked() {
+    return isPinConfigured() && Boolean(unlockedPin);
+  }
+
+  function resetPinSession() {
+    unlockedPin = '';
+  }
+
+  function renderPinStatus() {
+    if (!settingsPinStatus) {
+      return;
+    }
+
+    if (!isPinConfigured()) {
+      settingsPinStatus.textContent = 'PIN no configurado. Recomendado para cifrar API keys.';
+    } else if (isPinUnlocked()) {
+      settingsPinStatus.textContent = 'PIN configurado y desbloqueado.';
+    } else {
+      settingsPinStatus.textContent = 'PIN configurado. Bloqueado para proteger API keys.';
+    }
+
+    if (settingsSetupPinBtn) {
+      settingsSetupPinBtn.textContent = isPinConfigured() ? 'Reconfigurar PIN' : 'Configurar PIN';
+    }
+    if (settingsUnlockPinBtn) {
+      settingsUnlockPinBtn.disabled = !isPinConfigured() || isPinUnlocked();
+    }
+    if (settingsLockPinBtn) {
+      settingsLockPinBtn.disabled = !isPinUnlocked();
+    }
+  }
+
+  function renderAiModelsSettings() {
+    syncModelSelectors();
+    renderPinStatus();
+
+    if (!aiModelsList) {
+      return;
+    }
+
+    const profiles = getModelProfiles();
+    const primaryId = resolvePrimaryProfileId();
+    aiModelsList.textContent = '';
+
+    if (!profiles.length) {
+      const item = document.createElement('li');
+      item.className = 'ai-model-item';
+      item.textContent = 'No hay modelos configurados.';
+      aiModelsList.appendChild(item);
+      return;
+    }
+
+    for (const profile of profiles) {
+      const providerMeta = aiProviderService.getProviderMetadata(profile.provider);
+      const isPrimary = profile.id === primaryId;
+      const keyState = aiProviderService.requiresApiKey(profile.provider)
+        ? profile.hasApiKey
+          ? 'API key configurada'
+          : 'API key pendiente'
+        : 'Modelo local (sin API key)';
+
+      const item = document.createElement('li');
+      item.className = 'ai-model-item';
+      item.dataset.profileId = profile.id;
+
+      const head = document.createElement('div');
+      head.className = 'ai-model-item__head';
+
+      const title = document.createElement('strong');
+      title.className = 'ai-model-item__title';
+      title.textContent = profile.name;
+
+      const primaryBadge = document.createElement('span');
+      primaryBadge.className = 'ai-model-item__primary';
+      primaryBadge.textContent = isPrimary ? 'Principal' : 'Disponible';
+
+      head.append(title, primaryBadge);
+
+      const meta = document.createElement('p');
+      meta.className = 'ai-model-item__meta';
+      meta.textContent = `${providerMeta.label} · ${profile.model} · ${keyState}`;
+
+      const actions = document.createElement('div');
+      actions.className = 'ai-model-item__actions';
+
+      const primaryButton = document.createElement('button');
+      primaryButton.className = 'ai-model-item__btn';
+      primaryButton.type = 'button';
+      primaryButton.dataset.modelAction = 'set-primary';
+      primaryButton.textContent = isPrimary ? 'Usando ahora' : 'Usar como principal';
+      primaryButton.disabled = isPrimary || !profileCanBeUsed(profile);
+
+      actions.appendChild(primaryButton);
+
+      if (aiProviderService.requiresApiKey(profile.provider)) {
+        const editButton = document.createElement('button');
+        editButton.className = 'ai-model-item__btn';
+        editButton.type = 'button';
+        editButton.dataset.modelAction = 'edit-key';
+        editButton.textContent = 'Editar API key';
+        actions.appendChild(editButton);
+      }
+
+      item.append(head, meta, actions);
+      aiModelsList.appendChild(item);
+    }
+  }
+
+  function updateModelModalProviderUi() {
+    const provider = aiProviderService.normalizeProviderId(modelProviderSelect?.value || AI_PROVIDER_IDS.OPENAI);
+    const needsApiKey = aiProviderService.requiresApiKey(provider);
+    const isCompatible = provider === AI_PROVIDER_IDS.OPENAI_COMPATIBLE;
+    const editMode = modelModalState.mode === 'edit';
+
+    if (modelBaseUrlField) {
+      modelBaseUrlField.hidden = !isCompatible;
+    }
+    if (modelApiKeyField) {
+      modelApiKeyField.hidden = !needsApiKey;
+    }
+
+    if (modelProviderSelect) {
+      modelProviderSelect.disabled = editMode;
+    }
+    if (modelDisplayNameInput) {
+      modelDisplayNameInput.disabled = editMode;
+    }
+    if (modelIdInput) {
+      modelIdInput.disabled = editMode;
+    }
+    if (modelBaseUrlInput) {
+      modelBaseUrlInput.disabled = editMode || !isCompatible;
+    }
+
+    if (modelConfigClearKeyBtn) {
+      const profile = getModelProfileById(modelModalState.profileId);
+      modelConfigClearKeyBtn.hidden = !(editMode && profile && profile.hasApiKey);
+    }
+
+    if (!editMode) {
+      if (modelIdInput && !String(modelIdInput.value || '').trim()) {
+        modelIdInput.value = getProviderDefaultModel(provider);
+      }
+
+      if (modelDisplayNameInput && !String(modelDisplayNameInput.value || '').trim()) {
+        modelDisplayNameInput.value = aiProviderService.getProviderMetadata(provider).label;
+      }
+    }
+  }
+
+  function openModelConfigModal(mode = 'add', profileId = '') {
+    modelModalState = {
+      mode: mode === 'edit' ? 'edit' : 'add',
+      profileId: String(profileId || '').trim()
+    };
+
+    setStatus(modelConfigStatus, '');
+
+    if (modelModalState.mode === 'edit') {
+      const profile = getModelProfileById(modelModalState.profileId);
+      if (!profile) {
+        setStatus(aiModelsStatus, 'No se encontro el modelo para editar.', true);
+        return;
+      }
+
+      if (modelConfigTitle) {
+        modelConfigTitle.textContent = 'Editar API key';
+      }
+      if (modelConfigSaveBtn) {
+        modelConfigSaveBtn.textContent = 'Guardar API key';
+      }
+
+      if (modelProviderSelect) {
+        modelProviderSelect.value = profile.provider;
+      }
+      if (modelDisplayNameInput) {
+        modelDisplayNameInput.value = profile.name;
+      }
+      if (modelIdInput) {
+        modelIdInput.value = profile.model;
+      }
+      if (modelBaseUrlInput) {
+        modelBaseUrlInput.value = profile.baseUrl || '';
+      }
+      if (modelApiKeyInput) {
+        modelApiKeyInput.value = '';
+      }
+    } else {
+      if (modelConfigTitle) {
+        modelConfigTitle.textContent = 'Agregar modelo';
+      }
+      if (modelConfigSaveBtn) {
+        modelConfigSaveBtn.textContent = 'Agregar modelo';
+      }
+      if (modelProviderSelect) {
+        modelProviderSelect.value = AI_PROVIDER_IDS.OPENAI;
+      }
+      if (modelDisplayNameInput) {
+        modelDisplayNameInput.value = '';
+      }
+      if (modelIdInput) {
+        modelIdInput.value = '';
+      }
+      if (modelBaseUrlInput) {
+        modelBaseUrlInput.value = '';
+      }
+      if (modelApiKeyInput) {
+        modelApiKeyInput.value = '';
+      }
+    }
+
+    updateModelModalProviderUi();
+    if (modelConfigModal) {
+      modelConfigModal.hidden = false;
+    }
+
+    if (modelModalState.mode === 'edit') {
+      modelApiKeyInput?.focus();
+    } else {
+      modelProviderSelect?.focus();
+    }
+  }
+
+  function closeModelConfigModal() {
+    if (modelConfigModal) {
+      modelConfigModal.hidden = true;
+    }
+    setStatus(modelConfigStatus, '');
+  }
+
+  async function saveModelFromModal() {
+    const provider = aiProviderService.normalizeProviderId(modelProviderSelect?.value || AI_PROVIDER_IDS.OPENAI);
+    const needsApiKey = aiProviderService.requiresApiKey(provider);
+    const modelName = normalizeModelName(modelIdInput?.value || '');
+    const displayName = String(modelDisplayNameInput?.value || '').trim();
+    const baseUrl = String(modelBaseUrlInput?.value || '').trim();
+    const apiKey = String(modelApiKeyInput?.value || '').trim();
+
+    if (modelModalState.mode === 'edit') {
+      const profile = getModelProfileById(modelModalState.profileId);
+      if (!profile) {
+        setStatus(modelConfigStatus, 'Modelo no encontrado.', true);
+        return;
+      }
+
+      if (!apiKey) {
+        setStatus(modelConfigStatus, 'Escribe una API key nueva.', true);
+        modelApiKeyInput?.focus();
+        return;
+      }
+
+      try {
+        await saveApiKeyForProfile(profile.id, apiKey);
+        renderAiModelsSettings();
+        closeModelConfigModal();
+        setStatus(aiModelsStatus, `API key actualizada para ${profile.name}.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'No se pudo guardar API key.';
+        setStatus(modelConfigStatus, message, true);
+      }
+      return;
+    }
+
+    if (!modelName) {
+      setStatus(modelConfigStatus, 'El Model ID es obligatorio.', true);
+      modelIdInput?.focus();
+      return;
+    }
+
+    if (provider === AI_PROVIDER_IDS.OPENAI_COMPATIBLE && !baseUrl) {
+      setStatus(modelConfigStatus, 'La Base URL es obligatoria para OpenAI Compatible.', true);
+      modelBaseUrlInput?.focus();
+      return;
+    }
+
+    if (needsApiKey && apiKey) {
+      if (!isPinConfigured()) {
+        setStatus(modelConfigStatus, 'Configura un PIN antes de guardar API keys.', true);
+        return;
+      }
+
+      if (!isPinUnlocked()) {
+        setStatus(modelConfigStatus, 'Desbloquea el PIN antes de guardar API keys.', true);
+        return;
+      }
+    }
+
+    const providerMeta = aiProviderService.getProviderMetadata(provider);
+    const duplicated = getModelProfiles().some(
+      (item) => item.provider === provider && item.model === modelName && String(item.baseUrl || '') === baseUrl
+    );
+    if (duplicated) {
+      setStatus(modelConfigStatus, 'Ese modelo ya existe en la lista.', true);
+      return;
+    }
+
+    const now = Date.now();
+    const profileId = aiProviderService.buildModelProfileId();
+    const profile = aiProviderService.normalizeProfile(
+      {
+        id: profileId,
+        name: displayName || `${providerMeta.label} ${modelName}`,
+        provider,
+        model: modelName,
+        baseUrl,
+        hasApiKey: false,
+        createdAt: now,
+        updatedAt: now
+      },
+      getModelProfiles().length
+    );
+
+    const profiles = getModelProfiles();
+    profiles.push(profile);
+    const ok = await persistModelProfiles(profiles);
+    if (!ok) {
+      setStatus(modelConfigStatus, 'No se pudo guardar el modelo.', true);
+      return;
+    }
+
+    if (needsApiKey && apiKey) {
+      try {
+        await saveApiKeyForProfile(profile.id, apiKey);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'No se pudo guardar API key.';
+        setStatus(modelConfigStatus, message, true);
+        return;
+      }
+    }
+
+    if (!panelSettings.primaryModelProfileId) {
+      await updatePrimaryModel(profile.id);
+    } else {
+      syncModelSelectors();
+      renderAiModelsSettings();
+    }
+
+    closeModelConfigModal();
+    setStatus(aiModelsStatus, `Modelo ${profile.name} agregado.`);
+  }
+
+  async function clearApiKeyFromModal() {
+    const profile = getModelProfileById(modelModalState.profileId);
+    if (!profile) {
+      return;
+    }
+
+    const ok = await clearApiKeyForProfile(profile.id);
+    if (!ok) {
+      setStatus(modelConfigStatus, 'No se pudo eliminar API key.', true);
+      return;
+    }
+
+    const fallbackPrimary = resolvePrimaryProfileId();
+    if (fallbackPrimary && fallbackPrimary !== getPrimaryProfileId()) {
+      await updatePrimaryModel(fallbackPrimary);
+    } else {
+      renderAiModelsSettings();
+    }
+
+    closeModelConfigModal();
+    setStatus(aiModelsStatus, `API key eliminada para ${profile.name}.`);
+  }
+
+  function openPinModal(mode = PIN_MODAL_MODES.SETUP) {
+    pinModalMode = mode === PIN_MODAL_MODES.UNLOCK ? PIN_MODAL_MODES.UNLOCK : PIN_MODAL_MODES.SETUP;
+
+    if (pinModalMode === PIN_MODAL_MODES.UNLOCK) {
+      if (pinModalTitle) {
+        pinModalTitle.textContent = 'Desbloquear PIN';
+      }
+      if (pinModalCopy) {
+        pinModalCopy.textContent = 'Ingresa tu PIN para descifrar API keys y usar modelos externos.';
+      }
+      if (pinModalSaveBtn) {
+        pinModalSaveBtn.textContent = 'Desbloquear';
+      }
+      if (pinConfirmField) {
+        pinConfirmField.hidden = true;
+      }
+    } else {
+      if (pinModalTitle) {
+        pinModalTitle.textContent = isPinConfigured() ? 'Reconfigurar PIN' : 'Configurar PIN';
+      }
+      if (pinModalCopy) {
+        pinModalCopy.textContent =
+          'El PIN (4 digitos) se usa para cifrar API keys sensibles en IndexedDB y proteger acceso local.';
+      }
+      if (pinModalSaveBtn) {
+        pinModalSaveBtn.textContent = isPinConfigured() ? 'Cambiar PIN' : 'Guardar PIN';
+      }
+      if (pinConfirmField) {
+        pinConfirmField.hidden = false;
+      }
+    }
+
+    if (pinInput) {
+      pinInput.value = '';
+    }
+    if (pinConfirmInput) {
+      pinConfirmInput.value = '';
+    }
+    setStatus(pinModalStatus, '');
+
+    if (pinModal) {
+      pinModal.hidden = false;
+    }
+
+    pinInput?.focus();
+  }
+
+  function closePinModal() {
+    if (pinModal) {
+      pinModal.hidden = true;
+    }
+    setStatus(pinModalStatus, '');
+  }
+
+  async function rotateEncryptedApiKeys({ oldPin, oldConfig, newPin, newConfig }) {
+    const profiles = getModelProfiles().filter(
+      (item) => aiProviderService.requiresApiKey(item.provider) && item.hasApiKey === true
+    );
+
+    const plainByProfile = new Map();
+    for (const profile of profiles) {
+      const payload = await readSecret(buildProfileSecretKey(profile.id));
+      if (!payload) {
+        continue;
+      }
+
+      const plain = await pinCryptoService.decryptSecret(oldPin, oldConfig, payload);
+      plainByProfile.set(profile.id, plain);
+    }
+
+    for (const [profileId, plainText] of plainByProfile.entries()) {
+      const encrypted = await pinCryptoService.encryptSecret(newPin, newConfig, plainText);
+      await saveSecret(buildProfileSecretKey(profileId), encrypted);
+    }
+  }
+
+  async function savePinFromModal() {
+    const pin = String(pinInput?.value || '').trim();
+
+    try {
+      pinCryptoService.validatePin(pin);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'PIN invalido.';
+      setStatus(pinModalStatus, message, true);
+      return;
+    }
+
+    if (pinModalMode === PIN_MODAL_MODES.UNLOCK) {
+      const config = getSecurityConfig();
+      const isValid = await pinCryptoService.verifyPin(pin, config);
+      if (!isValid) {
+        setStatus(pinModalStatus, 'PIN incorrecto.', true);
+        return;
+      }
+
+      unlockedPin = pin;
+      syncModelSelectors();
+      renderAiModelsSettings();
+      renderPinStatus();
+      closePinModal();
+      setStatus(aiModelsStatus, 'PIN desbloqueado. Ya puedes usar modelos externos.');
+      return;
+    }
+
+    const confirmPin = String(pinConfirmInput?.value || '').trim();
+    if (pin !== confirmPin) {
+      setStatus(pinModalStatus, 'El PIN y la confirmacion no coinciden.', true);
+      return;
+    }
+
+    const oldConfig = getSecurityConfig();
+    const hadPin = isPinConfigured();
+    const oldPin = unlockedPin;
+
+    if (hadPin && !isPinUnlocked()) {
+      setStatus(pinModalStatus, 'Desbloquea tu PIN actual antes de cambiarlo.', true);
+      return;
+    }
+
+    try {
+      const newConfig = await pinCryptoService.createSecurityConfig(pin);
+      const ok = await savePanelSettings({ securityConfig: newConfig });
+      if (!ok) {
+        setStatus(pinModalStatus, 'No se pudo guardar la configuracion del PIN.', true);
+        return;
+      }
+
+      unlockedPin = pin;
+
+      if (hadPin && oldConfig) {
+        await rotateEncryptedApiKeys({ oldPin, oldConfig, newPin: pin, newConfig });
+      }
+      syncModelSelectors();
+      renderAiModelsSettings();
+      renderPinStatus();
+      closePinModal();
+      setStatus(aiModelsStatus, hadPin ? 'PIN actualizado.' : 'PIN configurado.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo configurar el PIN.';
+      setStatus(pinModalStatus, message, true);
+    }
   }
 
   function applyPanelSettingsToUi() {
@@ -964,11 +1757,15 @@ export function initPanelApp() {
 
     settingsScreenController.applyPanelSettingsToUi();
     panelSettings = { ...settingsScreenState.panelSettings };
-    currentChatModel = settingsScreenState.currentChatModel;
+    currentChatModelProfileId = resolvePrimaryProfileId();
+    syncModelSelectors();
+    renderPinStatus();
   }
 
   function populateSettingsForm() {
     settingsScreenController?.populateSettingsForm();
+    syncModelSelectors();
+    renderPinStatus();
   }
 
   function isOnboardingComplete() {
@@ -995,84 +1792,84 @@ export function initPanelApp() {
     onboardingNameInput?.focus();
   }
 
-  async function fetchAvailableModelsFromOllama() {
-    return ollamaService.fetchAvailableModelsFromOllama(getActiveModel());
-  }
-
-  async function refreshAvailableModels(options = {}) {
+  async function refreshLocalModels(options = {}) {
     const silent = Boolean(options.silent);
     if (!silent) {
-      setStatus(chatStatus, 'Cargando modelos...', false, { loading: true });
+      setStatus(aiModelsStatus, 'Consultando Ollama local...', false, { loading: true });
     }
 
+    const activeProfile = getModelProfiles().find((item) => item.provider === AI_PROVIDER_IDS.OLLAMA) || null;
+    const referenceModel = activeProfile ? activeProfile.model : DEFAULT_OLLAMA_MODEL;
+
     try {
-      availableChatModels = await fetchAvailableModelsFromOllama();
-      syncModelSelectors();
+      localOllamaModels = await aiProviderService.fetchLocalModels(referenceModel);
       if (!silent) {
-        setStatus(chatStatus, `Modelos cargados: ${availableChatModels.length}.`);
-        setStatus(settingsStatus, `Modelos cargados: ${availableChatModels.length}.`);
+        setStatus(aiModelsStatus, `Modelos locales detectados: ${localOllamaModels.length}.`);
       }
       return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudieron cargar modelos.';
+      const message = error instanceof Error ? error.message : 'No se pudieron cargar modelos locales.';
       if (!silent) {
-        setStatus(chatStatus, message, true);
-        setStatus(settingsStatus, message, true);
+        setStatus(aiModelsStatus, message, true);
       }
-      syncModelSelectors();
       return false;
     }
   }
 
-  async function updateDefaultModel(modelName) {
-    const safeModel = normalizeModelName(modelName) || DEFAULT_OLLAMA_MODEL;
-    currentChatModel = safeModel;
-    if (settingsScreenState) {
-      settingsScreenState.currentChatModel = safeModel;
+  async function updatePrimaryModel(profileId) {
+    const safeId = String(profileId || '').trim();
+    if (!safeId) {
+      return;
     }
-    const ok = await savePanelSettings({ defaultModel: safeModel });
+
+    const profile = getModelProfileById(safeId);
+    if (!profile) {
+      return;
+    }
+
+    if (!profileCanBeUsed(profile)) {
+      setStatus(aiModelsStatus, 'Completa API key del modelo antes de usarlo como principal.', true);
+      syncModelSelectors();
+      return;
+    }
+
+    currentChatModelProfileId = safeId;
+    const ok = await savePanelSettings({
+      primaryModelProfileId: safeId,
+      defaultModel: profile.model
+    });
+
     if (!ok) {
-      setStatus(settingsStatus, 'No se pudo guardar el modelo default.', true);
+      setStatus(aiModelsStatus, 'No se pudo guardar el modelo principal.', true);
+      return;
     }
+
     syncModelSelectors();
-    warmupLocalModel();
+    renderAiModelsSettings();
+    setStatus(chatStatus, `Modelo activo: ${profile.model}.`);
+    warmupPrimaryModel();
   }
 
-  function canShowImageDropOverlay() {
-    return app && app.dataset.screen === 'tools' && toolsScreen.dataset.tool === 'image';
-  }
-
-  function buildFallbackPrompt(messages) {
-    return ollamaService.buildFallbackPrompt(messages);
-  }
-
-  async function streamWithOllamaChat(model, messages, temperature, onChunk) {
-    return ollamaService.streamWithOllamaChat(model, messages, temperature, onChunk);
-  }
-
-  async function streamWithOllamaPrompt(model, prompt, temperature, onChunk) {
-    return ollamaService.streamWithOllamaPrompt(model, prompt, temperature, onChunk);
-  }
-
-  async function warmupLocalModelRequest(model) {
-    return ollamaService.warmupLocalModelRequest(model);
-  }
-
-  function warmupLocalModel() {
+  function warmupPrimaryModel() {
     if (modelWarmupPromise) {
       return modelWarmupPromise;
     }
 
     modelWarmupPromise = (async () => {
-      const model = getActiveModel();
+      const profile = getActiveModelProfile();
+      if (!profile) {
+        return false;
+      }
+
+      if (profile.provider !== AI_PROVIDER_IDS.OLLAMA) {
+        return true;
+      }
 
       try {
-        await warmupLocalModelRequest(model);
-
+        await aiProviderService.warmupProfile(profile);
         if (!isGeneratingChat && !chatHistory.length) {
-          setStatus(chatStatus, `Modelo local listo: ${model}.`);
+          setStatus(chatStatus, `Modelo local listo: ${profile.model}.`);
         }
-
         return true;
       } catch (error) {
         if (isGeneratingChat) {
@@ -1080,12 +1877,9 @@ export function initPanelApp() {
         }
 
         const message = error instanceof Error ? error.message : 'No se pudo precargar el modelo local.';
-        if (message.includes('no encontrado')) {
+        if (!chatHistory.length) {
           setStatus(chatStatus, message, true);
-        } else if (!chatHistory.length) {
-          setStatus(chatStatus, `Precarga no disponible. Se cargara al primer mensaje (${model}).`);
         }
-
         return false;
       } finally {
         modelWarmupPromise = null;
@@ -1115,6 +1909,123 @@ export function initPanelApp() {
       panelSettings = { ...panelSettings, ...nextSettings };
     }
     return storageService.savePanelSettings(panelSettings);
+  }
+
+  async function readSecret(secretKey) {
+    return storageService.readSecret(secretKey);
+  }
+
+  async function saveSecret(secretKey, value) {
+    return storageService.saveSecret(secretKey, value);
+  }
+
+  async function deleteSecret(secretKey) {
+    return storageService.deleteSecret(secretKey);
+  }
+
+  function buildProfileSecretKey(profileId) {
+    return `${SECRET_KEY_PREFIX}${String(profileId || '').trim()}`;
+  }
+
+  async function persistModelProfiles(nextProfiles) {
+    const normalized = (Array.isArray(nextProfiles) ? nextProfiles : []).map((item, index) =>
+      aiProviderService.normalizeProfile(item, index)
+    );
+    setModelProfiles(normalized);
+    return savePanelSettings({ aiModelProfiles: normalized });
+  }
+
+  async function patchModelProfile(profileId, patch) {
+    const safeId = String(profileId || '').trim();
+    const profiles = getModelProfiles();
+    const index = profiles.findIndex((item) => item.id === safeId);
+    if (index === -1) {
+      return false;
+    }
+
+    profiles[index] = {
+      ...profiles[index],
+      ...(patch && typeof patch === 'object' ? patch : {}),
+      updatedAt: Date.now()
+    };
+
+    return persistModelProfiles(profiles);
+  }
+
+  async function saveApiKeyForProfile(profileId, apiKey) {
+    const profile = getModelProfileById(profileId);
+    if (!profile) {
+      throw new Error('Modelo no encontrado.');
+    }
+
+    if (!aiProviderService.requiresApiKey(profile.provider)) {
+      return true;
+    }
+
+    if (!isPinConfigured()) {
+      throw new Error('Configura un PIN antes de guardar API keys.');
+    }
+
+    if (!isPinUnlocked()) {
+      throw new Error('Desbloquea el PIN para guardar API keys.');
+    }
+
+    const token = String(apiKey || '').trim();
+    if (!token) {
+      throw new Error('La API key no puede estar vacia.');
+    }
+
+    const encrypted = await pinCryptoService.encryptSecret(unlockedPin, getSecurityConfig(), token);
+    const secretKey = buildProfileSecretKey(profile.id);
+    const saved = await saveSecret(secretKey, encrypted);
+    if (!saved) {
+      throw new Error('No se pudo guardar la API key cifrada.');
+    }
+
+    const ok = await patchModelProfile(profile.id, { hasApiKey: true });
+    if (!ok) {
+      throw new Error('No se pudo actualizar el estado del modelo.');
+    }
+
+    return true;
+  }
+
+  async function clearApiKeyForProfile(profileId) {
+    const profile = getModelProfileById(profileId);
+    if (!profile) {
+      return false;
+    }
+
+    const secretKey = buildProfileSecretKey(profile.id);
+    await deleteSecret(secretKey);
+    return patchModelProfile(profile.id, { hasApiKey: false });
+  }
+
+  async function getApiKeyForProfile(profile) {
+    const safeProfile = aiProviderService.normalizeProfile(profile);
+
+    if (!aiProviderService.requiresApiKey(safeProfile.provider)) {
+      return '';
+    }
+
+    if (!safeProfile.hasApiKey) {
+      throw new Error(`Falta API key para ${safeProfile.name}.`);
+    }
+
+    if (!isPinConfigured()) {
+      throw new Error('Configura un PIN de seguridad para usar API keys.');
+    }
+
+    if (!isPinUnlocked()) {
+      throw new Error('PIN bloqueado. Ve a Settings > AI Models y desbloquea.');
+    }
+
+    const payload = await readSecret(buildProfileSecretKey(safeProfile.id));
+    if (!payload) {
+      throw new Error(`No se encontro API key para ${safeProfile.name}.`);
+    }
+
+    return pinCryptoService.decryptSecret(unlockedPin, getSecurityConfig(), payload);
   }
 
   function setChatTool(toolName) {
@@ -1179,12 +2090,12 @@ export function initPanelApp() {
 
     const ok = await saveSettings({ [PREFERENCE_KEYS.UI_THEME_MODE]: safeMode });
     if (!ok && !silent) {
-      setStatus(settingsStatus, 'No se pudo guardar apariencia.', true);
+      setStatus(settingsUserStatus, 'No se pudo guardar apariencia.', true);
       return false;
     }
 
     if (!silent) {
-      setStatus(settingsStatus, `Apariencia: ${getThemeLabel(safeMode)}.`);
+      setStatus(settingsUserStatus, `Apariencia: ${getThemeLabel(safeMode)}.`);
     }
 
     return ok;
@@ -1260,8 +2171,7 @@ export function initPanelApp() {
     if (!chatHistory.length) {
       const empty = document.createElement('div');
       empty.className = 'chat-empty';
-      empty.textContent =
-        'Escribe un mensaje para chatear con el modelo local. Enter envia, Shift+Enter agrega salto de linea.';
+      empty.textContent = 'Escribe un mensaje para chatear. Enter envia, Shift+Enter agrega salto de linea.';
       chatMessagesEl.appendChild(empty);
       return;
     }
@@ -1337,31 +2247,32 @@ export function initPanelApp() {
   }
 
   async function streamChatResponse(onChunk) {
-    const model = getActiveModel();
     const temperature = Number(settings[PREFERENCE_KEYS.AI_TEMPERATURE] ?? DEFAULT_SETTINGS[PREFERENCE_KEYS.AI_TEMPERATURE]);
     const safeTemp = Number.isFinite(temperature) ? temperature : DEFAULT_SETTINGS[PREFERENCE_KEYS.AI_TEMPERATURE];
     const messages = buildChatConversation();
-    let streamedAnyChunk = false;
+    const activeProfile = getActiveModelProfile();
+
+    if (!activeProfile) {
+      throw new Error('No hay modelo configurado.');
+    }
+
+    const apiKey = await getApiKeyForProfile(activeProfile);
 
     const handleChunk = (chunk) => {
       if (!chunk) {
         return;
       }
 
-      streamedAnyChunk = true;
       onChunk(chunk);
     };
 
-    try {
-      return await streamWithOllamaChat(model, messages, safeTemp, handleChunk);
-    } catch (error) {
-      if (streamedAnyChunk) {
-        throw error;
-      }
-
-      const prompt = buildFallbackPrompt(messages);
-      return streamWithOllamaPrompt(model, prompt, safeTemp, handleChunk);
-    }
+    return aiProviderService.streamWithProfile({
+      profile: activeProfile,
+      messages,
+      temperature: safeTemp,
+      apiKey,
+      onChunk: handleChunk
+    });
   }
 
   async function sendChatMessage() {
@@ -1381,7 +2292,8 @@ export function initPanelApp() {
     let assistantMessage = null;
 
     try {
-      const activeModel = getActiveModel();
+      const activeProfile = getActiveModelProfile();
+      const activeModel = activeProfile ? `${activeProfile.name} · ${activeProfile.model}` : getActiveModel();
       await pushChatMessage('user', content);
       chatInput.value = '';
       updateChatInputSize();
@@ -1415,7 +2327,7 @@ export function initPanelApp() {
       assistantMessage.pending = false;
       assistantMessage.content = assistantMessage.content.trim() || output.trim();
       if (!assistantMessage.content) {
-        throw new Error('Ollama no devolvio contenido.');
+        throw new Error('El provider no devolvio contenido.');
       }
 
       const parsedEmotion = extractEmotionFromText(assistantMessage.content);
@@ -1506,13 +2418,24 @@ export function initPanelApp() {
     tabsContextJson.textContent = JSON.stringify(payload, null, 2);
   }
 
-  async function generateWithLocalModel(prompt, options = {}) {
+  async function generateWithActiveModel(prompt, options = {}) {
     const temperature = Number.isFinite(options.temperature) ? options.temperature : 0.2;
-    const model = options.model || getActiveModel();
+    const profile = options.profile || getActiveModelProfile();
+    if (!profile) {
+      throw new Error('No hay modelo configurado.');
+    }
+
+    const apiKey = await getApiKeyForProfile(profile);
     let output = '';
 
-    await streamWithOllamaPrompt(model, prompt, temperature, (chunk) => {
-      output += chunk || '';
+    await aiProviderService.streamWithProfile({
+      profile,
+      messages: [{ role: 'user', content: String(prompt || '') }],
+      temperature,
+      apiKey,
+      onChunk: (chunk) => {
+        output += chunk || '';
+      }
     });
 
     return output.trim();
@@ -1551,7 +2474,7 @@ export function initPanelApp() {
 
       try {
         const prompt = buildTabSummaryPrompt(next.tabContext);
-        const response = await generateWithLocalModel(prompt, { temperature: 0.15 });
+        const response = await generateWithActiveModel(prompt, { temperature: 0.15 });
         const summary = response
           .replace(/\s+/g, ' ')
           .trim()
@@ -1693,7 +2616,7 @@ export function initPanelApp() {
 
     try {
       const prompt = buildWhatsappReplyPrompt(tabContext);
-      const suggestionRaw = await generateWithLocalModel(prompt, { temperature: 0.35 });
+      const suggestionRaw = await generateWithActiveModel(prompt, { temperature: 0.35 });
       const suggestion = suggestionRaw
         .replace(/\s+/g, ' ')
         .trim()
@@ -2295,6 +3218,10 @@ export function initPanelApp() {
     };
   }
 
+  function canShowImageDropOverlay() {
+    return app && app.dataset.screen === 'tools' && toolsScreen.dataset.tool === 'image';
+  }
+
   function setDropUi(isActive) {
     const visible = Boolean(isActive && canShowImageDropOverlay());
 
@@ -2448,7 +3375,14 @@ export function initPanelApp() {
 
     await settingsScreenController.hydratePanelSettings();
     panelSettings = { ...settingsScreenController.getPanelSettings() };
-    currentChatModel = settingsScreenState ? settingsScreenState.currentChatModel : currentChatModel;
+    if (settingsScreenState) {
+      settingsScreenState.panelSettings = { ...panelSettings };
+    }
+
+    currentChatModelProfileId = resolvePrimaryProfileId();
+    syncModelSelectors();
+    renderAiModelsSettings();
+    renderPinStatus();
   }
 
   async function handleOnboardingContinue() {
@@ -2461,17 +3395,25 @@ export function initPanelApp() {
       requestChatAutofocus
     });
     panelSettings = { ...settingsScreenController.getPanelSettings() };
-    currentChatModel = settingsScreenState ? settingsScreenState.currentChatModel : currentChatModel;
+    currentChatModelProfileId = resolvePrimaryProfileId();
   }
 
-  async function saveSettingsScreen() {
+  async function saveUserSettingsScreen() {
     if (!settingsScreenController) {
       return;
     }
 
-    await settingsScreenController.saveSettingsScreen();
+    await settingsScreenController.saveUserSettings();
     panelSettings = { ...settingsScreenController.getPanelSettings() };
-    currentChatModel = settingsScreenState ? settingsScreenState.currentChatModel : currentChatModel;
+  }
+
+  async function saveAssistantSettingsScreen() {
+    if (!settingsScreenController) {
+      return;
+    }
+
+    await settingsScreenController.saveAssistantSettings();
+    panelSettings = { ...settingsScreenController.getPanelSettings() };
   }
 
   async function hydrateChatHistory() {
@@ -2526,25 +3468,121 @@ export function initPanelApp() {
       handleOnboardingContinue();
     });
 
-    settingsSaveBtn?.addEventListener('click', () => {
-      saveSettingsScreen();
+    settingsSectionBackBtn?.addEventListener('click', () => {
+      setSettingsPage(SETTINGS_PAGES.HOME);
     });
 
-    refreshModelsBtn?.addEventListener('click', () => {
-      refreshAvailableModels({ silent: false });
+    for (const item of settingsNavItems) {
+      item.addEventListener('click', () => {
+        setSettingsPage(item.dataset.settingsTarget || SETTINGS_PAGES.HOME);
+      });
+    }
+
+    settingsUserSaveBtn?.addEventListener('click', () => {
+      saveUserSettingsScreen();
     });
 
-    settingsRefreshModelsBtn?.addEventListener('click', () => {
-      refreshAvailableModels({ silent: false });
+    settingsAssistantSaveBtn?.addEventListener('click', () => {
+      saveAssistantSettingsScreen();
     });
 
     chatModelSelect?.addEventListener('change', () => {
-      updateDefaultModel(chatModelSelect.value);
-      setStatus(chatStatus, `Modelo activo: ${getActiveModel()}.`);
+      updatePrimaryModel(chatModelSelect.value);
     });
 
-    settingsModelSelect?.addEventListener('change', () => {
-      fillModelSelect(settingsModelSelect, settingsModelSelect.value);
+    aiPrimaryModelSelect?.addEventListener('change', () => {
+      updatePrimaryModel(aiPrimaryModelSelect.value);
+    });
+
+    settingsAddModelBtn?.addEventListener('click', () => {
+      openModelConfigModal('add');
+    });
+
+    settingsRefreshLocalModelsBtn?.addEventListener('click', () => {
+      refreshLocalModels({ silent: false });
+    });
+
+    aiModelsList?.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-model-action]');
+      if (!button) {
+        return;
+      }
+
+      const row = button.closest('[data-profile-id]');
+      const profileId = row?.dataset.profileId || '';
+      if (!profileId) {
+        return;
+      }
+
+      const action = button.dataset.modelAction;
+      if (action === 'set-primary') {
+        updatePrimaryModel(profileId);
+        return;
+      }
+
+      if (action === 'edit-key') {
+        openModelConfigModal('edit', profileId);
+      }
+    });
+
+    settingsSetupPinBtn?.addEventListener('click', () => {
+      openPinModal(PIN_MODAL_MODES.SETUP);
+    });
+
+    settingsUnlockPinBtn?.addEventListener('click', () => {
+      openPinModal(PIN_MODAL_MODES.UNLOCK);
+    });
+
+    settingsLockPinBtn?.addEventListener('click', () => {
+      resetPinSession();
+      syncModelSelectors();
+      renderAiModelsSettings();
+      renderPinStatus();
+      setStatus(aiModelsStatus, 'PIN bloqueado.');
+    });
+
+    modelProviderSelect?.addEventListener('change', () => {
+      updateModelModalProviderUi();
+    });
+
+    modelConfigCloseBtn?.addEventListener('click', () => {
+      closeModelConfigModal();
+    });
+
+    modelConfigCancelBtn?.addEventListener('click', () => {
+      closeModelConfigModal();
+    });
+
+    modelConfigSaveBtn?.addEventListener('click', () => {
+      saveModelFromModal();
+    });
+
+    modelConfigClearKeyBtn?.addEventListener('click', () => {
+      clearApiKeyFromModal();
+    });
+
+    modelConfigModal?.addEventListener('click', (event) => {
+      if (event.target === modelConfigModal) {
+        closeModelConfigModal();
+      }
+    });
+
+    pinModalCloseBtn?.addEventListener('click', () => {
+      closePinModal();
+    });
+
+    pinModalCancelBtn?.addEventListener('click', () => {
+      closePinModal();
+    });
+
+    pinModalSaveBtn?.addEventListener('click', () => {
+      savePinFromModal();
+    });
+
+    pinModal?.addEventListener('click', (event) => {
+      if (event.target === pinModal) {
+        closePinModal();
+      }
     });
 
     settingsLanguageSelect?.addEventListener('change', () => {
@@ -2606,6 +3644,8 @@ export function initPanelApp() {
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         closeToolMenu();
+        closeModelConfigModal();
+        closePinModal();
       }
     });
 
@@ -2790,8 +3830,7 @@ export function initPanelApp() {
 
   async function init() {
     settingsScreenState = {
-      panelSettings: { ...panelSettings },
-      currentChatModel
+      panelSettings: { ...panelSettings }
     };
     settingsScreenController = createSettingsScreenController({
       elements: {
@@ -2802,14 +3841,13 @@ export function initPanelApp() {
         settingsThemeModeSelect,
         settingsLanguageSelect,
         settingsSystemPrompt,
-        settingsModelSelect,
-        settingsStatus,
+        settingsUserStatus,
+        settingsAssistantStatus,
         chatStatus
       },
       state: settingsScreenState,
       defaults: {
-        panelSettingsDefaults: PANEL_SETTINGS_DEFAULTS,
-        defaultModel: DEFAULT_OLLAMA_MODEL
+        panelSettingsDefaults: PANEL_SETTINGS_DEFAULTS
       },
       storage: {
         readPanelSettings,
@@ -2818,9 +3856,7 @@ export function initPanelApp() {
       setStatus,
       getThemeMode: () => themeMode,
       setThemeMode,
-      normalizeModelName,
-      syncModelSelectors,
-      getActiveModel
+      onAfterHydrate: normalizePanelModelSettings
     });
 
     setStageTransitionEnabled(false);
@@ -2837,6 +3873,7 @@ export function initPanelApp() {
 
     await hydrateSettings();
     await hydratePanelSettings();
+    resetPinSession();
     setActiveTool('image');
     const initialScreen = resolveHomeOrOnboardingScreen();
     setScreen(initialScreen);
@@ -2853,13 +3890,17 @@ export function initPanelApp() {
 
     await hydrateBrandEmotions();
     await hydrateChatHistory();
-    await refreshAvailableModels({ silent: true });
+    await refreshLocalModels({ silent: true });
     syncModelSelectors();
+    renderAiModelsSettings();
 
-    if (!chatHistory.length) {
-      setStatus(chatStatus, `Precargando ${getActiveModel()}...`, false, { loading: true });
+    const activeProfile = getActiveModelProfile();
+    if (!chatHistory.length && activeProfile && activeProfile.provider === AI_PROVIDER_IDS.OLLAMA) {
+      setStatus(chatStatus, `Precargando ${activeProfile.model}...`, false, { loading: true });
+      warmupPrimaryModel();
+    } else if (!chatHistory.length && activeProfile) {
+      setStatus(chatStatus, `Modelo principal: ${activeProfile.name} (${activeProfile.model}).`);
     }
-    warmupLocalModel();
 
     if (initialScreen === 'home') {
       requestChatAutofocus(10, 80);
