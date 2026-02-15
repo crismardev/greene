@@ -248,7 +248,8 @@ export function initPanelApp() {
     primaryModelProfileId: DEFAULT_PRIMARY_MODEL_ID,
     securityConfig: null,
     crmErpDatabaseUrl: '',
-    crmErpDatabaseSchemaSnapshot: null
+    crmErpDatabaseSchemaSnapshot: null,
+    crmErpDatabaseMeProfile: null
   });
 
   const ALLOWED_IMAGE_TYPES = new Set([
@@ -349,6 +350,12 @@ export function initPanelApp() {
   const settingsCrmErpDbSaveBtn = document.getElementById('settingsCrmErpDbSaveBtn');
   const settingsCrmErpDbAnalyzeBtn = document.getElementById('settingsCrmErpDbAnalyzeBtn');
   const settingsCrmErpDbStatus = document.getElementById('settingsCrmErpDbStatus');
+  const settingsCrmErpMeTableSelect = document.getElementById('settingsCrmErpMeTableSelect');
+  const settingsCrmErpMeIdColumnSelect = document.getElementById('settingsCrmErpMeIdColumnSelect');
+  const settingsCrmErpMeUserIdInput = document.getElementById('settingsCrmErpMeUserIdInput');
+  const settingsCrmErpMeSaveBtn = document.getElementById('settingsCrmErpMeSaveBtn');
+  const settingsCrmErpMeClearBtn = document.getElementById('settingsCrmErpMeClearBtn');
+  const settingsCrmErpMeStatus = document.getElementById('settingsCrmErpMeStatus');
   const settingsCrmErpDbSchemaSummary = document.getElementById('settingsCrmErpDbSchemaSummary');
   const tabsContextJson = document.getElementById('tabsContextJson');
   const systemVariablesList = document.getElementById('systemVariablesList');
@@ -742,12 +749,115 @@ export function initPanelApp() {
     };
   }
 
+  function splitQualifiedTableName(value) {
+    const token = String(value || '').trim();
+    if (!token) {
+      return { schema: '', table: '', qualifiedName: '' };
+    }
+
+    const parts = token.split('.');
+    if (parts.length < 2) {
+      return { schema: '', table: token, qualifiedName: token };
+    }
+
+    const table = String(parts.pop() || '').trim();
+    const schema = String(parts.join('.') || '').trim();
+    return {
+      schema,
+      table,
+      qualifiedName: schema && table ? `${schema}.${table}` : token
+    };
+  }
+
+  function findTableByQualifiedName(snapshot, qualifiedName) {
+    const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
+    const token = String(qualifiedName || '').trim().toLowerCase();
+    if (!safeSnapshot || !token) {
+      return null;
+    }
+    const tables = Array.isArray(safeSnapshot.tables) ? safeSnapshot.tables : [];
+    return (
+      tables.find((table) => String(table?.qualifiedName || '').trim().toLowerCase() === token) || null
+    );
+  }
+
+  function normalizeCrmErpMeProfile(rawProfile, snapshot = null) {
+    const source = rawProfile && typeof rawProfile === 'object' ? rawProfile : null;
+    if (!source) {
+      return null;
+    }
+
+    const tableQualifiedName = String(
+      source.tableQualifiedName || source.table || source.qualifiedTable || ''
+    )
+      .trim()
+      .slice(0, 240);
+    const idColumn = String(source.idColumn || source.id_column || source.userIdColumn || '')
+      .trim()
+      .slice(0, 120);
+    const userId = String(source.userId || source.user_id || '')
+      .trim()
+      .slice(0, 220);
+
+    if (!tableQualifiedName && !idColumn && !userId) {
+      return null;
+    }
+
+    const normalized = {
+      tableQualifiedName,
+      idColumn,
+      userId
+    };
+
+    if (!snapshot) {
+      return normalized;
+    }
+
+    const table = findTableByQualifiedName(snapshot, normalized.tableQualifiedName);
+    if (!table) {
+      return normalized;
+    }
+
+    const columns = Array.isArray(table.columns) ? table.columns : [];
+    const hasStoredIdColumn = columns.some(
+      (column) =>
+        String(column?.name || '').trim().toLowerCase() ===
+        String(normalized.idColumn || '').trim().toLowerCase()
+    );
+    if (!hasStoredIdColumn) {
+      const preferredIdColumn =
+        columns.find((column) => column?.isPrimaryKey === true && String(column?.name || '').trim()) ||
+        columns.find((column) => isLikelyIdColumnName(column?.name)) ||
+        null;
+      normalized.idColumn = String(preferredIdColumn?.name || normalized.idColumn || '')
+        .trim()
+        .slice(0, 120);
+    }
+
+    return normalized;
+  }
+
+  function isCrmErpMeProfileComplete(profile) {
+    const safe = profile && typeof profile === 'object' ? profile : null;
+    return Boolean(
+      safe &&
+        String(safe.tableQualifiedName || '').trim() &&
+        String(safe.idColumn || '').trim() &&
+        String(safe.userId || '').trim()
+    );
+  }
+
   function getCrmErpDatabaseConnectionUrl() {
     return postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
   }
 
   function getCrmErpDatabaseSchemaSnapshot() {
     return normalizeCrmErpDatabaseSnapshot(panelSettings.crmErpDatabaseSchemaSnapshot);
+  }
+
+  function getCrmErpDatabaseMeProfile() {
+    const snapshot = getCrmErpDatabaseSchemaSnapshot();
+    return normalizeCrmErpMeProfile(panelSettings.crmErpDatabaseMeProfile, snapshot);
   }
 
   function formatDateTime(value) {
@@ -822,6 +932,166 @@ export function initPanelApp() {
     return lines.join('\n');
   }
 
+  function setSelectOptions(select, options = [], selectedValue = '') {
+    if (!select) {
+      return '';
+    }
+
+    const entries = Array.isArray(options) ? options : [];
+    select.textContent = '';
+    for (const optionModel of entries) {
+      const option = document.createElement('option');
+      option.value = String(optionModel?.value || '');
+      option.textContent = String(optionModel?.label || option.value || 'N/A');
+      select.appendChild(option);
+    }
+
+    const preferred = String(selectedValue || '').trim();
+    if (preferred && entries.some((item) => String(item?.value || '').trim() === preferred)) {
+      select.value = preferred;
+      return preferred;
+    }
+
+    const fallback = String(entries[0]?.value || '').trim();
+    select.value = fallback;
+    return fallback;
+  }
+
+  function isLikelyUserTableName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(user|owner|employee|staff|agent|seller|sales|advisor|member|assignee|representative)/.test(
+      token
+    );
+  }
+
+  function buildCrmErpMeTableOptions(snapshot, currentQualifiedName = '') {
+    const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
+    const tables = Array.isArray(safeSnapshot?.tables) ? safeSnapshot.tables : [];
+    const output = [];
+    const currentToken = String(currentQualifiedName || '').trim().toLowerCase();
+
+    for (const table of tables) {
+      const qualifiedName = String(table?.qualifiedName || '').trim();
+      if (!qualifiedName) {
+        continue;
+      }
+
+      const columns = Array.isArray(table?.columns) ? table.columns : [];
+      const hasId = columns.some((column) => isLikelyIdColumnName(column?.name) || column?.isPrimaryKey === true);
+      if (!hasId) {
+        continue;
+      }
+
+      let score = 0;
+      if (isLikelyUserTableName(table?.name)) {
+        score += 36;
+      }
+      if (columns.some((column) => isEmailColumnName(column?.name))) {
+        score += 10;
+      }
+      if (columns.some((column) => isLabelColumnName(column?.name))) {
+        score += 8;
+      }
+      if (columns.some((column) => column?.isPrimaryKey === true)) {
+        score += 8;
+      }
+      if (String(qualifiedName).toLowerCase() === currentToken) {
+        score += 25;
+      }
+      if (score <= 0) {
+        continue;
+      }
+
+      output.push({
+        value: qualifiedName,
+        label: qualifiedName,
+        score
+      });
+    }
+
+    output.sort((left, right) => right.score - left.score || left.label.localeCompare(right.label));
+    return output.slice(0, 80).map((item) => ({ value: item.value, label: item.label }));
+  }
+
+  function buildCrmErpMeIdColumnOptions(snapshot, tableQualifiedName = '') {
+    const table = findTableByQualifiedName(snapshot, tableQualifiedName);
+    if (!table) {
+      return [];
+    }
+
+    const columns = Array.isArray(table.columns) ? table.columns : [];
+    const idColumns = columns.filter((column) => column?.isPrimaryKey === true || isLikelyIdColumnName(column?.name));
+    const preferred = idColumns.length ? idColumns : columns.slice(0, 30);
+    return preferred
+      .map((column) => {
+        const name = String(column?.name || '').trim();
+        if (!name) {
+          return null;
+        }
+        return {
+          value: name,
+          label: name
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 40);
+  }
+
+  function syncCrmErpMeIdColumnOptions(options = {}) {
+    const snapshot = getCrmErpDatabaseSchemaSnapshot();
+    const selectedTable = String(
+      options.tableQualifiedName || settingsCrmErpMeTableSelect?.value || ''
+    ).trim();
+    const selectedIdColumn = String(
+      options.selectedIdColumn || settingsCrmErpMeIdColumnSelect?.value || ''
+    ).trim();
+    const idOptions = buildCrmErpMeIdColumnOptions(snapshot, selectedTable);
+    return setSelectOptions(settingsCrmErpMeIdColumnSelect, idOptions, selectedIdColumn);
+  }
+
+  function renderCrmErpMeProfileSettings(options = {}) {
+    const syncInput = options.syncInput !== false;
+    const snapshot = getCrmErpDatabaseSchemaSnapshot();
+    const connectionUrl = getCrmErpDatabaseConnectionUrl();
+    const profile = getCrmErpDatabaseMeProfile();
+    const profileTable = String(profile?.tableQualifiedName || '').trim();
+    const profileIdColumn = String(profile?.idColumn || '').trim();
+    const profileUserId = String(profile?.userId || '').trim();
+    const hasSchema = Boolean(snapshot);
+    const hasDb = Boolean(connectionUrl);
+
+    const tableOptions = buildCrmErpMeTableOptions(snapshot, profileTable);
+    const selectedTable = setSelectOptions(settingsCrmErpMeTableSelect, tableOptions, profileTable);
+    const selectedIdColumn = syncCrmErpMeIdColumnOptions({
+      tableQualifiedName: selectedTable,
+      selectedIdColumn: profileIdColumn
+    });
+
+    if (syncInput && settingsCrmErpMeUserIdInput) {
+      settingsCrmErpMeUserIdInput.value = profileUserId;
+    }
+
+    const disabled = !hasDb || !hasSchema;
+    if (settingsCrmErpMeTableSelect) {
+      settingsCrmErpMeTableSelect.disabled = disabled || tableOptions.length === 0;
+    }
+    if (settingsCrmErpMeIdColumnSelect) {
+      settingsCrmErpMeIdColumnSelect.disabled = disabled || !selectedIdColumn;
+    }
+    if (settingsCrmErpMeUserIdInput) {
+      settingsCrmErpMeUserIdInput.disabled = disabled;
+    }
+    if (settingsCrmErpMeSaveBtn) {
+      settingsCrmErpMeSaveBtn.disabled = disabled;
+    }
+    if (settingsCrmErpMeClearBtn) {
+      settingsCrmErpMeClearBtn.disabled = !hasDb;
+    }
+  }
+
   function renderCrmErpDatabaseSettings(options = {}) {
     const syncInput = options.syncInput !== false;
     const connectionUrl = getCrmErpDatabaseConnectionUrl();
@@ -842,6 +1112,78 @@ export function initPanelApp() {
         });
       }
     }
+
+    renderCrmErpMeProfileSettings({
+      syncInput: options.syncProfileInput !== false
+    });
+  }
+
+  async function saveCrmErpMeProfileFromScreen() {
+    const connectionUrl = getCrmErpDatabaseConnectionUrl();
+    const snapshot = getCrmErpDatabaseSchemaSnapshot();
+    if (!connectionUrl || !snapshot) {
+      setStatus(settingsCrmErpMeStatus, 'Analiza primero el esquema para configurar tu user DB.', true);
+      return false;
+    }
+
+    const tableQualifiedName = String(settingsCrmErpMeTableSelect?.value || '').trim();
+    const idColumn = String(settingsCrmErpMeIdColumnSelect?.value || '').trim();
+    const userId = String(settingsCrmErpMeUserIdInput?.value || '').trim();
+
+    if (!tableQualifiedName || !idColumn || !userId) {
+      setStatus(settingsCrmErpMeStatus, 'Selecciona tabla, columna ID y tu user ID.', true);
+      return false;
+    }
+
+    const table = findTableByQualifiedName(snapshot, tableQualifiedName);
+    if (!table) {
+      setStatus(settingsCrmErpMeStatus, 'La tabla seleccionada ya no existe en el esquema.', true);
+      return false;
+    }
+    const hasIdColumn = (Array.isArray(table.columns) ? table.columns : []).some(
+      (column) => String(column?.name || '').trim().toLowerCase() === idColumn.toLowerCase()
+    );
+    if (!hasIdColumn) {
+      setStatus(settingsCrmErpMeStatus, 'La columna ID seleccionada no existe en esa tabla.', true);
+      return false;
+    }
+
+    const profile = normalizeCrmErpMeProfile(
+      {
+        tableQualifiedName,
+        idColumn,
+        userId
+      },
+      snapshot
+    );
+
+    const ok = await savePanelSettings({
+      crmErpDatabaseMeProfile: profile
+    });
+    if (!ok) {
+      setStatus(settingsCrmErpMeStatus, 'No se pudo guardar tu perfil DB.', true);
+      return false;
+    }
+
+    renderCrmErpDatabaseSettings({ syncInput: false, syncProfileInput: true });
+    setStatus(settingsCrmErpMeStatus, 'Perfil DB guardado.');
+    void refreshDynamicRelationsContext(getActiveTabContext(), dynamicContextSignals, { force: true });
+    return true;
+  }
+
+  async function clearCrmErpMeProfileFromScreen() {
+    const ok = await savePanelSettings({
+      crmErpDatabaseMeProfile: null
+    });
+    if (!ok) {
+      setStatus(settingsCrmErpMeStatus, 'No se pudo limpiar el perfil DB.', true);
+      return false;
+    }
+
+    renderCrmErpDatabaseSettings({ syncInput: false, syncProfileInput: true });
+    setStatus(settingsCrmErpMeStatus, 'Perfil DB limpiado.');
+    void refreshDynamicRelationsContext(getActiveTabContext(), dynamicContextSignals, { force: true });
+    return true;
   }
 
   async function saveCrmErpDatabaseSettingsFromScreen(options = {}) {
@@ -851,7 +1193,8 @@ export function initPanelApp() {
     if (!inputValue) {
       const ok = await savePanelSettings({
         crmErpDatabaseUrl: '',
-        crmErpDatabaseSchemaSnapshot: null
+        crmErpDatabaseSchemaSnapshot: null,
+        crmErpDatabaseMeProfile: null
       });
 
       if (!ok) {
@@ -861,6 +1204,7 @@ export function initPanelApp() {
 
       renderCrmErpDatabaseSettings({ syncInput: true });
       setStatus(settingsCrmErpDbStatus, 'Integracion CRM/ERP desactivada.');
+      setStatus(settingsCrmErpMeStatus, '');
       void refreshDynamicRelationsContext(getActiveTabContext(), dynamicContextSignals, { force: true });
       return true;
     }
@@ -879,6 +1223,7 @@ export function initPanelApp() {
     };
     if (hasConnectionChanged) {
       patch.crmErpDatabaseSchemaSnapshot = null;
+      patch.crmErpDatabaseMeProfile = null;
     }
 
     const ok = await savePanelSettings(patch);
@@ -889,6 +1234,9 @@ export function initPanelApp() {
 
     renderCrmErpDatabaseSettings({ syncInput: true });
     setStatus(settingsCrmErpDbStatus, 'URL guardada.');
+    if (hasConnectionChanged) {
+      setStatus(settingsCrmErpMeStatus, 'Perfil DB limpiado por cambio de conexion.');
+    }
     void refreshDynamicRelationsContext(getActiveTabContext(), dynamicContextSignals, { force: true });
 
     if (analyzeAfterSave) {
@@ -1642,6 +1990,10 @@ export function initPanelApp() {
     next.systemVariables = normalizeSystemVariables(next.systemVariables);
     next.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(next.crmErpDatabaseUrl || '');
     next.crmErpDatabaseSchemaSnapshot = normalizeCrmErpDatabaseSnapshot(next.crmErpDatabaseSchemaSnapshot);
+    next.crmErpDatabaseMeProfile = normalizeCrmErpMeProfile(
+      next.crmErpDatabaseMeProfile,
+      next.crmErpDatabaseSchemaSnapshot
+    );
     return next;
   }
 
@@ -2612,6 +2964,7 @@ export function initPanelApp() {
     renderPinStatus();
     renderCrmErpDatabaseSettings({ syncInput: true });
     setStatus(settingsCrmErpDbStatus, '');
+    setStatus(settingsCrmErpMeStatus, '');
   }
 
   function isOnboardingComplete() {
@@ -2803,6 +3156,10 @@ export function initPanelApp() {
     panelSettings.systemVariables = normalizeSystemVariables(panelSettings.systemVariables);
     panelSettings.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
     panelSettings.crmErpDatabaseSchemaSnapshot = normalizeCrmErpDatabaseSnapshot(panelSettings.crmErpDatabaseSchemaSnapshot);
+    panelSettings.crmErpDatabaseMeProfile = normalizeCrmErpMeProfile(
+      panelSettings.crmErpDatabaseMeProfile,
+      panelSettings.crmErpDatabaseSchemaSnapshot
+    );
 
     if (settingsScreenState) {
       settingsScreenState.panelSettings = {
@@ -2810,7 +3167,8 @@ export function initPanelApp() {
         systemPrompt: panelSettings.systemPrompt,
         systemVariables: { ...panelSettings.systemVariables },
         crmErpDatabaseUrl: panelSettings.crmErpDatabaseUrl,
-        crmErpDatabaseSchemaSnapshot: panelSettings.crmErpDatabaseSchemaSnapshot
+        crmErpDatabaseSchemaSnapshot: panelSettings.crmErpDatabaseSchemaSnapshot,
+        crmErpDatabaseMeProfile: panelSettings.crmErpDatabaseMeProfile
       };
     }
     return storageService.savePanelSettings(panelSettings);
@@ -3710,6 +4068,66 @@ export function initPanelApp() {
     ].join('\n');
   }
 
+  function buildActiveRelationsContextPrompt() {
+    const activeTab = getActiveTabContext();
+    const cards = Array.isArray(dynamicRelationsContextState?.cards)
+      ? dynamicRelationsContextState.cards
+      : [];
+    if (!activeTab || !cards.length) {
+      return '';
+    }
+
+    const lines = [];
+    lines.push('Contexto relacional detectado para la pestana activa:');
+
+    const meProfile = getCrmErpDatabaseMeProfile();
+    if (isCrmErpMeProfileComplete(meProfile)) {
+      lines.push(
+        `Filtro de asignacion activo: ${meProfile.tableQualifiedName}.${meProfile.idColumn} = ${meProfile.userId}.`
+      );
+    }
+
+    for (const card of cards.slice(0, 8)) {
+      const tableName = String(card?.tableQualifiedName || card?.title || '').trim();
+      if (!tableName) {
+        continue;
+      }
+      const caption = String(card?.caption || '').trim();
+      const detailFields = Array.isArray(card?.detailFields) ? card.detailFields : [];
+      const rows = Array.isArray(card?.rows) ? card.rows : [];
+      const rowTokens = detailFields.length
+        ? detailFields
+            .map((item) => {
+              const label = String(item?.label || '').trim();
+              const value = String(item?.value || '').trim();
+              if (!label || !value) {
+                return '';
+              }
+              return `${label}: ${value}`;
+            })
+            .filter(Boolean)
+        : rows
+            .map((row) => {
+              const label = String(row?.label || '').trim();
+              const value = String(row?.value || '').trim();
+              const count = Math.max(0, Number(row?.count) || 0);
+              if (!label) {
+                return '';
+              }
+              return value ? `${label}: ${value}` : `${label}: ${count}`;
+            })
+            .filter(Boolean)
+            .slice(0, 3);
+
+      lines.push(`- ${tableName}${caption ? ` [${caption}]` : ''}: ${rowTokens.join(' | ') || 'sin detalle'}`);
+    }
+
+    if (lines.length <= 1) {
+      return '';
+    }
+    return lines.join('\n');
+  }
+
   async function buildChatConversation(userQuery) {
     const systemPrompt =
       selectedChatTool === 'chat'
@@ -3720,6 +4138,7 @@ export function initPanelApp() {
     let dynamicSystemPrompt = systemPrompt;
     let contextUsed = [];
     const localToolPrompt = selectedChatTool === 'chat' ? buildLocalToolSystemPrompt() : '';
+    const relationContextPrompt = selectedChatTool === 'chat' ? buildActiveRelationsContextPrompt() : '';
     const forceHistoryTools = selectedChatTool === 'chat' && shouldForceHistoryToolForQuery(userQuery);
     const historyToolDirective = forceHistoryTools
       ? 'La consulta del usuario parece temporal sobre historial. Debes ejecutar una tool de historial antes de responder.'
@@ -3733,12 +4152,15 @@ export function initPanelApp() {
       const contextHits = Array.isArray(identityPayload?.contextHits) ? identityPayload.contextHits : [];
       contextUsed = contextHits.map((item) => String(item?.id || '').trim()).filter(Boolean);
 
-      dynamicSystemPrompt = [contextHeader, localToolPrompt, historyToolDirective, systemPrompt]
+      dynamicSystemPrompt = [contextHeader, relationContextPrompt, localToolPrompt, historyToolDirective, systemPrompt]
         .filter(Boolean)
         .join('\n\n')
         .trim();
     } catch (_) {
-      dynamicSystemPrompt = [localToolPrompt, historyToolDirective, systemPrompt].filter(Boolean).join('\n\n').trim();
+      dynamicSystemPrompt = [relationContextPrompt, localToolPrompt, historyToolDirective, systemPrompt]
+        .filter(Boolean)
+        .join('\n\n')
+        .trim();
     }
 
     const context = chatHistory
@@ -4753,6 +5175,17 @@ export function initPanelApp() {
       8
     );
 
+    if (isWhatsappContext(context)) {
+      logDebug('dynamic_signals:whatsapp_detected', {
+        tabId: Number(context.tabId) || -1,
+        channelId: toSafeLogText(currentChat.channelId || '', 220),
+        chatKey: toSafeLogText(currentChat.key || '', 180),
+        chatPhone: toSafeLogText(currentChat.phone || '', 80),
+        phoneSignals: phones.map((item) => item?.normalized || ''),
+        emailSignals: emails.map((item) => item?.normalized || '')
+      });
+    }
+
     return {
       phones,
       emails
@@ -4804,12 +5237,690 @@ export function initPanelApp() {
     return /(name|nombre|title|subject|contact|cliente|company|empresa|lead|deal|task|item)/.test(token);
   }
 
-  function buildRelationTableCandidates(snapshot, signalType, limit = 8) {
+  function isLikelyIdColumnName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return token === 'id' || token.endsWith('_id') || /(uuid|guid)$/.test(token);
+  }
+
+  function isContactReferenceColumnName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(contact_?id|cliente_?id|customer_?id|client_?id|lead_?id|persona_?id|person_?id)/.test(token);
+  }
+
+  function isContactTableName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(contact|cliente|customer|client|persona|person|lead|prospect)/.test(token);
+  }
+
+  function isSecondLevelRelationTableName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(task|activity|ticket|deal|opportunit|message|note|order|invoice|event|call|meeting)/.test(token);
+  }
+
+  function isOwnerAssignmentColumnName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(owner_?id|assigned_?(to|user)?_?id|assignee_?id|user_?id|employee_?id|agent_?id|sales_?rep_?id|created_?by)/.test(
+      token
+    );
+  }
+
+  function isSupportControlTableName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(audit|log|history|meta|metadata|config|setting|permission|role|lookup|catalog|dictionary|enum|mapping|map|xref|bridge|pivot|join|migration|schema|token|session|cache|queue|job|tmp|temp|backup|archive|import|export)/.test(
+      token
+    );
+  }
+
+  function isLikelyBridgeTable(table) {
+    const columns = Array.isArray(table?.columns) ? table.columns : [];
+    if (!columns.length || columns.length > 8) {
+      return false;
+    }
+    const fkCount = columns.filter((column) => column?.foreignKey && typeof column.foreignKey === 'object').length;
+    const labelCount = columns.filter((column) => isLabelColumnName(column?.name)).length;
+    return fkCount >= 2 && labelCount <= 1;
+  }
+
+  function classifyTableRelevanceLevel(table, options = {}) {
+    const name = String(table?.name || '').trim().toLowerCase();
+    if (!name) {
+      return 'low';
+    }
+
+    if (isSupportControlTableName(name) || isLikelyBridgeTable(table)) {
+      return 'support';
+    }
+    if (isSecondLevelRelationTableName(name)) {
+      return 'high';
+    }
+    if (isContactTableName(name)) {
+      return options.allowContact === true ? 'medium' : 'low';
+    }
+
+    return 'medium';
+  }
+
+  function findOwnerAssignmentColumn(table, meProfile = null) {
+    const columns = Array.isArray(table?.columns) ? table.columns : [];
+    if (!columns.length) {
+      return {
+        hasOwnerColumn: false,
+        ownerColumn: null
+      };
+    }
+
+    const ownerCandidates = columns.filter((column) => {
+      const name = String(column?.name || '').trim();
+      if (!name) {
+        return false;
+      }
+      if (isOwnerAssignmentColumnName(name)) {
+        return true;
+      }
+      const fk = column?.foreignKey && typeof column.foreignKey === 'object' ? column.foreignKey : null;
+      if (!fk) {
+        return false;
+      }
+      const targetTable = String(fk.targetTable || '').trim();
+      if (!targetTable) {
+        return false;
+      }
+      return isLikelyUserTableName(targetTable);
+    });
+
+    if (!ownerCandidates.length) {
+      return {
+        hasOwnerColumn: false,
+        ownerColumn: null
+      };
+    }
+
+    const profile = meProfile && typeof meProfile === 'object' ? meProfile : null;
+    if (!isCrmErpMeProfileComplete(profile)) {
+      return {
+        hasOwnerColumn: true,
+        ownerColumn: null
+      };
+    }
+
+    const target = splitQualifiedTableName(profile.tableQualifiedName);
+    const profileIdColumn = String(profile.idColumn || '').trim().toLowerCase();
+    const fkMatch = ownerCandidates.find((column) => {
+      const fk = column?.foreignKey && typeof column.foreignKey === 'object' ? column.foreignKey : null;
+      if (!fk) {
+        return false;
+      }
+      const targetTable = String(fk.targetTable || '').trim().toLowerCase();
+      const targetSchema = String(fk.targetSchema || '').trim().toLowerCase();
+      const targetColumn = String(fk.targetColumn || '').trim().toLowerCase();
+      if (!targetTable) {
+        return false;
+      }
+
+      const tableMatches = target.table && targetTable === target.table.toLowerCase();
+      const schemaMatches = !target.schema || !targetSchema || targetSchema === target.schema.toLowerCase();
+      const columnMatches = !profileIdColumn || !targetColumn || targetColumn === profileIdColumn;
+      return tableMatches && schemaMatches && columnMatches;
+    });
+    if (fkMatch) {
+      return {
+        hasOwnerColumn: true,
+        ownerColumn: fkMatch
+      };
+    }
+
+    const byName = ownerCandidates.find((column) => isOwnerAssignmentColumnName(column?.name)) || ownerCandidates[0];
+    return {
+      hasOwnerColumn: true,
+      ownerColumn: byName || null
+    };
+  }
+
+  function normalizeIdSignal(value) {
+    const token = String(value || '').trim();
+    if (!token) {
+      return '';
+    }
+    return token.slice(0, 220);
+  }
+
+  function sanitizeSqlParamsForLog(rawParams, maxItems = 12) {
+    const params = Array.isArray(rawParams) ? rawParams : [];
+    return params.map((value) => {
+      if (Array.isArray(value)) {
+        return value
+          .slice(0, Math.max(1, Math.min(80, Number(maxItems) || 12)))
+          .map((item) => toSafeLogText(item, 120));
+      }
+      return toSafeLogText(value, 220);
+    });
+  }
+
+  function buildWhatsappDirectSignals(tabContext, fallbackSignals = {}) {
+    const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
+    const details = context.details && typeof context.details === 'object' ? context.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const fallbackPhones = Array.isArray(fallbackSignals?.phones) ? fallbackSignals.phones : [];
+    const fallbackEmails = Array.isArray(fallbackSignals?.emails) ? fallbackSignals.emails : [];
+    const phoneFromChannel = extractPhoneFromWhatsappChatId(currentChat.channelId || currentChat.key || '');
+    const primaryPhones = collectUniqueSignals(
+      [phoneFromChannel, String(currentChat.phone || ''), String(currentChat.key || '')],
+      normalizePhoneSignal,
+      4
+    );
+    const phones = primaryPhones.length ? primaryPhones : fallbackPhones;
+    const emails = fallbackEmails.slice(0, 4);
+
+    logDebug('whatsapp_contact:signals', {
+      tabId: Number(context.tabId) || -1,
+      channelId: toSafeLogText(currentChat.channelId || '', 200),
+      chatKey: toSafeLogText(currentChat.key || '', 180),
+      chatPhone: toSafeLogText(currentChat.phone || '', 80),
+      directPhones: primaryPhones.map((item) => item?.normalized || ''),
+      effectivePhones: phones.map((item) => item?.normalized || ''),
+      effectiveEmails: emails.map((item) => item?.normalized || '')
+    });
+
+    return {
+      phones,
+      emails
+    };
+  }
+
+  function buildSignalMatchExpression(signalType, matchExpr) {
+    const type = String(signalType || '').trim().toLowerCase();
+    if (type === 'phone') {
+      return `regexp_replace(${matchExpr}, '[^0-9]', '', 'g')`;
+    }
+    if (type === 'email') {
+      return `LOWER(TRIM(${matchExpr}))`;
+    }
+    return `TRIM(${matchExpr})`;
+  }
+
+  function pickIdColumn(columns) {
+    const source = Array.isArray(columns) ? columns : [];
+    let best = null;
+    let bestScore = -1;
+    for (const column of source) {
+      const name = String(column?.name || '').trim();
+      if (!name) {
+        continue;
+      }
+
+      let score = 0;
+      const token = name.toLowerCase();
+      if (column?.isPrimaryKey === true) {
+        score += 50;
+      }
+      if (token === 'id') {
+        score += 40;
+      }
+      if (isContactReferenceColumnName(token)) {
+        score += 25;
+      }
+      if (token.endsWith('_id')) {
+        score += 12;
+      }
+      if (/(uuid|guid)$/.test(token)) {
+        score += 4;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = column;
+      }
+    }
+
+    return best && bestScore > 0 ? best : null;
+  }
+
+  function pickLabelColumn(columns, excludedName = '') {
+    const source = Array.isArray(columns) ? columns : [];
+    const excludedToken = String(excludedName || '').trim();
+    const preferred = source.find((column) => {
+      const name = String(column?.name || '').trim();
+      return name && name !== excludedToken && isLabelColumnName(name);
+    });
+    if (preferred) {
+      return preferred;
+    }
+
+    const fallback = source.find((column) => {
+      const name = String(column?.name || '').trim();
+      return name && name !== excludedToken && !isLikelyIdColumnName(name);
+    });
+    return fallback || null;
+  }
+
+  function buildContactAnchorCandidates(snapshot, signals, meProfile = null, limit = 8) {
     const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
     const tables = Array.isArray(safeSnapshot?.tables) ? safeSnapshot.tables : [];
+    const hasPhoneSignals = Array.isArray(signals?.phones) && signals.phones.length > 0;
+    const hasEmailSignals = Array.isArray(signals?.emails) && signals.emails.length > 0;
+    if (!hasPhoneSignals && !hasEmailSignals) {
+      return [];
+    }
+
+    const output = [];
+    for (const table of tables) {
+      const columns = Array.isArray(table?.columns) ? table.columns : [];
+      if (!columns.length) {
+        continue;
+      }
+
+      const relevanceLevel = classifyTableRelevanceLevel(table, { allowContact: true });
+      if (relevanceLevel === 'support') {
+        continue;
+      }
+
+      const phoneColumns = columns.filter((column) => isPhoneColumnName(column?.name)).slice(0, 6);
+      const emailColumns = columns.filter((column) => isEmailColumnName(column?.name)).slice(0, 6);
+      if (!phoneColumns.length && !emailColumns.length) {
+        continue;
+      }
+
+      const idColumn = pickIdColumn(columns);
+      if (!idColumn?.name) {
+        continue;
+      }
+
+      const ownerBinding = findOwnerAssignmentColumn(table, meProfile);
+
+      const labelColumn = pickLabelColumn(columns, idColumn.name) || idColumn;
+      const estimatedRows = Number(table?.estimatedRows) || 0;
+      const rowScore = estimatedRows > 0 ? Math.max(0, Math.min(18, 18 - Math.log10(estimatedRows + 1) * 4)) : 4;
+      const contactBoost = isContactTableName(table?.name) ? 16 : 0;
+      const signalBoost = phoneColumns.length && emailColumns.length ? 8 : 4;
+      const idBoost = idColumn?.isPrimaryKey === true ? 8 : 3;
+
+      output.push({
+        table,
+        idColumn,
+        labelColumn,
+        phoneColumns,
+        emailColumns,
+        ownerColumn: ownerBinding.ownerColumn || null,
+        relevanceLevel,
+        priorityHint: Math.round(rowScore + contactBoost + signalBoost + idBoost)
+      });
+    }
+
+    output.sort((left, right) => right.priorityHint - left.priorityHint);
+    return output.slice(0, Math.max(1, Math.min(20, Number(limit) || 8)));
+  }
+
+  async function queryContactMatchesForCandidate(connectionUrl, candidate, signals) {
+    const table = candidate?.table && typeof candidate.table === 'object' ? candidate.table : null;
+    const idColumn = candidate?.idColumn && typeof candidate.idColumn === 'object' ? candidate.idColumn : null;
+    const labelColumn =
+      candidate?.labelColumn && typeof candidate.labelColumn === 'object' ? candidate.labelColumn : idColumn;
+    const phoneColumns = Array.isArray(candidate?.phoneColumns) ? candidate.phoneColumns : [];
+    const emailColumns = Array.isArray(candidate?.emailColumns) ? candidate.emailColumns : [];
+    if (!table || !idColumn?.name || !labelColumn?.name) {
+      return [];
+    }
+
+    const schemaName = String(table.schema || '').trim();
+    const tableName = String(table.name || '').trim();
+    if (!schemaName || !tableName) {
+      return [];
+    }
+
+    const phoneValues = (Array.isArray(signals?.phones) ? signals.phones : [])
+      .map((item) => item?.normalized || '')
+      .map((item) => normalizePhoneSignal(item))
+      .filter(Boolean)
+      .slice(0, 12);
+    const emailValues = (Array.isArray(signals?.emails) ? signals.emails : [])
+      .map((item) => item?.normalized || '')
+      .map((item) => normalizeEmailSignal(item))
+      .filter(Boolean)
+      .slice(0, 12);
+    if (!phoneValues.length && !emailValues.length) {
+      return [];
+    }
+
+    const meProfile = getCrmErpDatabaseMeProfile();
+    const ownerColumnName = String(candidate?.ownerColumn?.name || '').trim();
+    const ownerUserId = isCrmErpMeProfileComplete(meProfile) ? String(meProfile.userId || '').trim() : '';
+
+    const whereTokens = [];
+    if (phoneValues.length) {
+      for (const column of phoneColumns) {
+        const matchExpr = `CAST(${quoteSqlIdentifier(column.name)} AS text)`;
+        whereTokens.push(`${buildSignalMatchExpression('phone', matchExpr)} = ANY($1::text[])`);
+      }
+    }
+    if (emailValues.length) {
+      for (const column of emailColumns) {
+        const matchExpr = `CAST(${quoteSqlIdentifier(column.name)} AS text)`;
+        whereTokens.push(`${buildSignalMatchExpression('email', matchExpr)} = ANY($2::text[])`);
+      }
+    }
+    if (!whereTokens.length) {
+      return [];
+    }
+
+    const qualifiedTable = `${quoteSqlIdentifier(schemaName)}.${quoteSqlIdentifier(tableName)}`;
+    const idExpr = `TRIM(CAST(${quoteSqlIdentifier(idColumn.name)} AS text))`;
+    const labelExpr = `COALESCE(NULLIF(TRIM(CAST(${quoteSqlIdentifier(
+      labelColumn.name
+    )} AS text)), ''), NULLIF(${idExpr}, ''), '(sin etiqueta)')`;
+    const ownerFilterSql =
+      ownerColumnName && ownerUserId
+        ? `AND TRIM(CAST(${quoteSqlIdentifier(ownerColumnName)} AS text)) = $3`
+        : '';
+    const sql = [
+      'SELECT item_id, item_label, item_count',
+      'FROM (',
+      `  SELECT ${idExpr} AS item_id, ${labelExpr} AS item_label, COUNT(*)::int AS item_count`,
+      `  FROM ${qualifiedTable}`,
+      `  WHERE (${whereTokens.join(' OR ')})`,
+      `  ${ownerFilterSql}`,
+      '  GROUP BY 1, 2',
+      ') grouped',
+      "WHERE item_id <> ''",
+      'ORDER BY item_count DESC, item_label ASC',
+      'LIMIT 12;'
+    ].join('\n');
+
+    const params = [phoneValues, emailValues];
+    if (ownerFilterSql) {
+      params.push(ownerUserId);
+    }
+    logDebug('whatsapp_contact:lookup_sql', {
+      table: `${schemaName}.${tableName}`,
+      ownerColumn: ownerColumnName || '',
+      ownerFilterActive: Boolean(ownerFilterSql),
+      sql,
+      params: sanitizeSqlParamsForLog(params)
+    });
+    const response = await postgresService.queryRead(connectionUrl, sql, params, {
+      maxRows: 20
+    });
+    const rows = Array.isArray(response?.rows) ? response.rows : [];
+    logDebug('whatsapp_contact:lookup_result', {
+      table: `${schemaName}.${tableName}`,
+      rowCount: rows.length,
+      preview: rows.slice(0, 5).map((row) => ({
+        item_id: toSafeLogText(row?.item_id || '', 80),
+        item_label: toSafeLogText(row?.item_label || '', 140),
+        item_count: Math.max(0, Number(row?.item_count) || 0)
+      }))
+    });
+    return rows
+      .map((row) => {
+        const id = normalizeIdSignal(row?.item_id || '');
+        if (!id) {
+          return null;
+        }
+        const label = toSafeDynamicUiText(row?.item_label || id, 140) || id;
+        const count = Math.max(0, Number(row?.item_count) || 0) || 1;
+        return { id, label, count };
+      })
+      .filter(Boolean);
+  }
+
+  function buildContactSignalEntries(contactRows, limit = 12) {
+    const entries = [];
+    const seen = new Set();
+    for (const row of Array.isArray(contactRows) ? contactRows : []) {
+      const id = normalizeIdSignal(row?.id || '');
+      if (!id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      const label = toSafeDynamicUiText(row?.label || '', 140);
+      const value = label ? `${label} (${id})` : id;
+      entries.push({
+        normalized: id,
+        value: toSafeDynamicUiText(value, 180) || id
+      });
+      if (entries.length >= Math.max(1, Math.min(20, Number(limit) || 12))) {
+        break;
+      }
+    }
+    return entries;
+  }
+
+  function buildRelatedTableCandidatesFromContactAnchor(
+    snapshot,
+    anchorCandidate,
+    meProfile = null,
+    limit = 12
+  ) {
+    const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
+    const tables = Array.isArray(safeSnapshot?.tables) ? safeSnapshot.tables : [];
+    const anchorTable = anchorCandidate?.table && typeof anchorCandidate.table === 'object' ? anchorCandidate.table : null;
+    const anchorIdColumn =
+      anchorCandidate?.idColumn && typeof anchorCandidate.idColumn === 'object' ? anchorCandidate.idColumn : null;
+    if (!anchorTable || !anchorIdColumn?.name) {
+      return [];
+    }
+
+    const anchorSchema = String(anchorTable.schema || '').trim().toLowerCase();
+    const anchorName = String(anchorTable.name || '').trim().toLowerCase();
+    const anchorQualified = `${anchorSchema}.${anchorName}`;
+    const anchorIdName = String(anchorIdColumn.name || '').trim().toLowerCase();
+    const anchorSingular = anchorName.endsWith('s') ? anchorName.slice(0, -1) : anchorName;
+    const anchorIdTokens = new Set([
+      `${anchorName}_id`,
+      `${anchorSingular}_id`,
+      `${anchorName}id`,
+      `${anchorSingular}id`
+    ]);
+    if (anchorIdName && anchorIdName !== 'id') {
+      anchorIdTokens.add(anchorIdName);
+    }
+
+    const output = [];
+    for (const table of tables) {
+      const schemaName = String(table?.schema || '').trim();
+      const tableName = String(table?.name || '').trim();
+      if (!schemaName || !tableName) {
+        continue;
+      }
+      if (`${schemaName.toLowerCase()}.${tableName.toLowerCase()}` === anchorQualified) {
+        continue;
+      }
+      if (isContactTableName(tableName)) {
+        continue;
+      }
+
+      const columns = Array.isArray(table?.columns) ? table.columns : [];
+      if (!columns.length) {
+        continue;
+      }
+
+      const relevanceLevel = classifyTableRelevanceLevel(table);
+      if (relevanceLevel === 'support') {
+        continue;
+      }
+
+      let matchColumn = columns.find((column) => {
+        const foreignKey = column?.foreignKey && typeof column.foreignKey === 'object' ? column.foreignKey : null;
+        if (!foreignKey) {
+          return false;
+        }
+        const targetTable = String(foreignKey.targetTable || '').trim().toLowerCase();
+        const targetSchema = String(foreignKey.targetSchema || '').trim().toLowerCase();
+        const targetColumn = String(foreignKey.targetColumn || '').trim().toLowerCase();
+        if (!targetTable) {
+          return false;
+        }
+        const schemaMatches = !targetSchema || targetSchema === anchorSchema;
+        const tableMatches = targetTable === anchorName;
+        const columnMatches = !targetColumn || targetColumn === anchorIdName;
+        return schemaMatches && tableMatches && columnMatches;
+      });
+
+      if (!matchColumn) {
+        matchColumn = columns.find((column) => {
+          const name = String(column?.name || '').trim().toLowerCase();
+          if (!name) {
+            return false;
+          }
+          if (isContactReferenceColumnName(name)) {
+            return true;
+          }
+          return anchorIdTokens.has(name);
+        });
+      }
+
+      if (!matchColumn?.name) {
+        continue;
+      }
+
+      const ownerBinding = findOwnerAssignmentColumn(table, meProfile);
+
+      const labelColumn = pickLabelColumn(columns, matchColumn.name) || matchColumn;
+      const estimatedRows = Number(table?.estimatedRows) || 0;
+      const rowScore = estimatedRows > 0 ? Math.max(0, Math.min(16, 16 - Math.log10(estimatedRows + 1) * 4)) : 4;
+      const fkBoost = matchColumn?.foreignKey ? 12 : 5;
+      const nameBoost = isSecondLevelRelationTableName(tableName) ? 10 : 0;
+      const relevanceBoost = relevanceLevel === 'high' ? 10 : relevanceLevel === 'medium' ? 4 : 0;
+
+      output.push({
+        table,
+        matchColumn,
+        labelColumn,
+        ownerColumn: ownerBinding.ownerColumn || null,
+        relevanceLevel,
+        priorityHint: Math.round(rowScore + fkBoost + nameBoost + relevanceBoost)
+      });
+    }
+
+    output.sort((left, right) => right.priorityHint - left.priorityHint);
+    return output.slice(0, Math.max(1, Math.min(24, Number(limit) || 12)));
+  }
+
+  async function fetchWhatsappContactFirstRelationCards(connectionUrl, snapshot, tabContext, signals) {
+    if (!isWhatsappContext(tabContext)) {
+      return [];
+    }
+
+    const directSignals = buildWhatsappDirectSignals(tabContext, signals);
+    const meProfile = getCrmErpDatabaseMeProfile();
+    const anchors = buildContactAnchorCandidates(snapshot, directSignals, meProfile, 10);
+    logDebug('whatsapp_contact:anchor_candidates', {
+      candidateCount: anchors.length,
+      candidates: anchors.slice(0, 8).map((candidate) => ({
+        table: toSafeLogText(candidate?.table?.qualifiedName || '', 200),
+        idColumn: toSafeLogText(candidate?.idColumn?.name || '', 80),
+        ownerColumn: toSafeLogText(candidate?.ownerColumn?.name || '', 80),
+        priorityHint: Math.max(0, Number(candidate?.priorityHint) || 0)
+      }))
+    });
+    if (!anchors.length) {
+      return [];
+    }
+
+    let selectedAnchor = null;
+    let matchedContacts = [];
+    for (const candidate of anchors) {
+      let rows = [];
+      try {
+        rows = await queryContactMatchesForCandidate(connectionUrl, candidate, directSignals);
+        if (!rows.length) {
+          rows = await queryContactMatchesForCandidate(connectionUrl, candidate, signals);
+        }
+      } catch (_) {
+        rows = [];
+      }
+      if (!rows.length) {
+        continue;
+      }
+      selectedAnchor = candidate;
+      matchedContacts = rows;
+      break;
+    }
+
+    if (!selectedAnchor || !matchedContacts.length) {
+      return [];
+    }
+
+    const contactSignals = buildContactSignalEntries(matchedContacts, 12);
+    const contactIds = contactSignals.map((item) => item.normalized).filter(Boolean);
+    logDebug('whatsapp_contact:resolved_contact_ids', {
+      table: toSafeLogText(selectedAnchor?.table?.qualifiedName || '', 200),
+      contactIds: contactIds.slice(0, 12),
+      contactSignals: contactSignals.slice(0, 12)
+    });
+    if (!contactIds.length) {
+      return [];
+    }
+
+    const cards = [];
+    const relatedCandidates = buildRelatedTableCandidatesFromContactAnchor(
+      snapshot,
+      selectedAnchor,
+      meProfile,
+      14
+    );
+    const secondLevelTasks = relatedCandidates.map((candidate) =>
+      queryRelationCardForCandidate(connectionUrl, candidate, 'contact_id', contactIds, contactSignals)
+    );
+    const settled = await Promise.all(secondLevelTasks.map((task) => task.catch(() => null)));
+    for (const result of settled) {
+      if (!result) {
+        continue;
+      }
+      cards.push(result);
+    }
+
+    logDebug('whatsapp_contact:second_level_relations', {
+      tableCount: cards.length,
+      tables: cards.map((card) => ({
+        table: toSafeLogText(card?.tableQualifiedName || '', 200),
+        count: Math.max(0, Number(card?.totalCount) || 0),
+        caption: toSafeLogText(card?.caption || '', 160)
+      }))
+    });
+
+    return collapseRelationCardsByTable(cards);
+  }
+
+  function buildRelationTableCandidates(snapshot, signalType, options = {}) {
+    const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
+    const tables = Array.isArray(safeSnapshot?.tables) ? safeSnapshot.tables : [];
+    const limit = Math.max(1, Math.min(20, Number(options.limit) || 8));
+    const excludeContactTables = options.excludeContactTables === true;
+    const meProfile = options.meProfile && typeof options.meProfile === 'object' ? options.meProfile : null;
     const output = [];
 
     for (const table of tables) {
+      const tableName = String(table?.name || '').trim();
+      if (!tableName) {
+        continue;
+      }
+      if (excludeContactTables && isContactTableName(tableName)) {
+        continue;
+      }
+
+      const relevanceLevel = classifyTableRelevanceLevel(table, { allowContact: !excludeContactTables });
+      if (relevanceLevel === 'support') {
+        continue;
+      }
+
       const columns = Array.isArray(table?.columns) ? table.columns : [];
       if (!columns.length) {
         continue;
@@ -4823,6 +5934,8 @@ export function initPanelApp() {
         continue;
       }
 
+      const ownerBinding = findOwnerAssignmentColumn(table, meProfile);
+
       let labelColumn = columns.find((column) => {
         const name = String(column?.name || '');
         return name && name !== matchColumn.name && isLabelColumnName(name);
@@ -4834,21 +5947,91 @@ export function initPanelApp() {
       const estimatedRows = Number(table?.estimatedRows) || 0;
       const rowScore = estimatedRows > 0 ? Math.max(0, Math.min(18, 18 - Math.log10(estimatedRows + 1) * 4)) : 4;
       const nameBoost = /(task|deal|lead|contact|customer|client|message|ticket|opportunity|activity)/.test(
-        String(table?.name || '').toLowerCase()
+        tableName.toLowerCase()
       )
         ? 8
         : 0;
+      const relevanceBoost = relevanceLevel === 'high' ? 10 : relevanceLevel === 'medium' ? 4 : 0;
 
       output.push({
         table,
         matchColumn,
         labelColumn,
-        priorityHint: Math.round(rowScore + nameBoost)
+        ownerColumn: ownerBinding.ownerColumn || null,
+        relevanceLevel,
+        priorityHint: Math.round(rowScore + nameBoost + relevanceBoost)
       });
     }
 
     output.sort((left, right) => right.priorityHint - left.priorityHint);
-    return output.slice(0, Math.max(1, Math.min(20, Number(limit) || 8)));
+    return output.slice(0, limit);
+  }
+
+  function fieldLabelFromColumnName(value) {
+    const token = String(value || '')
+      .replace(/[_-]+/g, ' ')
+      .trim();
+    if (!token) {
+      return 'Field';
+    }
+    return token
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 5)
+      .map((item) => item.charAt(0).toUpperCase() + item.slice(1).toLowerCase())
+      .join(' ');
+  }
+
+  function pickRelationDetailColumns(table, options = {}) {
+    const columns = Array.isArray(table?.columns) ? table.columns : [];
+    const excluded = new Set(
+      [
+        String(options.matchColumnName || '').trim().toLowerCase(),
+        String(options.labelColumnName || '').trim().toLowerCase(),
+        String(options.ownerColumnName || '').trim().toLowerCase()
+      ].filter(Boolean)
+    );
+
+    const preferredPatterns = [
+      /^(status|stage|priority|state)$/,
+      /(due|deadline|start|end|date|time)/,
+      /(amount|value|total|budget|price)/,
+      /(title|name|subject)/,
+      /(source|channel|type|category)/
+    ];
+
+    const candidates = [];
+    for (const column of columns) {
+      const rawName = String(column?.name || '').trim();
+      const name = rawName.toLowerCase();
+      if (!rawName || excluded.has(name)) {
+        continue;
+      }
+      if (isLikelyIdColumnName(name) || isContactReferenceColumnName(name) || isOwnerAssignmentColumnName(name)) {
+        continue;
+      }
+
+      let score = 0;
+      preferredPatterns.forEach((pattern, index) => {
+        if (pattern.test(name)) {
+          score += Math.max(1, 12 - index * 2);
+        }
+      });
+      if (isLabelColumnName(name)) {
+        score += 2;
+      }
+      if (column?.nullable !== true) {
+        score += 1;
+      }
+
+      candidates.push({
+        name: rawName,
+        score
+      });
+    }
+
+    candidates.sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+    return candidates.slice(0, 3);
   }
 
   async function queryRelationCardForCandidate(connectionUrl, candidate, signalType, normalizedValues, sourceSignals) {
@@ -4865,26 +6048,70 @@ export function initPanelApp() {
       return null;
     }
 
+    const normalizedSignals = (Array.isArray(normalizedValues) ? normalizedValues : [])
+      .map((item) =>
+        signalType === 'phone'
+          ? normalizePhoneSignal(item)
+          : signalType === 'email'
+            ? normalizeEmailSignal(item)
+            : normalizeIdSignal(item)
+      )
+      .filter(Boolean)
+      .slice(0, 12);
+    if (!normalizedSignals.length) {
+      return null;
+    }
+
+    const ownerColumnName = String(candidate?.ownerColumn?.name || '').trim();
+    const meProfile = getCrmErpDatabaseMeProfile();
+    const ownerUserId = isCrmErpMeProfileComplete(meProfile) ? String(meProfile.userId || '').trim() : '';
+
     const qualifiedTable = `${quoteSqlIdentifier(schemaName)}.${quoteSqlIdentifier(tableName)}`;
     const matchExpr = `CAST(${quoteSqlIdentifier(matchColumn.name)} AS text)`;
-    const normalizedExpr =
-      signalType === 'phone' ? `regexp_replace(${matchExpr}, '[^0-9]', '', 'g')` : `LOWER(TRIM(${matchExpr}))`;
+    const normalizedExpr = buildSignalMatchExpression(signalType, matchExpr);
     const labelExprRaw = `CAST(${quoteSqlIdentifier(labelColumn.name)} AS text)`;
     const labelExpr = `COALESCE(NULLIF(TRIM(${labelExprRaw}), ''), NULLIF(TRIM(${matchExpr}), ''), '(sin etiqueta)')`;
+    const whereClauses = [`${normalizedExpr} = ANY($1::text[])`];
+    const params = [normalizedSignals];
+    if (ownerColumnName && ownerUserId) {
+      params.push(ownerUserId);
+      whereClauses.push(`TRIM(CAST(${quoteSqlIdentifier(ownerColumnName)} AS text)) = $${params.length}`);
+    }
+    const whereSql = whereClauses.join(' AND ');
     const sql = [
       'SELECT item_label, item_count, SUM(item_count) OVER()::int AS total_count',
       'FROM (',
       `  SELECT ${labelExpr} AS item_label, COUNT(*)::int AS item_count`,
       `  FROM ${qualifiedTable}`,
-      `  WHERE ${normalizedExpr} = ANY($1::text[])`,
+      `  WHERE ${whereSql}`,
       '  GROUP BY 1',
       ') grouped',
       'ORDER BY item_count DESC, item_label ASC',
       'LIMIT 4;'
     ].join('\n');
 
-    const response = await postgresService.queryRead(connectionUrl, sql, [normalizedValues], { maxRows: 4 });
+    logDebug('dynamic_relations:query_sql', {
+      table: `${schemaName}.${tableName}`,
+      signalType,
+      ownerColumn: ownerColumnName || '',
+      ownerFilterActive: Boolean(ownerColumnName && ownerUserId),
+      sql,
+      params: sanitizeSqlParamsForLog(params)
+    });
+    const response = await postgresService.queryRead(connectionUrl, sql, params, {
+      maxRows: 4
+    });
     const rows = Array.isArray(response?.rows) ? response.rows : [];
+    logDebug('dynamic_relations:query_result', {
+      table: `${schemaName}.${tableName}`,
+      signalType,
+      rowCount: rows.length,
+      preview: rows.slice(0, 4).map((row) => ({
+        label: toSafeLogText(row?.item_label || '', 120),
+        count: Math.max(0, Number(row?.item_count) || 0),
+        total: Math.max(0, Number(row?.total_count) || 0)
+      }))
+    });
     if (!rows.length) {
       return null;
     }
@@ -4907,6 +6134,67 @@ export function initPanelApp() {
 
     const totalCount =
       Math.max(0, Number(rows[0]?.total_count) || 0) || relationRows.reduce((sum, row) => sum + row.count, 0);
+    const isSingleResult = totalCount === 1;
+    const detailColumns = isSingleResult
+      ? pickRelationDetailColumns(table, {
+          matchColumnName: matchColumn.name,
+          labelColumnName: labelColumn.name,
+          ownerColumnName
+        })
+      : [];
+    let detailFields = [];
+    if (isSingleResult && detailColumns.length) {
+      const detailSelect = detailColumns
+        .map(
+          (column) =>
+            `NULLIF(TRIM(CAST(${quoteSqlIdentifier(column.name)} AS text)), '') AS ${quoteSqlIdentifier(
+              column.name
+            )}`
+        )
+        .join(', ');
+      const detailSql = [
+        `SELECT ${detailSelect}`,
+        `FROM ${qualifiedTable}`,
+        `WHERE ${whereSql}`,
+        'LIMIT 1;'
+      ].join('\n');
+      logDebug('dynamic_relations:detail_sql', {
+        table: `${schemaName}.${tableName}`,
+        signalType,
+        sql: detailSql,
+        params: sanitizeSqlParamsForLog(params)
+      });
+      try {
+        const detailResponse = await postgresService.queryRead(connectionUrl, detailSql, params, { maxRows: 1 });
+        const detailRow = Array.isArray(detailResponse?.rows) ? detailResponse.rows[0] || null : null;
+        if (detailRow && typeof detailRow === 'object') {
+          detailFields = detailColumns
+            .map((column) => {
+              const rawValue = toSafeDynamicUiText(detailRow[column.name] || '', 120);
+              if (!rawValue) {
+                return null;
+              }
+              return {
+                label: fieldLabelFromColumnName(column.name),
+                value: rawValue
+              };
+            })
+            .filter(Boolean)
+            .slice(0, 3);
+        }
+      } catch (_) {
+        detailFields = [];
+      }
+    }
+
+    const cardRows =
+      isSingleResult && detailFields.length
+        ? detailFields.map((item) => ({
+            label: item.label,
+            value: item.value
+          }))
+        : relationRows;
+
     const normalizedToRaw = {};
     for (const signal of Array.isArray(sourceSignals) ? sourceSignals : []) {
       if (!signal?.normalized || normalizedToRaw[signal.normalized]) {
@@ -4914,25 +6202,56 @@ export function initPanelApp() {
       }
       normalizedToRaw[signal.normalized] = signal.value || signal.normalized;
     }
+    for (const value of normalizedSignals) {
+      if (!normalizedToRaw[value]) {
+        normalizedToRaw[value] = value;
+      }
+    }
+
+    const relevanceLevel = String(candidate?.relevanceLevel || '').trim().toLowerCase();
+    const relevanceLabel =
+      relevanceLevel === 'high'
+        ? 'Relevancia alta'
+        : relevanceLevel === 'medium'
+          ? 'Relevancia media'
+          : relevanceLevel === 'low'
+            ? 'Relevancia baja'
+            : '';
+    const captionTokens = [`${totalCount} resultado${totalCount === 1 ? '' : 's'}`];
+    if (ownerColumnName) {
+      captionTokens.push('Asignado a mi');
+    }
+    if (relevanceLabel) {
+      captionTokens.push(relevanceLabel);
+    }
+    const detailDescription =
+      isSingleResult && detailFields.length
+        ? detailFields.map((item) => `${item.label}: ${item.value}`).join(' | ')
+        : '';
 
     return {
       id: `${table.qualifiedName || `${schemaName}.${tableName}`}::${signalType}`,
       title: tableTitleFromName(tableName),
-      caption: `${signalType === 'phone' ? 'Phone' : 'Email'} matches`,
+      caption: captionTokens.join(' · '),
+      description: detailDescription,
       tableName,
       tableQualifiedName: String(table.qualifiedName || `${schemaName}.${tableName}`),
       signalType,
       totalCount,
       priorityHint: Math.max(0, Number(candidate?.priorityHint) || 0),
-      rows: relationRows,
+      rows: cardRows,
+      detailFields,
       meta: {
         schema: schemaName,
         table: tableName,
         matchColumn: String(matchColumn.name || ''),
         labelColumn: String(labelColumn.name || ''),
+        ownerColumn: ownerColumnName,
         signalType,
-        normalizedSignals: normalizedValues.slice(0, 12),
-        normalizedToRaw
+        normalizedSignals: normalizedSignals.slice(0, 12),
+        normalizedToRaw,
+        singleResult: isSingleResult,
+        relevanceLevel
       }
     };
   }
@@ -4945,7 +6264,11 @@ export function initPanelApp() {
         continue;
       }
       const known = byTable.get(tableKey);
-      if (!known || (Number(card?.totalCount) || 0) > (Number(known?.totalCount) || 0)) {
+      const nextTotal = Number(card?.totalCount) || 0;
+      const knownTotal = Number(known?.totalCount) || 0;
+      const nextPriority = Number(card?.priorityHint) || 0;
+      const knownPriority = Number(known?.priorityHint) || 0;
+      if (!known || nextTotal > knownTotal || (nextTotal === knownTotal && nextPriority > knownPriority)) {
         byTable.set(tableKey, card);
       }
     }
@@ -4956,9 +6279,13 @@ export function initPanelApp() {
     const tabId = Number(tabContext?.tabId) || -1;
     const snapshot = getCrmErpDatabaseSchemaSnapshot();
     const schemaStamp = Number(snapshot?.analyzedAt) || 0;
+    const meProfile = getCrmErpDatabaseMeProfile();
+    const meKey = isCrmErpMeProfileComplete(meProfile)
+      ? `${meProfile.tableQualifiedName}|${meProfile.idColumn}|${meProfile.userId}`
+      : 'me:none';
     const phones = (Array.isArray(signals?.phones) ? signals.phones : []).map((item) => item?.normalized || '').filter(Boolean);
     const emails = (Array.isArray(signals?.emails) ? signals.emails : []).map((item) => item?.normalized || '').filter(Boolean);
-    return `${tabId}|${schemaStamp}|p:${phones.join(',')}|e:${emails.join(',')}`;
+    return `${tabId}|${schemaStamp}|${meKey}|p:${phones.join(',')}|e:${emails.join(',')}`;
   }
 
   async function fetchDynamicRelationCards(tabContext, signals) {
@@ -4967,13 +6294,57 @@ export function initPanelApp() {
     if (!connectionUrl || !snapshot) {
       return [];
     }
+    const meProfile = getCrmErpDatabaseMeProfile();
+    const isWhatsappTab = isWhatsappContext(tabContext);
+    if (isWhatsappTab) {
+      logDebug('whatsapp_contact:fetch_relations_start', {
+        tabId: Number(tabContext?.tabId) || -1,
+        signalPhones: (Array.isArray(signals?.phones) ? signals.phones : []).map(
+          (item) => item?.normalized || ''
+        ),
+        signalEmails: (Array.isArray(signals?.emails) ? signals.emails : []).map(
+          (item) => item?.normalized || ''
+        ),
+        meProfile: isCrmErpMeProfileComplete(meProfile)
+          ? {
+              table: toSafeLogText(meProfile.tableQualifiedName || '', 180),
+              idColumn: toSafeLogText(meProfile.idColumn || '', 80),
+              userId: toSafeLogText(meProfile.userId || '', 80)
+            }
+          : null
+      });
+    }
+
+    const whatsappContactFirstCards = await fetchWhatsappContactFirstRelationCards(
+      connectionUrl,
+      snapshot,
+      tabContext,
+      signals
+    );
+    if (whatsappContactFirstCards.length) {
+      if (isWhatsappTab) {
+        logDebug('whatsapp_contact:fetch_relations_contact_id_success', {
+          relationTables: whatsappContactFirstCards.map((card) =>
+            toSafeLogText(card?.tableQualifiedName || card?.title || '', 200)
+          )
+        });
+      }
+      return whatsappContactFirstCards;
+    }
+    if (isWhatsappTab) {
+      logDebug('whatsapp_contact:fetch_relations_fallback_signal_scan');
+    }
 
     const phoneSignals = Array.isArray(signals?.phones) ? signals.phones : [];
     const emailSignals = Array.isArray(signals?.emails) ? signals.emails : [];
     const tasks = [];
 
     if (phoneSignals.length) {
-      const phoneCandidates = buildRelationTableCandidates(snapshot, 'phone', 8);
+      const phoneCandidates = buildRelationTableCandidates(snapshot, 'phone', {
+        limit: 8,
+        excludeContactTables: isWhatsappTab,
+        meProfile
+      });
       const phoneValues = phoneSignals.map((item) => item.normalized).filter(Boolean).slice(0, 8);
       for (const candidate of phoneCandidates) {
         tasks.push(queryRelationCardForCandidate(connectionUrl, candidate, 'phone', phoneValues, phoneSignals));
@@ -4981,7 +6352,11 @@ export function initPanelApp() {
     }
 
     if (emailSignals.length) {
-      const emailCandidates = buildRelationTableCandidates(snapshot, 'email', 8);
+      const emailCandidates = buildRelationTableCandidates(snapshot, 'email', {
+        limit: 8,
+        excludeContactTables: isWhatsappTab,
+        meProfile
+      });
       const emailValues = emailSignals.map((item) => item.normalized).filter(Boolean).slice(0, 8);
       for (const candidate of emailCandidates) {
         tasks.push(queryRelationCardForCandidate(connectionUrl, candidate, 'email', emailValues, emailSignals));
@@ -5278,6 +6653,25 @@ export function initPanelApp() {
     return empty;
   }
 
+  function appendRelationListItem(list, row) {
+    if (!list) {
+      return;
+    }
+
+    const item = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = String(row?.label || '(sin etiqueta)');
+    const value = document.createElement('strong');
+    const hasValue = String(row?.value || '').trim();
+    if (hasValue) {
+      value.textContent = hasValue;
+    } else {
+      value.textContent = String(Math.max(0, Number(row?.count) || 0));
+    }
+    item.append(label, value);
+    list.appendChild(item);
+  }
+
   function showDynamicUiToast(message, isError = false, options = {}) {
     if (!dynamicUiToast) {
       return;
@@ -5449,37 +6843,21 @@ export function initPanelApp() {
 
           const caption = document.createElement('p');
           caption.className = 'ai-dynamic-card__caption';
-          caption.textContent = String(cardModel.totalCount || 0);
+          caption.textContent = String(cardModel.caption || `${cardModel.totalCount || 0}`);
           caption.title = caption.textContent;
           head.append(title, caption);
-
-          const summary = document.createElement('p');
-          summary.className = 'ai-dynamic-card__description';
-          summary.textContent = String(cardModel.caption || '');
 
           const list = document.createElement('ul');
           list.className = 'ai-dynamic-relation-list';
           for (const row of Array.isArray(cardModel.rows) ? cardModel.rows : []) {
-            const item = document.createElement('li');
-            const label = document.createElement('span');
-            label.textContent = String(row.label || '');
-            const count = document.createElement('strong');
-            count.textContent = String(row.count || 0);
-            item.append(label, count);
-            list.appendChild(item);
+            appendRelationListItem(list, row);
           }
 
           if (!list.children.length) {
-            const item = document.createElement('li');
-            const label = document.createElement('span');
-            label.textContent = 'Sin items para mostrar';
-            const count = document.createElement('strong');
-            count.textContent = '0';
-            item.append(label, count);
-            list.appendChild(item);
+            appendRelationListItem(list, { label: 'Sin items para mostrar', value: '0' });
           }
 
-          card.append(head, summary, list);
+          card.append(head, list);
           dynamicRelationsList.appendChild(card);
         }
       }
@@ -5537,10 +6915,20 @@ export function initPanelApp() {
       dynamicRelationsDetailTitle.textContent = String(card?.title || 'Relation detail');
     }
     if (dynamicRelationsDetailMeta) {
-      dynamicRelationsDetailMeta.textContent = String(card?.tableQualifiedName || '');
+      const tableMeta = String(card?.tableQualifiedName || '').trim();
+      const captionMeta = String(card?.caption || '').trim();
+      dynamicRelationsDetailMeta.textContent = [tableMeta, captionMeta].filter(Boolean).join(' · ');
     }
     if (dynamicRelationsDetailBody) {
       dynamicRelationsDetailBody.textContent = '';
+      const isSingleResult = card?.meta?.singleResult === true;
+      const descriptionText = String(card?.description || '').trim();
+      if (isSingleResult && descriptionText) {
+        const description = document.createElement('p');
+        description.className = 'ai-dynamic-card__description';
+        description.textContent = descriptionText;
+        dynamicRelationsDetailBody.appendChild(description);
+      }
       const groups = Array.isArray(dynamicRelationsDetailState.groups) ? dynamicRelationsDetailState.groups : [];
       if (!groups.length && !dynamicRelationsDetailState.loading) {
         dynamicRelationsDetailBody.appendChild(createDynamicEmptyCard('Sin grupos detectados para esta tabla.'));
@@ -5555,13 +6943,7 @@ export function initPanelApp() {
           const list = document.createElement('ul');
           list.className = 'ai-dynamic-relation-list';
           for (const row of Array.isArray(group.items) ? group.items : []) {
-            const item = document.createElement('li');
-            const label = document.createElement('span');
-            label.textContent = String(row.label || '(sin etiqueta)');
-            const count = document.createElement('strong');
-            count.textContent = String(row.count || 0);
-            item.append(label, count);
-            list.appendChild(item);
+            appendRelationListItem(list, row);
           }
           section.append(title, list);
           dynamicRelationsDetailBody.appendChild(section);
@@ -5584,6 +6966,7 @@ export function initPanelApp() {
     const table = String(meta.table || '').trim();
     const matchColumn = String(meta.matchColumn || '').trim();
     const labelColumn = String(meta.labelColumn || '').trim();
+    const ownerColumn = String(meta.ownerColumn || '').trim();
     const signalType = String(meta.signalType || '').trim().toLowerCase();
     const normalizedSignals = Array.isArray(meta.normalizedSignals) ? meta.normalizedSignals.filter(Boolean).slice(0, 12) : [];
     if (!schema || !table || !matchColumn || !labelColumn || !normalizedSignals.length) {
@@ -5597,21 +6980,47 @@ export function initPanelApp() {
 
     const qualifiedTable = `${quoteSqlIdentifier(schema)}.${quoteSqlIdentifier(table)}`;
     const matchExpr = `CAST(${quoteSqlIdentifier(matchColumn)} AS text)`;
-    const normalizedExpr =
-      signalType === 'phone' ? `regexp_replace(${matchExpr}, '[^0-9]', '', 'g')` : `LOWER(TRIM(${matchExpr}))`;
+    const normalizedExpr = buildSignalMatchExpression(signalType, matchExpr);
     const labelExprRaw = `CAST(${quoteSqlIdentifier(labelColumn)} AS text)`;
     const labelExpr = `COALESCE(NULLIF(TRIM(${labelExprRaw}), ''), NULLIF(TRIM(${matchExpr}), ''), '(sin etiqueta)')`;
+    const whereClauses = [`${normalizedExpr} = ANY($1::text[])`];
+    const params = [normalizedSignals];
+    if (ownerColumn) {
+      const meProfile = getCrmErpDatabaseMeProfile();
+      const ownerUserId = isCrmErpMeProfileComplete(meProfile) ? String(meProfile.userId || '').trim() : '';
+      if (ownerUserId) {
+        params.push(ownerUserId);
+        whereClauses.push(`TRIM(CAST(${quoteSqlIdentifier(ownerColumn)} AS text)) = $${params.length}`);
+      }
+    }
+    const whereSql = whereClauses.join(' AND ');
     const sql = [
       `SELECT ${normalizedExpr} AS detected_value, ${labelExpr} AS item_label, COUNT(*)::int AS item_count`,
       `FROM ${qualifiedTable}`,
-      `WHERE ${normalizedExpr} = ANY($1::text[])`,
+      `WHERE ${whereSql}`,
       'GROUP BY 1, 2',
       'ORDER BY detected_value ASC, item_count DESC, item_label ASC',
       'LIMIT 240;'
     ].join('\n');
 
-    const response = await postgresService.queryRead(connectionUrl, sql, [normalizedSignals], { maxRows: 240 });
+    logDebug('dynamic_relations:detail_groups_sql', {
+      table: `${schema}.${table}`,
+      signalType,
+      ownerColumn: ownerColumn || '',
+      sql,
+      params: sanitizeSqlParamsForLog(params)
+    });
+    const response = await postgresService.queryRead(connectionUrl, sql, params, { maxRows: 240 });
     const rows = Array.isArray(response?.rows) ? response.rows : [];
+    logDebug('dynamic_relations:detail_groups_result', {
+      table: `${schema}.${table}`,
+      rowCount: rows.length,
+      preview: rows.slice(0, 6).map((row) => ({
+        detected_value: toSafeLogText(row?.detected_value || '', 120),
+        item_label: toSafeLogText(row?.item_label || '', 140),
+        item_count: Math.max(0, Number(row?.item_count) || 0)
+      }))
+    });
     if (!rows.length) {
       return [];
     }
@@ -5642,6 +7051,38 @@ export function initPanelApp() {
   async function openDynamicRelationDetailScreen(cardId) {
     const card = dynamicRelationCardIndex.get(cardId);
     if (!card) {
+      return;
+    }
+
+    const singleDetailItems = Array.isArray(card?.detailFields)
+      ? card.detailFields
+          .map((item) => {
+            const label = String(item?.label || '').trim();
+            const value = String(item?.value || '').trim();
+            if (!label || !value) {
+              return null;
+            }
+            return { label, value };
+          })
+          .filter(Boolean)
+          .slice(0, 3)
+      : [];
+    if (card?.meta?.singleResult === true && singleDetailItems.length) {
+      dynamicRelationsDetailState = {
+        open: true,
+        loading: false,
+        cardId,
+        groups: [
+          {
+            key: 'single',
+            label: 'Detalle',
+            items: singleDetailItems
+          }
+        ],
+        message: 'Detalle de registro unico.',
+        isError: false
+      };
+      renderDynamicRelationDetailScreen();
       return;
     }
 
@@ -5693,9 +7134,14 @@ export function initPanelApp() {
       case 'prefill_chat_context': {
         const title = String(activeTab?.title || activeTab?.url || '').trim();
         const summary = String(getTabSummary(activeTab) || '').trim();
+        const relationContext = String(buildActiveRelationsContextPrompt() || '').trim();
         const prompt = summary
-          ? `Con este contexto de navegacion, ayudame con los siguientes pasos.\n\nTab: ${title}\nResumen: ${summary}`
-          : `Usa el contexto de la pestana actual (${title || 'sin titulo'}) y ayudame con los siguientes pasos.`;
+          ? `Con este contexto de navegacion, ayudame con los siguientes pasos.\n\nTab: ${title}\nResumen: ${summary}${
+              relationContext ? `\n\n${relationContext}` : ''
+            }`
+          : `Usa el contexto de la pestana actual (${title || 'sin titulo'}) y ayudame con los siguientes pasos.${
+              relationContext ? `\n\n${relationContext}` : ''
+            }`;
         if (chatInput) {
           chatInput.value = prompt;
           updateChatInputSize();
@@ -7154,6 +8600,7 @@ export function initPanelApp() {
 
     settingsCrmErpDbUrlInput?.addEventListener('input', () => {
       setStatus(settingsCrmErpDbStatus, '');
+      setStatus(settingsCrmErpMeStatus, '');
     });
 
     settingsCrmErpDbUrlInput?.addEventListener('keydown', (event) => {
@@ -7163,6 +8610,39 @@ export function initPanelApp() {
 
       event.preventDefault();
       void saveCrmErpDatabaseSettingsFromScreen({ analyzeAfterSave: false });
+    });
+
+    settingsCrmErpMeTableSelect?.addEventListener('change', () => {
+      syncCrmErpMeIdColumnOptions({
+        tableQualifiedName: settingsCrmErpMeTableSelect.value,
+        selectedIdColumn: ''
+      });
+      setStatus(settingsCrmErpMeStatus, '');
+    });
+
+    settingsCrmErpMeIdColumnSelect?.addEventListener('change', () => {
+      setStatus(settingsCrmErpMeStatus, '');
+    });
+
+    settingsCrmErpMeUserIdInput?.addEventListener('input', () => {
+      setStatus(settingsCrmErpMeStatus, '');
+    });
+
+    settingsCrmErpMeUserIdInput?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
+      event.preventDefault();
+      void saveCrmErpMeProfileFromScreen();
+    });
+
+    settingsCrmErpMeSaveBtn?.addEventListener('click', () => {
+      void saveCrmErpMeProfileFromScreen();
+    });
+
+    settingsCrmErpMeClearBtn?.addEventListener('click', () => {
+      void clearCrmErpMeProfileFromScreen();
     });
 
     systemVariablesSaveBtn?.addEventListener('click', () => {

@@ -622,6 +622,11 @@ a {
 .ai-dynamic-relation-list li strong {
   font-size: 12px;
   color: var(--text-soft);
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
 }
 
 .ai-dynamic-empty {
@@ -1223,6 +1228,10 @@ a {
   padding: 10px;
   border-radius: var(--radius-md);
   background: var(--surface-muted);
+}
+
+.settings-security--crm {
+  margin-top: 2px;
 }
 
 .modal-backdrop {

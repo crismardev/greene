@@ -422,6 +422,37 @@
                   <button id="settingsCrmErpDbAnalyzeBtn" class="btn" type="button">Analizar esquema</button>
                 </div>
 
+                <section class="settings-security settings-security--crm">
+                  <div class="settings-card__head">
+                    <h3>Who am I in DB</h3>
+                    <p class="tool-copy">
+                      Define tu user en la base para filtrar relaciones asignadas (owner/assignee/user_id) cuando exista ese campo.
+                    </p>
+                  </div>
+
+                  <label class="field">
+                    <span>Tabla de usuario</span>
+                    <select id="settingsCrmErpMeTableSelect"></select>
+                  </label>
+
+                  <label class="field">
+                    <span>Columna ID</span>
+                    <select id="settingsCrmErpMeIdColumnSelect"></select>
+                  </label>
+
+                  <label class="field">
+                    <span>Mi user ID en DB</span>
+                    <input id="settingsCrmErpMeUserIdInput" type="text" placeholder="Ej. 42 o UUID" autocomplete="off" />
+                  </label>
+
+                  <div class="actions actions--tight">
+                    <button id="settingsCrmErpMeSaveBtn" class="btn btn--ghost" type="button">Guardar perfil DB</button>
+                    <button id="settingsCrmErpMeClearBtn" class="btn btn--ghost" type="button">Limpiar</button>
+                  </div>
+
+                  <p id="settingsCrmErpMeStatus" class="status" role="status"></p>
+                </section>
+
                 <p id="settingsCrmErpDbStatus" class="status" role="status"></p>
                 <pre id="settingsCrmErpDbSchemaSummary" class="tabs-context-json"></pre>
               </article>

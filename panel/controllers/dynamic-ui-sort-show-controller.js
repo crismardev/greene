@@ -62,14 +62,29 @@ function normalizeRelationCard(card, index = 0) {
     .map((item) => {
       const row = item && typeof item === 'object' ? item : {}
       const label = toSafeText(row.label || row.key || row.value || '', 120)
+      const value = toSafeText(row.value || '', 120)
       const count = Math.max(0, Math.round(toSafeNumber(row.count, 0)))
-      if (!label && !count) {
+      if (!label && !count && !value) {
         return null
       }
       return {
         label: label || '(sin etiqueta)',
-        count
+        count,
+        value
       }
+    })
+    .filter(Boolean)
+    .slice(0, 3)
+
+  const detailFields = toSafeArray(source.detailFields)
+    .map((item) => {
+      const field = item && typeof item === 'object' ? item : {}
+      const label = toSafeText(field.label || field.key || '', 80)
+      const value = toSafeText(field.value || '', 120)
+      if (!label || !value) {
+        return null
+      }
+      return { label, value }
     })
     .filter(Boolean)
     .slice(0, 3)
@@ -78,12 +93,14 @@ function normalizeRelationCard(card, index = 0) {
     id,
     title: title || tableQualifiedName || 'Tabla',
     caption: toSafeText(source.caption || '', 140),
+    description: toSafeText(source.description || '', 220),
     tableName: toSafeText(source.tableName || title, 120),
     tableQualifiedName,
     signalType: toSafeText(source.signalType || '', 24),
     totalCount: Math.max(0, Math.round(toSafeNumber(source.totalCount, 0))),
     priorityHint: toSafeNumber(source.priorityHint, 0),
     rows,
+    detailFields,
     meta: source.meta && typeof source.meta === 'object' ? source.meta : {}
   }
 }
@@ -127,10 +144,18 @@ export function createDynamicUiSortShowController(options = {}) {
     const site = String(context.site || 'generic').toLowerCase()
     const siteWeight = toSafeNumber(sitePriority[site], 0)
     const rowWeight = Math.min(6, card.rows.length * 2)
-    const signalWeight = card.signalType === 'phone' || card.signalType === 'email' ? 5 : 0
+    const detailWeight = Math.min(9, card.detailFields.length * 3)
+    const signalWeight =
+      card.signalType === 'phone' || card.signalType === 'email'
+        ? 5
+        : card.signalType === 'contact_id'
+          ? 7
+          : 0
     const volumeWeight = Math.min(25, Math.log10(Math.max(1, card.totalCount)) * 12)
+    const relevanceLevel = String(card?.meta?.relevanceLevel || '').toLowerCase()
+    const relevanceWeight = relevanceLevel === 'high' ? 9 : relevanceLevel === 'medium' ? 4 : 0
 
-    return card.priorityHint + siteWeight + rowWeight + signalWeight + volumeWeight
+    return card.priorityHint + siteWeight + rowWeight + detailWeight + signalWeight + volumeWeight + relevanceWeight
   }
 
   function dynamicUiSortAndShow(payload = {}) {
