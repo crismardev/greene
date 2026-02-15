@@ -284,6 +284,13 @@
                         stroke-linejoin="round"></path>
                     </svg>
                   </button>
+                  <button type="button" class="settings-nav-item" data-settings-target="crm_erp_database">
+                    <span>CRM/ERP Database</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
                   <button type="button" class="settings-nav-item" data-settings-target="tabs">
                     <span>Tabs</span>
                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -407,6 +414,27 @@
                 <p id="aiModelsStatus" class="status" role="status"></p>
               </article>
 
+              <article class="tool-card settings-card settings-page" data-settings-page="crm_erp_database">
+                <div class="settings-card__head">
+                  <h3>CRM/ERP Database</h3>
+                  <p class="tool-copy">Configura una URL PostgreSQL para habilitar tools `db.*` en el chat.</p>
+                </div>
+
+                <label class="field">
+                  <span>PostgreSQL URL</span>
+                  <input id="settingsCrmErpDbUrlInput" type="password"
+                    placeholder="postgresql://user:password@host/db?sslmode=require" autocomplete="off" />
+                </label>
+
+                <div class="actions actions--tight">
+                  <button id="settingsCrmErpDbSaveBtn" class="btn btn--ghost" type="button">Guardar URL</button>
+                  <button id="settingsCrmErpDbAnalyzeBtn" class="btn" type="button">Analizar esquema</button>
+                </div>
+
+                <p id="settingsCrmErpDbStatus" class="status" role="status"></p>
+                <pre id="settingsCrmErpDbSchemaSummary" class="tabs-context-json"></pre>
+              </article>
+
               <article class="tool-card settings-card settings-page" data-settings-page="tabs">
                 <div class="settings-card__head">
                   <h3>Tabs context</h3>
@@ -418,8 +446,14 @@
               <article class="tool-card settings-card settings-page" data-settings-page="system_variables">
                 <div class="settings-card__head">
                   <h3>System Variables</h3>
+                  <p class="tool-copy">Variables editables agrupadas por area, incluyendo prompts.</p>
                 </div>
-                <ul id="systemVariablesList" class="system-vars-list" aria-live="polite"></ul>
+                <div class="actions actions--tight">
+                  <button id="systemVariablesSaveBtn" class="btn" type="button">Guardar cambios</button>
+                  <button id="systemVariablesResetBtn" class="btn btn--ghost" type="button">Restaurar defaults</button>
+                </div>
+                <p id="systemVariablesStatus" class="status" role="status"></p>
+                <div id="systemVariablesList" class="system-vars-list" aria-live="polite"></div>
               </article>
             </section>
           </article>

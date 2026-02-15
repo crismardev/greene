@@ -1,5 +1,17 @@
 import { toSafeText } from './generic-site-context.js';
 
+export const DEFAULT_WHATSAPP_REPLY_PROMPT_BASE = Object.freeze(
+  [
+    'Eres asistente para responder WhatsApp.',
+    'Devuelve un unico mensaje corto listo para enviar (maximo 180 caracteres).',
+    'No siempre debes ser proactiva: adapta tono y nivel de iniciativa al historial.',
+    'Solo haz una pregunta cuando realmente desbloquee el chat.',
+    'Si conviene, sugiere una respuesta neutral o no comprometida en vez de prometer.',
+    'No expliques ni uses encabezados.',
+    'Si el contexto no alcanza, devuelve una pregunta corta para pedir claridad.'
+  ].join('\n')
+);
+
 export function isWhatsappContext(tabContext) {
   const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
   const site = String(context.site || '').toLowerCase();
@@ -204,22 +216,17 @@ function formatMessageForPrompt(item) {
   return `${prefix} (${extras.join(' | ')})`;
 }
 
-export function buildWhatsappReplyPrompt(tabContext) {
+export function buildWhatsappReplyPrompt(tabContext, options = {}) {
   const details = tabContext && typeof tabContext.details === 'object' ? tabContext.details : {};
   const myNumber = toSafeText(details.myNumber || '', 64);
   const chatLabel = buildWhatsappMetaLabel(tabContext);
   const messagesList = getWhatsappMessages(tabContext, 28);
   const messages = messagesList.map((item) => formatMessageForPrompt(item)).join('\n');
   const styleHint = describeMyResponseStyle(messagesList);
+  const basePrompt = String(options.basePrompt || DEFAULT_WHATSAPP_REPLY_PROMPT_BASE).trim() || DEFAULT_WHATSAPP_REPLY_PROMPT_BASE;
 
   return [
-    'Eres asistente para responder WhatsApp.',
-    'Devuelve un unico mensaje corto listo para enviar (maximo 180 caracteres).',
-    'No siempre debes ser proactiva: adapta tono y nivel de iniciativa al historial.',
-    'Solo haz una pregunta cuando realmente desbloquee el chat.',
-    'Si conviene, sugiere una respuesta neutral o no comprometida en vez de prometer.',
-    'No expliques ni uses encabezados.',
-    'Si el contexto no alcanza, devuelve una pregunta corta para pedir claridad.',
+    basePrompt,
     '',
     `Mi numero: ${myNumber || 'N/A'}`,
     `Chat: ${chatLabel}`,

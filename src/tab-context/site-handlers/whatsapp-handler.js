@@ -2218,7 +2218,7 @@
 
   async function openChatAndSendMessage(args = {}) {
     const safeArgs = args && typeof args === 'object' ? args : {};
-    const text = toSafeText(safeArgs.text || safeArgs.message || '', 1800);
+    const text = String(safeArgs.text || safeArgs.message || '').trim().slice(0, 1800);
     if (!text) {
       return {
         ok: false,

@@ -11,10 +11,12 @@ import { createPinCryptoService } from './services/pin-crypto-service.js';
 import { createSettingsScreenController } from './screens/settings-screen.js';
 import { createTabContextService } from './services/tab-context-service.js';
 import { createContextMemoryService } from './services/context-memory-service.js';
+import { createPostgresService } from './services/postgres-service.js';
 import { buildTabSummaryPrompt, toJsonTabRecord } from './services/site-context/generic-site-context.js';
 import {
   buildWhatsappMetaLabel,
   buildWhatsappReplyPrompt,
+  DEFAULT_WHATSAPP_REPLY_PROMPT_BASE,
   buildWhatsappSignalKey,
   getWhatsappChatKey,
   hasWhatsappConversationHistory,
@@ -39,6 +41,7 @@ export function initPanelApp() {
     USER: 'user',
     ASSISTANT: 'assistant',
     AI_MODELS: 'ai_models',
+    CRM_ERP_DATABASE: 'crm_erp_database',
     TABS: 'tabs',
     SYSTEM_VARIABLES: 'system_variables'
   });
@@ -56,6 +59,15 @@ export function initPanelApp() {
     settings: 3
   });
   const DEFAULT_CHAT_SYSTEM_PROMPT = buildDefaultChatSystemPrompt(DEFAULT_ASSISTANT_LANGUAGE);
+  const DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT = [
+    'Eres un asistente para redactar emails claros y accionables.',
+    'Siempre responde con un correo listo para enviar en formato:',
+    'Asunto: ...',
+    '',
+    'Cuerpo:',
+    '...',
+    'Si faltan datos, usa placeholders cortos entre corchetes.'
+  ].join('\n');
   const CHAT_TOOLS = Object.freeze({
     chat: {
       label: 'Chat',
@@ -63,15 +75,7 @@ export function initPanelApp() {
     },
     write_email: {
       label: 'Write an email',
-      systemPrompt: [
-        'Eres un asistente para redactar emails claros y accionables.',
-        'Siempre responde con un correo listo para enviar en formato:',
-        'Asunto: ...',
-        '',
-        'Cuerpo:',
-        '...',
-        'Si faltan datos, usa placeholders cortos entre corchetes.'
-      ].join('\n')
+      systemPrompt: DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT
     }
   });
 
@@ -119,12 +123,14 @@ export function initPanelApp() {
   const MAX_CHAT_INPUT_ROWS = 8;
   const MAX_CHAT_CONTEXT_MESSAGES = 20;
   const MAX_CHAT_HISTORY_MESSAGES = 160;
+  const MAX_CHAT_HISTORY_STORAGE_LIMIT = 600;
   const MAX_LOCAL_TOOL_CALLS = 3;
   const MAX_IMAGE_FILES = 10;
   const MAX_TABS_FOR_AI_SUMMARY = 20;
   const TAB_SUMMARY_MAX_CHARS = 160;
   const INCREMENTAL_HISTORY_INGEST_LIMIT = 80;
   const MAX_WHATSAPP_PERSISTED_MESSAGES = 640;
+  const MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT = 2000;
   const WHATSAPP_SUGGESTION_HISTORY_LIMIT = 120;
 
   const DEFAULT_OLLAMA_MODEL = 'gpt-oss:20b';
@@ -159,6 +165,209 @@ export function initPanelApp() {
   const INITIAL_CONTEXT_SYNC_HISTORY_LIMIT = 320;
   const INITIAL_CONTEXT_SYNC_HISTORY_DAYS = 45;
   const INITIAL_CONTEXT_SYNC_CHAT_LIMIT = 140;
+  const SYSTEM_VARIABLE_SCOPE_ORDER = Object.freeze([
+    'prompts',
+    'chat',
+    'context',
+    'bootstrap',
+    'whatsapp',
+    'ai',
+    'memory',
+    'runtime',
+    'storage',
+    'defaults'
+  ]);
+  const SYSTEM_VARIABLE_SCOPE_LABELS = Object.freeze({
+    prompts: 'Prompts',
+    chat: 'Chat',
+    context: 'Contexto',
+    bootstrap: 'Bootstrap',
+    whatsapp: 'WhatsApp',
+    ai: 'AI',
+    memory: 'Memoria',
+    runtime: 'Runtime',
+    storage: 'Storage',
+    defaults: 'Defaults'
+  });
+  const SYSTEM_VARIABLE_DEFINITIONS = Object.freeze([
+    {
+      id: 'prompts.assistantSystem',
+      scope: 'prompts',
+      key: 'panelSettings.systemPrompt',
+      label: 'Assistant system prompt',
+      type: 'prompt',
+      target: 'systemPrompt',
+      defaultValue: DEFAULT_CHAT_SYSTEM_PROMPT,
+      required: true,
+      description: 'Prompt principal del chat para la tool "Chat".'
+    },
+    {
+      id: 'prompts.whatsappSuggestionBase',
+      scope: 'prompts',
+      key: 'prompts.whatsappSuggestionBase',
+      label: 'WhatsApp suggestion base prompt',
+      type: 'prompt',
+      defaultValue: DEFAULT_WHATSAPP_REPLY_PROMPT_BASE,
+      required: true,
+      description: 'Bloque base que define como redactar sugerencias automaticas para WhatsApp.'
+    },
+    {
+      id: 'prompts.writeEmailSystem',
+      scope: 'prompts',
+      key: 'prompts.writeEmailSystem',
+      label: 'Write email system prompt',
+      type: 'prompt',
+      defaultValue: DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT,
+      required: true,
+      description: 'Prompt usado por la tool "Write an email".'
+    },
+    {
+      id: 'chat.maxContextMessages',
+      scope: 'chat',
+      key: 'MAX_CHAT_CONTEXT_MESSAGES',
+      type: 'number',
+      defaultValue: MAX_CHAT_CONTEXT_MESSAGES,
+      min: 1,
+      max: 60,
+      step: 1,
+      description: 'Cantidad de mensajes previos usados para construir el prompt de chat.'
+    },
+    {
+      id: 'chat.maxHistoryMessages',
+      scope: 'chat',
+      key: 'MAX_CHAT_HISTORY_MESSAGES',
+      type: 'number',
+      defaultValue: MAX_CHAT_HISTORY_MESSAGES,
+      min: 40,
+      max: MAX_CHAT_HISTORY_STORAGE_LIMIT,
+      step: 1,
+      description: 'Cantidad maxima de mensajes persistidos en historial local.'
+    },
+    {
+      id: 'chat.maxLocalToolCalls',
+      scope: 'chat',
+      key: 'MAX_LOCAL_TOOL_CALLS',
+      type: 'number',
+      defaultValue: MAX_LOCAL_TOOL_CALLS,
+      min: 1,
+      max: 8,
+      step: 1,
+      description: 'Numero maximo de tools locales permitidas por respuesta.'
+    },
+    {
+      id: 'context.maxTabsForAiSummary',
+      scope: 'context',
+      key: 'MAX_TABS_FOR_AI_SUMMARY',
+      type: 'number',
+      defaultValue: MAX_TABS_FOR_AI_SUMMARY,
+      min: 1,
+      max: 120,
+      step: 1,
+      description: 'Tabs maximas consideradas para resumen e ingesta de contexto.'
+    },
+    {
+      id: 'context.tabSummaryMaxChars',
+      scope: 'context',
+      key: 'TAB_SUMMARY_MAX_CHARS',
+      type: 'number',
+      defaultValue: TAB_SUMMARY_MAX_CHARS,
+      min: 80,
+      max: 800,
+      step: 1,
+      description: 'Longitud maxima por resumen de tab.'
+    },
+    {
+      id: 'context.incrementalHistoryIngestLimit',
+      scope: 'context',
+      key: 'INCREMENTAL_HISTORY_INGEST_LIMIT',
+      type: 'number',
+      defaultValue: INCREMENTAL_HISTORY_INGEST_LIMIT,
+      min: 20,
+      max: 1200,
+      step: 1,
+      description: 'Registros de historial usados por ingesta incremental en snapshots.'
+    },
+    {
+      id: 'bootstrap.initialContextSyncHistoryLimit',
+      scope: 'bootstrap',
+      key: 'INITIAL_CONTEXT_SYNC_HISTORY_LIMIT',
+      type: 'number',
+      defaultValue: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT,
+      min: 80,
+      max: 1200,
+      step: 1,
+      description: 'Limite de historial para sincronizacion inicial.'
+    },
+    {
+      id: 'bootstrap.initialContextSyncHistoryDays',
+      scope: 'bootstrap',
+      key: 'INITIAL_CONTEXT_SYNC_HISTORY_DAYS',
+      type: 'number',
+      defaultValue: INITIAL_CONTEXT_SYNC_HISTORY_DAYS,
+      min: 1,
+      max: 365,
+      step: 1,
+      description: 'Dias de historial consultados en bootstrap inicial.'
+    },
+    {
+      id: 'bootstrap.initialContextSyncChatLimit',
+      scope: 'bootstrap',
+      key: 'INITIAL_CONTEXT_SYNC_CHAT_LIMIT',
+      type: 'number',
+      defaultValue: INITIAL_CONTEXT_SYNC_CHAT_LIMIT,
+      min: 40,
+      max: 500,
+      step: 1,
+      description: 'Mensajes de chat historico considerados en bootstrap inicial.'
+    },
+    {
+      id: 'bootstrap.initialContextSyncStaleMs',
+      scope: 'bootstrap',
+      key: 'INITIAL_CONTEXT_SYNC_STALE_MS',
+      type: 'number',
+      defaultValue: INITIAL_CONTEXT_SYNC_STALE_MS,
+      min: 1000,
+      max: 1000 * 60 * 60 * 12,
+      step: 1000,
+      description: 'TTL para considerar stale una sincronizacion inicial en estado running.'
+    },
+    {
+      id: 'whatsapp.maxPersistedMessages',
+      scope: 'whatsapp',
+      key: 'MAX_WHATSAPP_PERSISTED_MESSAGES',
+      type: 'number',
+      defaultValue: MAX_WHATSAPP_PERSISTED_MESSAGES,
+      min: 80,
+      max: MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT,
+      step: 1,
+      description: 'Mensajes maximos por chat en almacenamiento local de WhatsApp.'
+    },
+    {
+      id: 'whatsapp.suggestionHistoryLimit',
+      scope: 'whatsapp',
+      key: 'WHATSAPP_SUGGESTION_HISTORY_LIMIT',
+      type: 'number',
+      defaultValue: WHATSAPP_SUGGESTION_HISTORY_LIMIT,
+      min: 12,
+      max: 300,
+      step: 1,
+      description: 'Cantidad de mensajes que alimentan el prompt de sugerencias de WhatsApp.'
+    }
+  ]);
+  const SYSTEM_VARIABLE_DEFAULTS = Object.freeze(
+    SYSTEM_VARIABLE_DEFINITIONS.reduce((acc, definition) => {
+      if (!definition.target) {
+        acc[definition.id] = definition.defaultValue;
+      }
+      return acc;
+    }, {})
+  );
+  const SYSTEM_VARIABLE_DEFINITION_BY_ID = Object.freeze(
+    SYSTEM_VARIABLE_DEFINITIONS.reduce((acc, definition) => {
+      acc[definition.id] = definition;
+      return acc;
+    }, {})
+  );
 
   function createPreloadedModelProfiles() {
     const now = Date.now();
@@ -212,10 +421,13 @@ export function initPanelApp() {
     language: DEFAULT_ASSISTANT_LANGUAGE,
     onboardingDone: false,
     systemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
+    systemVariables: { ...SYSTEM_VARIABLE_DEFAULTS },
     defaultModel: DEFAULT_OLLAMA_MODEL,
     aiModelProfiles: createPreloadedModelProfiles(),
     primaryModelProfileId: DEFAULT_PRIMARY_MODEL_ID,
-    securityConfig: null
+    securityConfig: null,
+    crmErpDatabaseUrl: '',
+    crmErpDatabaseSchemaSnapshot: null
   });
 
   const ALLOWED_IMAGE_TYPES = new Set([
@@ -307,8 +519,16 @@ export function initPanelApp() {
   const settingsSetupPinBtn = document.getElementById('settingsSetupPinBtn');
   const settingsUnlockPinBtn = document.getElementById('settingsUnlockPinBtn');
   const settingsLockPinBtn = document.getElementById('settingsLockPinBtn');
+  const settingsCrmErpDbUrlInput = document.getElementById('settingsCrmErpDbUrlInput');
+  const settingsCrmErpDbSaveBtn = document.getElementById('settingsCrmErpDbSaveBtn');
+  const settingsCrmErpDbAnalyzeBtn = document.getElementById('settingsCrmErpDbAnalyzeBtn');
+  const settingsCrmErpDbStatus = document.getElementById('settingsCrmErpDbStatus');
+  const settingsCrmErpDbSchemaSummary = document.getElementById('settingsCrmErpDbSchemaSummary');
   const tabsContextJson = document.getElementById('tabsContextJson');
   const systemVariablesList = document.getElementById('systemVariablesList');
+  const systemVariablesSaveBtn = document.getElementById('systemVariablesSaveBtn');
+  const systemVariablesResetBtn = document.getElementById('systemVariablesResetBtn');
+  const systemVariablesStatus = document.getElementById('systemVariablesStatus');
   const modelConfigModal = document.getElementById('modelConfigModal');
   const modelConfigTitle = document.getElementById('modelConfigTitle');
   const modelProviderSelect = document.getElementById('modelProviderSelect');
@@ -392,8 +612,8 @@ export function initPanelApp() {
     defaultSettings: DEFAULT_SETTINGS,
     panelSettingsDefaults: PANEL_SETTINGS_DEFAULTS,
     chatDb: CHAT_DB,
-    maxChatHistoryMessages: MAX_CHAT_HISTORY_MESSAGES,
-    maxWhatsappChatMessages: MAX_WHATSAPP_PERSISTED_MESSAGES
+    maxChatHistoryMessages: MAX_CHAT_HISTORY_STORAGE_LIMIT,
+    maxWhatsappChatMessages: MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT
   });
   const ollamaService = createOllamaService({
     defaultModel: DEFAULT_OLLAMA_MODEL,
@@ -408,6 +628,7 @@ export function initPanelApp() {
     localKeepAlive: LOCAL_MODEL_KEEP_ALIVE
   });
   const pinCryptoService = createPinCryptoService();
+  const postgresService = createPostgresService();
   const tabContextService = createTabContextService({
     onSnapshot: handleTabContextSnapshot
   });
@@ -443,6 +664,494 @@ export function initPanelApp() {
       return '';
     }
     return text.slice(0, limit);
+  }
+
+  function formatSystemVariableValue(value) {
+    if (value === null || value === undefined) {
+      return 'null';
+    }
+
+    if (typeof value === 'string') {
+      return value || '""';
+    }
+
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+
+    if (Array.isArray(value)) {
+      return JSON.stringify(value);
+    }
+
+    if (typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+
+    return String(value);
+  }
+
+  function coerceSystemVariableValue(definition, rawValue) {
+    const meta = definition && typeof definition === 'object' ? definition : {};
+    const type = String(meta.type || 'string');
+
+    if (type === 'number') {
+      const fallbackValue = Number(meta.defaultValue);
+      const fallback = Number.isFinite(fallbackValue) ? fallbackValue : 0;
+      let numeric = Number(rawValue);
+      if (!Number.isFinite(numeric)) {
+        numeric = fallback;
+      }
+
+      if (Number.isFinite(meta.min)) {
+        numeric = Math.max(meta.min, numeric);
+      }
+
+      if (Number.isFinite(meta.max)) {
+        numeric = Math.min(meta.max, numeric);
+      }
+
+      const fallbackIsInteger = Number.isInteger(fallback);
+      if (fallbackIsInteger || Number.isInteger(meta.step || 1)) {
+        numeric = Math.round(numeric);
+      }
+
+      return numeric;
+    }
+
+    const text = String(rawValue || '').trim();
+    if (meta.required && !text) {
+      return String(meta.defaultValue || '').trim();
+    }
+
+    if (type === 'prompt') {
+      return text || String(meta.defaultValue || '').trim();
+    }
+
+    return text;
+  }
+
+  function normalizeSystemVariables(storedValues) {
+    const source = storedValues && typeof storedValues === 'object' ? storedValues : {};
+    const normalized = {};
+
+    for (const definition of SYSTEM_VARIABLE_DEFINITIONS) {
+      if (definition.target) {
+        continue;
+      }
+
+      const hasValue = Object.prototype.hasOwnProperty.call(source, definition.id);
+      const value = hasValue ? source[definition.id] : definition.defaultValue;
+      normalized[definition.id] = coerceSystemVariableValue(definition, value);
+    }
+
+    return normalized;
+  }
+
+  function getSystemVariableDefinition(variableId) {
+    const key = String(variableId || '').trim();
+    return key ? SYSTEM_VARIABLE_DEFINITION_BY_ID[key] || null : null;
+  }
+
+  function getSystemVariableValue(variableId) {
+    const definition = getSystemVariableDefinition(variableId);
+    if (!definition) {
+      return null;
+    }
+
+    if (definition.target === 'systemPrompt') {
+      return coerceSystemVariableValue(definition, panelSettings.systemPrompt);
+    }
+
+    const source = panelSettings?.systemVariables && typeof panelSettings.systemVariables === 'object' ? panelSettings.systemVariables : {};
+    const hasValue = Object.prototype.hasOwnProperty.call(source, definition.id);
+    const value = hasValue ? source[definition.id] : definition.defaultValue;
+    return coerceSystemVariableValue(definition, value);
+  }
+
+  function getSystemVariableNumber(variableId, fallbackValue) {
+    const resolved = Number(getSystemVariableValue(variableId));
+    if (Number.isFinite(resolved)) {
+      return resolved;
+    }
+    const fallback = Number(fallbackValue);
+    return Number.isFinite(fallback) ? fallback : 0;
+  }
+
+  function getSystemVariablePrompt(variableId, fallbackValue = '') {
+    const resolved = String(getSystemVariableValue(variableId) || '').trim();
+    if (resolved) {
+      return resolved;
+    }
+    return String(fallbackValue || '').trim();
+  }
+
+  function getSystemVariableScopeLabel(scopeId) {
+    const scope = String(scopeId || '').trim();
+    if (!scope) {
+      return 'Sistema';
+    }
+    return SYSTEM_VARIABLE_SCOPE_LABELS[scope] || scope;
+  }
+
+  function getActiveChatSystemPrompt() {
+    const languageAwareDefault = buildDefaultChatSystemPrompt(panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE);
+    return getSystemVariablePrompt('prompts.assistantSystem', languageAwareDefault);
+  }
+
+  function getWriteEmailSystemPrompt() {
+    return getSystemVariablePrompt('prompts.writeEmailSystem', DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT);
+  }
+
+  function getWhatsappSuggestionBasePrompt() {
+    return getSystemVariablePrompt('prompts.whatsappSuggestionBase', DEFAULT_WHATSAPP_REPLY_PROMPT_BASE);
+  }
+
+  function sanitizeSensitiveMessage(message) {
+    const text = String(message || '').trim();
+    if (!text) {
+      return '';
+    }
+
+    return text.replace(/(postgres(?:ql)?:\/\/[^:@\s/]+:)[^@\s/]+@/gi, '$1***@');
+  }
+
+  function normalizeCrmErpDatabaseSnapshot(rawSnapshot) {
+    const source = rawSnapshot && typeof rawSnapshot === 'object' ? rawSnapshot : null;
+    if (!source) {
+      return null;
+    }
+
+    const rawTables = Array.isArray(source.tables) ? source.tables : [];
+    const tables = rawTables
+      .map((table) => {
+        const item = table && typeof table === 'object' ? table : {};
+        const schema = String(item.schema || '').trim().slice(0, 120);
+        const name = String(item.name || '').trim().slice(0, 120);
+        if (!schema || !name) {
+          return null;
+        }
+
+        const rawColumns = Array.isArray(item.columns) ? item.columns : [];
+        const columns = rawColumns
+          .map((column) => {
+            const columnItem = column && typeof column === 'object' ? column : {};
+            const columnName = String(columnItem.name || '').trim().slice(0, 120);
+            if (!columnName) {
+              return null;
+            }
+
+            const enumSource = Array.isArray(columnItem.enumOptions)
+              ? columnItem.enumOptions
+              : Array.isArray(columnItem.enum_options)
+                ? columnItem.enum_options
+                : [];
+            const enumOptions = enumSource
+              .map((option) => String(option || '').trim().slice(0, 120))
+              .filter(Boolean)
+              .slice(0, 80);
+
+            const foreignKeyRaw =
+              columnItem.foreignKey && typeof columnItem.foreignKey === 'object'
+                ? columnItem.foreignKey
+                : columnItem.foreign_key && typeof columnItem.foreign_key === 'object'
+                  ? columnItem.foreign_key
+                  : null;
+
+            const foreignKey =
+              foreignKeyRaw && (foreignKeyRaw.targetTable || foreignKeyRaw.target_table)
+                ? {
+                    targetSchema: String(
+                      foreignKeyRaw.targetSchema || foreignKeyRaw.target_schema || ''
+                    )
+                      .trim()
+                      .slice(0, 120),
+                    targetTable: String(
+                      foreignKeyRaw.targetTable || foreignKeyRaw.target_table || ''
+                    )
+                      .trim()
+                      .slice(0, 120),
+                    targetColumn: String(
+                      foreignKeyRaw.targetColumn || foreignKeyRaw.target_column || ''
+                    )
+                      .trim()
+                      .slice(0, 120)
+                  }
+                : null;
+
+            return {
+              name: columnName,
+              type: String(columnItem.type || '').trim().slice(0, 80) || 'text',
+              udtName: String(columnItem.udtName || columnItem.udt_name || '')
+                .trim()
+                .slice(0, 80),
+              nullable:
+                columnItem.nullable === true ||
+                String(columnItem.nullable || '').trim().toUpperCase() === 'YES',
+              defaultValue: String(columnItem.defaultValue || columnItem.default || '')
+                .trim()
+                .slice(0, 280),
+              ordinal: Math.max(
+                0,
+                Number(columnItem.ordinal) || Number(columnItem.ordinal_position) || 0
+              ),
+              isPrimaryKey:
+                columnItem.isPrimaryKey === true || columnItem.is_primary_key === true,
+              isList:
+                columnItem.isList === true ||
+                String(columnItem.is_list || '').trim().toUpperCase() === 'YES',
+              enumOptions,
+              foreignKey
+            };
+          })
+          .filter(Boolean)
+          .sort((left, right) => left.ordinal - right.ordinal)
+          .slice(0, 220);
+
+        return {
+          schema,
+          name,
+          qualifiedName: `${schema}.${name}`,
+          tableType: String(item.tableType || '').trim().slice(0, 40) || 'BASE TABLE',
+          estimatedRows: Number.isFinite(Number(item.estimatedRows)) ? Math.max(0, Math.round(Number(item.estimatedRows))) : null,
+          columns
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 500)
+      .sort((left, right) => left.qualifiedName.localeCompare(right.qualifiedName));
+
+    if (!tables.length) {
+      return null;
+    }
+
+    const schemaCount = new Map();
+    for (const table of tables) {
+      const count = schemaCount.get(table.schema) || 0;
+      schemaCount.set(table.schema, count + 1);
+    }
+
+    const schemas = Array.from(schemaCount.entries())
+      .map(([name, tableCount]) => ({ name, tableCount }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    return {
+      analyzedAt: Math.max(0, Number(source.analyzedAt) || Date.now()),
+      tableCount: tables.length,
+      schemas,
+      tables
+    };
+  }
+
+  function getCrmErpDatabaseConnectionUrl() {
+    return postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
+  }
+
+  function getCrmErpDatabaseSchemaSnapshot() {
+    return normalizeCrmErpDatabaseSnapshot(panelSettings.crmErpDatabaseSchemaSnapshot);
+  }
+
+  function formatDateTime(value) {
+    const timestamp = Number(value);
+    if (!Number.isFinite(timestamp) || timestamp <= 0) {
+      return '';
+    }
+
+    try {
+      return new Date(timestamp).toLocaleString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function buildCrmErpSchemaSummary(snapshot, options = {}) {
+    const safeSnapshot = normalizeCrmErpDatabaseSnapshot(snapshot);
+    if (!safeSnapshot) {
+      return 'Sin analisis de esquema todavia. Ejecuta "Analizar esquema".';
+    }
+
+    const tableLimit = Math.max(1, Math.min(80, Number(options.tableLimit) || 30));
+    const columnLimit = Math.max(1, Math.min(24, Number(options.columnLimit) || 10));
+    const rows = safeSnapshot.tables.slice(0, tableLimit);
+    const lines = [];
+    const analyzedAtLabel = formatDateTime(safeSnapshot.analyzedAt);
+
+    lines.push(`Analisis: ${analyzedAtLabel || 'sin fecha'}`);
+    lines.push(
+      `Esquemas: ${
+        safeSnapshot.schemas.map((schema) => `${schema.name} (${schema.tableCount})`).join(', ') || 'N/A'
+      }`
+    );
+    lines.push(`Tablas detectadas: ${safeSnapshot.tableCount}`);
+    lines.push('');
+    lines.push('Detalle de tablas:');
+
+    rows.forEach((table, index) => {
+      const tableType = table.tableType === 'VIEW' ? 'view' : 'table';
+      const rowHint = Number.isFinite(Number(table.estimatedRows)) ? ` ~${Number(table.estimatedRows)} rows` : '';
+      lines.push(`${index + 1}. ${table.qualifiedName} [${tableType}]${rowHint}`);
+
+      const columnTokens = table.columns.slice(0, columnLimit).map((column) => {
+        const listTag = column.isList ? '[]' : '';
+        const pkTag = column.isPrimaryKey ? ' pk' : '';
+        const nullableTag = column.nullable ? ' null' : ' not-null';
+        const enumOptions = Array.isArray(column.enumOptions) ? column.enumOptions : [];
+        const enumPreview = enumOptions.slice(0, 3).join('/');
+        const enumTag = enumOptions.length
+          ? ` enum(${enumPreview}${enumOptions.length > 3 ? ',...' : ''})`
+          : '';
+        const fk = column.foreignKey && typeof column.foreignKey === 'object' ? column.foreignKey : null;
+        const fkTargetTable = String(fk?.targetTable || '').trim();
+        const fkTargetColumn = String(fk?.targetColumn || '').trim();
+        const fkTargetSchema = String(fk?.targetSchema || '').trim();
+        const fkTag =
+          fkTargetTable && fkTargetColumn
+            ? ` fk(${fkTargetSchema ? `${fkTargetSchema}.` : ''}${fkTargetTable}.${fkTargetColumn})`
+            : '';
+
+        return `${column.name}:${column.type}${listTag}${pkTag}${nullableTag}${enumTag}${fkTag}`;
+      });
+
+      lines.push(`   ${columnTokens.join(' | ')}`);
+    });
+
+    if (safeSnapshot.tables.length > rows.length) {
+      lines.push('');
+      lines.push(`... y ${safeSnapshot.tables.length - rows.length} tablas mas.`);
+    }
+
+    return lines.join('\n');
+  }
+
+  function renderCrmErpDatabaseSettings(options = {}) {
+    const syncInput = options.syncInput !== false;
+    const connectionUrl = getCrmErpDatabaseConnectionUrl();
+    const snapshot = getCrmErpDatabaseSchemaSnapshot();
+
+    if (syncInput && settingsCrmErpDbUrlInput) {
+      settingsCrmErpDbUrlInput.value = connectionUrl;
+    }
+
+    if (settingsCrmErpDbSchemaSummary) {
+      if (!connectionUrl) {
+        settingsCrmErpDbSchemaSummary.textContent =
+          'Configura una URL PostgreSQL para habilitar tools de base de datos en el chat.';
+      } else {
+        settingsCrmErpDbSchemaSummary.textContent = buildCrmErpSchemaSummary(snapshot, {
+          tableLimit: 40,
+          columnLimit: 10
+        });
+      }
+    }
+  }
+
+  async function saveCrmErpDatabaseSettingsFromScreen(options = {}) {
+    const analyzeAfterSave = options.analyzeAfterSave === true;
+    const inputValue = String(settingsCrmErpDbUrlInput?.value || '').trim();
+
+    if (!inputValue) {
+      const ok = await savePanelSettings({
+        crmErpDatabaseUrl: '',
+        crmErpDatabaseSchemaSnapshot: null
+      });
+
+      if (!ok) {
+        setStatus(settingsCrmErpDbStatus, 'No se pudo limpiar la configuracion de base de datos.', true);
+        return false;
+      }
+
+      renderCrmErpDatabaseSettings({ syncInput: true });
+      setStatus(settingsCrmErpDbStatus, 'Integracion CRM/ERP desactivada.');
+      return true;
+    }
+
+    const normalizedUrl = postgresService.normalizeConnectionUrl(inputValue);
+    if (!normalizedUrl) {
+      setStatus(settingsCrmErpDbStatus, 'URL PostgreSQL invalida. Usa formato postgresql://user:pass@host/db', true);
+      settingsCrmErpDbUrlInput?.focus();
+      return false;
+    }
+
+    const previousUrl = getCrmErpDatabaseConnectionUrl();
+    const hasConnectionChanged = previousUrl !== normalizedUrl;
+    const patch = {
+      crmErpDatabaseUrl: normalizedUrl
+    };
+    if (hasConnectionChanged) {
+      patch.crmErpDatabaseSchemaSnapshot = null;
+    }
+
+    const ok = await savePanelSettings(patch);
+    if (!ok) {
+      setStatus(settingsCrmErpDbStatus, 'No se pudo guardar la URL de PostgreSQL.', true);
+      return false;
+    }
+
+    renderCrmErpDatabaseSettings({ syncInput: true });
+    setStatus(settingsCrmErpDbStatus, 'URL guardada.');
+
+    if (analyzeAfterSave) {
+      try {
+        await analyzeCrmErpDatabaseSchema({
+          connectionUrl: normalizedUrl,
+          statusTarget: settingsCrmErpDbStatus,
+          silent: false
+        });
+      } catch (_) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  async function analyzeCrmErpDatabaseSchema(options = {}) {
+    const silent = options.silent === true;
+    const statusTarget = options.statusTarget || settingsCrmErpDbStatus;
+    const rawConnectionUrl =
+      String(options.connectionUrl || '').trim() ||
+      String(settingsCrmErpDbUrlInput?.value || '').trim() ||
+      getCrmErpDatabaseConnectionUrl();
+    const connectionUrl = postgresService.normalizeConnectionUrl(rawConnectionUrl);
+
+    if (!connectionUrl) {
+      if (!silent && statusTarget) {
+        setStatus(statusTarget, 'Configura primero una URL PostgreSQL valida.', true);
+      }
+      throw new Error('URL PostgreSQL invalida.');
+    }
+
+    if (!silent && statusTarget) {
+      setStatus(statusTarget, 'Analizando esquemas y tablas...', false, { loading: true });
+    }
+
+    try {
+      const rawSnapshot = await postgresService.inspectSchema(connectionUrl);
+      const snapshot = normalizeCrmErpDatabaseSnapshot(rawSnapshot);
+      if (!snapshot) {
+        throw new Error('No se detectaron tablas en la base de datos.');
+      }
+
+      const ok = await savePanelSettings({
+        crmErpDatabaseUrl: connectionUrl,
+        crmErpDatabaseSchemaSnapshot: snapshot
+      });
+      if (!ok) {
+        throw new Error('No se pudo guardar el analisis de esquema.');
+      }
+
+      renderCrmErpDatabaseSettings({ syncInput: true });
+      if (!silent && statusTarget) {
+        setStatus(statusTarget, `Analisis completo: ${snapshot.tableCount} tablas detectadas.`);
+      }
+
+      return snapshot;
+    } catch (error) {
+      const message = sanitizeSensitiveMessage(error instanceof Error ? error.message : 'No se pudo analizar la base de datos.');
+      if (!silent && statusTarget) {
+        setStatus(statusTarget, message, true);
+      }
+      throw new Error(message);
+    }
   }
 
   function normalizePinDigits(value, max = 4) {
@@ -760,7 +1469,10 @@ export function initPanelApp() {
       return false;
     }
 
-    if (current.status === 'running' && Date.now() - current.startedAt < INITIAL_CONTEXT_SYNC_STALE_MS) {
+    if (
+      current.status === 'running' &&
+      Date.now() - current.startedAt < getSystemVariableNumber('bootstrap.initialContextSyncStaleMs', INITIAL_CONTEXT_SYNC_STALE_MS)
+    ) {
       return false;
     }
 
@@ -1496,7 +2208,9 @@ export function initPanelApp() {
     populateSettingsForm();
     setSettingsPage(SETTINGS_PAGES.HOME);
     renderAiModelsSettings();
+    renderCrmErpDatabaseSettings({ syncInput: true });
     renderSystemVariables();
+    setStatus(systemVariablesStatus, '');
     setScreen('settings');
   }
 
@@ -1555,6 +2269,9 @@ export function initPanelApp() {
     next.primaryModelProfileId = resolvedPrimary;
     next.defaultModel = resolvedPrimaryProfile ? resolvedPrimaryProfile.model : legacyDefaultModel;
     next.securityConfig = pinCryptoService.isConfigured(next.securityConfig) ? next.securityConfig : null;
+    next.systemVariables = normalizeSystemVariables(next.systemVariables);
+    next.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(next.crmErpDatabaseUrl || '');
+    next.crmErpDatabaseSchemaSnapshot = normalizeCrmErpDatabaseSnapshot(next.crmErpDatabaseSchemaSnapshot);
     return next;
   }
 
@@ -1582,6 +2299,10 @@ export function initPanelApp() {
       if (isAiModelsAccessLocked()) {
         aiModelsAccessActionBtn?.focus();
       }
+    }
+
+    if (safePage === SETTINGS_PAGES.CRM_ERP_DATABASE) {
+      renderCrmErpDatabaseSettings({ syncInput: true });
     }
 
     if (safePage === SETTINGS_PAGES.SYSTEM_VARIABLES) {
@@ -2512,12 +3233,15 @@ export function initPanelApp() {
     currentChatModelProfileId = resolvePrimaryProfileId();
     syncModelSelectors();
     renderPinStatus();
+    renderCrmErpDatabaseSettings({ syncInput: true });
   }
 
   function populateSettingsForm() {
     settingsScreenController?.populateSettingsForm();
     syncModelSelectors();
     renderPinStatus();
+    renderCrmErpDatabaseSettings({ syncInput: true });
+    setStatus(settingsCrmErpDbStatus, '');
   }
 
   function isOnboardingComplete() {
@@ -2686,11 +3410,30 @@ export function initPanelApp() {
   }
 
   async function savePanelSettings(nextSettings) {
+    const patch = nextSettings && typeof nextSettings === 'object' ? nextSettings : {};
     if (settingsScreenState) {
-      settingsScreenState.panelSettings = { ...settingsScreenState.panelSettings, ...nextSettings };
+      settingsScreenState.panelSettings = { ...settingsScreenState.panelSettings, ...patch };
       panelSettings = { ...settingsScreenState.panelSettings };
     } else {
-      panelSettings = { ...panelSettings, ...nextSettings };
+      panelSettings = { ...panelSettings, ...patch };
+    }
+
+    if (!panelSettings.systemPrompt || !String(panelSettings.systemPrompt || '').trim()) {
+      panelSettings.systemPrompt = buildDefaultChatSystemPrompt(panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE);
+    }
+
+    panelSettings.systemVariables = normalizeSystemVariables(panelSettings.systemVariables);
+    panelSettings.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
+    panelSettings.crmErpDatabaseSchemaSnapshot = normalizeCrmErpDatabaseSnapshot(panelSettings.crmErpDatabaseSchemaSnapshot);
+
+    if (settingsScreenState) {
+      settingsScreenState.panelSettings = {
+        ...settingsScreenState.panelSettings,
+        systemPrompt: panelSettings.systemPrompt,
+        systemVariables: { ...panelSettings.systemVariables },
+        crmErpDatabaseUrl: panelSettings.crmErpDatabaseUrl,
+        crmErpDatabaseSchemaSnapshot: panelSettings.crmErpDatabaseSchemaSnapshot
+      };
     }
     return storageService.savePanelSettings(panelSettings);
   }
@@ -3050,8 +3793,9 @@ export function initPanelApp() {
 
     chatHistory.push(messageRecord);
 
-    if (chatHistory.length > MAX_CHAT_HISTORY_MESSAGES) {
-      chatHistory = chatHistory.slice(-MAX_CHAT_HISTORY_MESSAGES);
+    const maxHistoryMessages = getSystemVariableNumber('chat.maxHistoryMessages', MAX_CHAT_HISTORY_MESSAGES);
+    if (chatHistory.length > maxHistoryMessages) {
+      chatHistory = chatHistory.slice(-maxHistoryMessages);
     }
 
     renderChatMessages();
@@ -3170,15 +3914,38 @@ export function initPanelApp() {
     ].join('\n');
   }
 
+  function buildCrmErpDatabaseToolsContext() {
+    const connectionUrl = getCrmErpDatabaseConnectionUrl();
+    if (!connectionUrl) {
+      return 'Contexto DB CRM/ERP: no configurado. El usuario debe cargar la URL en Settings > CRM/ERP Database.';
+    }
+
+    const snapshot = getCrmErpDatabaseSchemaSnapshot();
+    if (!snapshot) {
+      return [
+        'Contexto DB CRM/ERP: conexion configurada, pero no hay analisis de esquema guardado.',
+        'Primero ejecuta db.refreshSchema para inspeccionar tablas/columnas.'
+      ].join('\n');
+    }
+
+    const summary = buildCrmErpSchemaSummary(snapshot, {
+      tableLimit: 18,
+      columnLimit: 8
+    });
+
+    return ['Contexto DB CRM/ERP disponible para tools db.*:', summary].join('\n');
+  }
+
   function buildLocalToolSystemPrompt() {
     const hasWhatsappTab = Boolean(getPreferredWhatsappTab());
+    const hasCrmErpDbConnection = Boolean(getCrmErpDatabaseConnectionUrl());
     return [
       'Eres un agente de productividad que opera en el navegador del usuario.',
       'Responde SIEMPRE en Markdown claro.',
       'Si necesitas ejecutar acciones locales del navegador, responde SOLO con un bloque ```tool JSON``` sin texto adicional.',
       'Formato exacto del bloque tool:',
       '```tool',
-      '{"tool":"browser.<accion>|whatsapp.<accion>","args":{...}}',
+      '{"tool":"browser.<accion>|whatsapp.<accion>|db.<accion>","args":{...}}',
       '```',
       'Puedes devolver un objeto o un array de objetos tool para encadenar acciones.',
       'Tools disponibles:',
@@ -3200,12 +3967,22 @@ export function initPanelApp() {
             '- whatsapp.archiveGroups (alias rapido para scope=groups)'
           ]
         : ['- whatsapp.* requiere tener una tab de WhatsApp abierta.']),
+      ...(hasCrmErpDbConnection
+        ? [
+            '- db.refreshSchema (sin args; inspecciona esquemas/tablas/columnas disponibles)',
+            '- db.queryRead (args: sql, params opcional array, maxRows opcional; solo SELECT/CTE/SHOW/EXPLAIN)',
+            '- db.queryWrite (args: sql, params opcional array, maxRows opcional; solo INSERT/UPDATE/DELETE)'
+          ]
+        : ['- db.* requiere configurar la URL de PostgreSQL en Settings > CRM/ERP Database.']),
       'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
       'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
+      'Para preguntas de CRM/ERP, usa db.refreshSchema si falta contexto y luego db.queryRead/db.queryWrite segun corresponda.',
+      'En db.queryRead agrega LIMIT razonable (<= 100) para evitar respuestas gigantes.',
       'No inventes tools fuera de esta lista.',
       buildActiveTabsSystemContext(),
       buildRecentHistorySystemContext(),
-      buildWhatsappToolsSystemContext()
+      buildWhatsappToolsSystemContext(),
+      buildCrmErpDatabaseToolsContext()
     ].join('\n');
   }
 
@@ -3262,7 +4039,19 @@ export function initPanelApp() {
       'whatsapp.archiveListChats': 'whatsapp.archiveChats',
       'whatsapp.archiveChats': 'whatsapp.archiveChats',
       'whatsapp.archive_groups': 'whatsapp.archiveGroups',
-      'whatsapp.archiveGroups': 'whatsapp.archiveGroups'
+      'whatsapp.archiveGroups': 'whatsapp.archiveGroups',
+      'db.refresh_schema': 'db.refreshSchema',
+      'db.inspect_schema': 'db.refreshSchema',
+      'db.describeSchema': 'db.refreshSchema',
+      'db.refreshSchema': 'db.refreshSchema',
+      'db.query_read': 'db.queryRead',
+      'db.read_query': 'db.queryRead',
+      'db.readQuery': 'db.queryRead',
+      'db.queryRead': 'db.queryRead',
+      'db.query_write': 'db.queryWrite',
+      'db.write_query': 'db.queryWrite',
+      'db.writeQuery': 'db.queryWrite',
+      'db.queryWrite': 'db.queryWrite'
     };
     const tool = aliases[inputTool] || '';
     const args = source.args && typeof source.args === 'object' ? source.args : {};
@@ -3322,12 +4111,13 @@ export function initPanelApp() {
         });
       }
 
-      if (calls.length >= MAX_LOCAL_TOOL_CALLS) {
+      const maxLocalToolCalls = getSystemVariableNumber('chat.maxLocalToolCalls', MAX_LOCAL_TOOL_CALLS);
+      if (calls.length >= maxLocalToolCalls) {
         break;
       }
     }
 
-    const parsed = calls.slice(0, MAX_LOCAL_TOOL_CALLS);
+    const parsed = calls.slice(0, getSystemVariableNumber('chat.maxLocalToolCalls', MAX_LOCAL_TOOL_CALLS));
     logDebug('extractToolCallsFromText:parsed', {
       parsedCount: parsed.length,
       parsed
@@ -3336,7 +4126,9 @@ export function initPanelApp() {
   }
 
   async function executeLocalToolCalls(toolCalls) {
-    const calls = Array.isArray(toolCalls) ? toolCalls.slice(0, MAX_LOCAL_TOOL_CALLS) : [];
+    const calls = Array.isArray(toolCalls)
+      ? toolCalls.slice(0, getSystemVariableNumber('chat.maxLocalToolCalls', MAX_LOCAL_TOOL_CALLS))
+      : [];
     const results = [];
 
     logDebug('executeLocalToolCalls:start', {
@@ -3347,9 +4139,11 @@ export function initPanelApp() {
     for (const call of calls) {
       const tool = String(call?.tool || '').trim();
       const args = call?.args && typeof call.args === 'object' ? call.args : {};
-      const browserAction = tool.replace(/^browser\./, '');
+      const isBrowserTool = tool.startsWith('browser.');
+      const isWhatsappTool = tool.startsWith('whatsapp.');
+      const isDbTool = tool.startsWith('db.');
 
-      if (!browserAction) {
+      if (!isBrowserTool && !isWhatsappTool && !isDbTool) {
         results.push({
           tool,
           ok: false,
@@ -3359,31 +4153,163 @@ export function initPanelApp() {
       }
 
       try {
+        if (isBrowserTool) {
+          const browserAction = tool.replace(/^browser\./, '');
+          logDebug('executeLocalToolCalls:invoke', {
+            tool,
+            browserAction,
+            args
+          });
+
+          const response = await tabContextService.runBrowserAction(browserAction, args);
+          results.push({
+            tool,
+            ok: response?.ok === true,
+            result: response?.result,
+            error: response?.error || ''
+          });
+          logDebug('executeLocalToolCalls:result', {
+            tool,
+            response
+          });
+          continue;
+        }
+
+        if (isDbTool) {
+          const dbAction = tool.replace(/^db\./, '');
+          const connectionUrl = getCrmErpDatabaseConnectionUrl();
+          if (!connectionUrl) {
+            results.push({
+              tool,
+              ok: false,
+              error: 'No hay URL PostgreSQL configurada en Settings > CRM/ERP Database.'
+            });
+            continue;
+          }
+
+          if (dbAction === 'refreshSchema') {
+            const snapshot = await analyzeCrmErpDatabaseSchema({
+              connectionUrl,
+              silent: true
+            });
+
+            results.push({
+              tool,
+              ok: true,
+              result: {
+                analyzedAt: snapshot?.analyzedAt || Date.now(),
+                schemaCount: Array.isArray(snapshot?.schemas) ? snapshot.schemas.length : 0,
+                tableCount: Number(snapshot?.tableCount) || (Array.isArray(snapshot?.tables) ? snapshot.tables.length : 0)
+              }
+            });
+            continue;
+          }
+
+          const sqlText = String(args.sql || args.query || '').trim();
+          const params = Array.isArray(args.params) ? args.params : [];
+          const maxRows = Number(args.maxRows ?? args.limit);
+
+          if (!sqlText) {
+            results.push({
+              tool,
+              ok: false,
+              error: 'Falta SQL en args.sql.'
+            });
+            continue;
+          }
+
+          if (dbAction === 'queryRead') {
+            const dbResult = await postgresService.queryRead(connectionUrl, sqlText, params, {
+              maxRows
+            });
+            results.push({
+              tool,
+              ok: true,
+              result: dbResult
+            });
+            continue;
+          }
+
+          if (dbAction === 'queryWrite') {
+            const dbResult = await postgresService.queryWrite(connectionUrl, sqlText, params, {
+              maxRows
+            });
+            results.push({
+              tool,
+              ok: true,
+              result: dbResult
+            });
+            continue;
+          }
+
+          results.push({
+            tool,
+            ok: false,
+            error: 'Accion db.* no soportada.'
+          });
+          continue;
+        }
+
+        const whatsappAction = tool.replace(/^whatsapp\./, '');
+        const targetTab = getPreferredWhatsappTab(args);
+        if (!targetTab || !isWhatsappContext(targetTab)) {
+          results.push({
+            tool,
+            ok: false,
+            error: 'No hay tab de WhatsApp disponible para ejecutar la tool.',
+            result: {
+              requestedTabId: Number(args?.tabId) || -1
+            }
+          });
+          continue;
+        }
+
+        const siteArgs = {
+          ...args
+        };
+        delete siteArgs.tabId;
+
         logDebug('executeLocalToolCalls:invoke', {
           tool,
-          browserAction,
-          args
+          whatsappAction,
+          tabId: Number(targetTab.tabId) || -1,
+          args: siteArgs
         });
-        const response = await tabContextService.runBrowserAction(browserAction, args);
+
+        const response = await tabContextService.runSiteActionInTab(
+          Number(targetTab.tabId) || -1,
+          'whatsapp',
+          whatsappAction,
+          siteArgs
+        );
+
         results.push({
           tool,
           ok: response?.ok === true,
-          result: response?.result,
+          result: {
+            ...(response?.result && typeof response.result === 'object' ? response.result : {}),
+            tabId: Number(targetTab.tabId) || -1
+          },
           error: response?.error || ''
         });
         logDebug('executeLocalToolCalls:result', {
           tool,
           response
         });
+
+        if (response?.ok === true) {
+          await tabContextService.requestSnapshot();
+        }
       } catch (error) {
+        const message = sanitizeSensitiveMessage(error instanceof Error ? error.message : 'Error ejecutando tool local.');
         results.push({
           tool,
           ok: false,
-          error: error instanceof Error ? error.message : 'Error ejecutando tool local.'
+          error: message
         });
         logWarn('executeLocalToolCalls:error', {
           tool,
-          error: error instanceof Error ? error.message : String(error || '')
+          error: message
         });
       }
     }
@@ -3407,13 +4333,12 @@ export function initPanelApp() {
   }
 
   async function buildChatConversation(userQuery) {
-    const languageAwareDefaultPrompt = buildDefaultChatSystemPrompt(
-      panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE
-    );
     const systemPrompt =
       selectedChatTool === 'chat'
-        ? panelSettings.systemPrompt || languageAwareDefaultPrompt
-        : CHAT_TOOLS[selectedChatTool].systemPrompt;
+        ? getActiveChatSystemPrompt()
+        : selectedChatTool === 'write_email'
+          ? getWriteEmailSystemPrompt()
+          : CHAT_TOOLS[selectedChatTool].systemPrompt;
     let dynamicSystemPrompt = systemPrompt;
     let contextUsed = [];
     const localToolPrompt = selectedChatTool === 'chat' ? buildLocalToolSystemPrompt() : '';
@@ -3439,7 +4364,7 @@ export function initPanelApp() {
     }
 
     const context = chatHistory
-      .slice(-MAX_CHAT_CONTEXT_MESSAGES)
+      .slice(-getSystemVariableNumber('chat.maxContextMessages', MAX_CHAT_CONTEXT_MESSAGES))
       .map((msg) => ({
         role: msg.role === 'assistant' ? 'assistant' : 'user',
         content: msg.content
@@ -3710,162 +4635,259 @@ export function initPanelApp() {
     }
   }
 
-  function formatSystemVariableValue(value) {
-    if (value === null || value === undefined) {
-      return 'null';
-    }
-
-    if (typeof value === 'string') {
-      return value || '""';
-    }
-
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return String(value);
-    }
-
-    if (Array.isArray(value)) {
-      return JSON.stringify(value);
-    }
-
-    if (typeof value === 'object') {
-      return JSON.stringify(value);
-    }
-
-    return String(value);
-  }
-
   function buildSystemVariableEntries() {
+    const editable = SYSTEM_VARIABLE_DEFINITIONS.map((definition) => ({
+      ...definition,
+      editable: true,
+      value: getSystemVariableValue(definition.id)
+    }));
+
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     const locale = navigator.language || 'n/a';
     const memoryConfig =
       typeof contextMemoryService.getConfigSnapshot === 'function' ? contextMemoryService.getConfigSnapshot() : {};
-    const entries = [
-      {
-        scope: 'chat',
-        key: 'MAX_CHAT_CONTEXT_MESSAGES',
-        value: MAX_CHAT_CONTEXT_MESSAGES,
-        description: 'Cantidad de mensajes previos usados para construir el prompt de chat.'
-      },
-      {
-        scope: 'chat',
-        key: 'MAX_CHAT_HISTORY_MESSAGES',
-        value: MAX_CHAT_HISTORY_MESSAGES,
-        description: 'Cantidad maxima de mensajes persistidos en historial local.'
-      },
-      {
-        scope: 'chat',
-        key: 'MAX_LOCAL_TOOL_CALLS',
-        value: MAX_LOCAL_TOOL_CALLS,
-        description: 'Numero maximo de tools locales permitidas por respuesta.'
-      },
-      {
-        scope: 'context',
-        key: 'MAX_TABS_FOR_AI_SUMMARY',
-        value: MAX_TABS_FOR_AI_SUMMARY,
-        description: 'Tabs maximas consideradas para resumen e ingesta de contexto.'
-      },
-      {
-        scope: 'context',
-        key: 'TAB_SUMMARY_MAX_CHARS',
-        value: TAB_SUMMARY_MAX_CHARS,
-        description: 'Longitud maxima por resumen de tab.'
-      },
-      {
-        scope: 'context',
-        key: 'INCREMENTAL_HISTORY_INGEST_LIMIT',
-        value: INCREMENTAL_HISTORY_INGEST_LIMIT,
-        description: 'Registros de historial usados por ingesta incremental en snapshots.'
-      },
-      {
-        scope: 'bootstrap',
-        key: 'INITIAL_CONTEXT_SYNC_HISTORY_LIMIT',
-        value: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT,
-        description: 'Limite de historial para sincronizacion inicial.'
-      },
-      {
-        scope: 'bootstrap',
-        key: 'INITIAL_CONTEXT_SYNC_HISTORY_DAYS',
-        value: INITIAL_CONTEXT_SYNC_HISTORY_DAYS,
-        description: 'Dias de historial consultados en bootstrap inicial.'
-      },
-      {
-        scope: 'bootstrap',
-        key: 'INITIAL_CONTEXT_SYNC_CHAT_LIMIT',
-        value: INITIAL_CONTEXT_SYNC_CHAT_LIMIT,
-        description: 'Mensajes de chat historico considerados en bootstrap inicial.'
-      },
-      {
-        scope: 'bootstrap',
-        key: 'INITIAL_CONTEXT_SYNC_STALE_MS',
-        value: INITIAL_CONTEXT_SYNC_STALE_MS,
-        description: 'TTL para considerar stale una sincronizacion inicial en estado running.'
-      },
+
+    const readonly = [
       {
         scope: 'ai',
         key: 'DEFAULT_OLLAMA_MODEL',
+        type: 'readonly',
+        editable: false,
         value: DEFAULT_OLLAMA_MODEL,
         description: 'Modelo local por defecto para perfiles Ollama.'
       },
       {
         scope: 'ai',
         key: 'LOCAL_MODEL_KEEP_ALIVE',
+        type: 'readonly',
+        editable: false,
         value: LOCAL_MODEL_KEEP_ALIVE,
         description: 'Tiempo keep-alive del modelo local.'
       },
       {
         scope: 'storage',
         key: 'CHAT_DB',
+        type: 'readonly',
+        editable: false,
         value: CHAT_DB,
         description: 'Configuracion de stores IndexedDB para chat/panel/secrets.'
       },
       {
         scope: 'runtime',
         key: 'panelSettings.language',
+        type: 'readonly',
+        editable: false,
         value: panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE,
         description: 'Idioma actual configurado del assistant.'
       },
       {
         scope: 'runtime',
         key: 'panelSettings.displayName',
+        type: 'readonly',
+        editable: false,
         value: panelSettings.displayName || '',
         description: 'Nombre local del usuario en onboarding/settings.'
       },
       {
         scope: 'runtime',
+        key: 'panelSettings.crmErpDatabase.connected',
+        type: 'readonly',
+        editable: false,
+        value: Boolean(getCrmErpDatabaseConnectionUrl()),
+        description: 'Indica si hay una URL de PostgreSQL configurada para CRM/ERP.'
+      },
+      {
+        scope: 'runtime',
+        key: 'panelSettings.crmErpDatabase.lastAnalyzedAt',
+        type: 'readonly',
+        editable: false,
+        value: getCrmErpDatabaseSchemaSnapshot()?.analyzedAt || 0,
+        description: 'Timestamp del ultimo analisis de esquema CRM/ERP.'
+      },
+      {
+        scope: 'runtime',
         key: 'themeMode',
+        type: 'readonly',
+        editable: false,
         value: themeMode,
         description: 'Tema visual activo en la UI.'
       },
       {
         scope: 'runtime',
         key: 'navigator.language',
+        type: 'readonly',
+        editable: false,
         value: locale,
         description: 'Locale principal del navegador.'
       },
       {
         scope: 'runtime',
         key: 'Intl.timeZone',
+        type: 'readonly',
+        editable: false,
         value: timezone,
         description: 'Zona horaria local detectada.'
       },
       {
         scope: 'memory',
         key: 'contextMemory.config',
+        type: 'readonly',
+        editable: false,
         value: memoryConfig,
         description: 'Configuracion interna del motor vectorial local.'
       }
     ];
 
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS || {})) {
-      entries.push({
+      readonly.push({
         scope: 'defaults',
         key: `DEFAULT_SETTINGS.${key}`,
+        type: 'readonly',
+        editable: false,
         value,
         description: 'Default de preferencias almacenadas en chrome.storage.sync.'
       });
     }
 
-    return entries;
+    return [...editable, ...readonly];
+  }
+
+  function groupSystemVariableEntries(entries) {
+    const groups = new Map();
+    const list = Array.isArray(entries) ? entries : [];
+
+    for (const entry of list) {
+      const scope = String(entry?.scope || 'system');
+      const known = groups.get(scope);
+      if (known) {
+        known.push(entry);
+      } else {
+        groups.set(scope, [entry]);
+      }
+    }
+
+    const discoveredScopes = Array.from(groups.keys()).filter((scope) => !SYSTEM_VARIABLE_SCOPE_ORDER.includes(scope));
+    const orderedScopes = [...SYSTEM_VARIABLE_SCOPE_ORDER, ...discoveredScopes];
+
+    return orderedScopes
+      .filter((scope) => groups.has(scope))
+      .map((scope) => ({
+        scope,
+        label: getSystemVariableScopeLabel(scope),
+        entries: groups.get(scope) || []
+      }));
+  }
+
+  function parseSystemVariableInput(definition, inputElement) {
+    const meta = definition && typeof definition === 'object' ? definition : {};
+    const element = inputElement instanceof HTMLInputElement || inputElement instanceof HTMLTextAreaElement ? inputElement : null;
+    const rawValue = element ? element.value : '';
+    const text = String(rawValue || '').trim();
+
+    if (meta.type === 'number') {
+      if (!text) {
+        return {
+          ok: false,
+          error: `El valor de ${meta.key || meta.id || 'la variable'} no puede estar vacio.`,
+          field: element
+        };
+      }
+
+      const numeric = Number(text);
+      if (!Number.isFinite(numeric)) {
+        return {
+          ok: false,
+          error: `El valor de ${meta.key || meta.id || 'la variable'} debe ser numerico.`,
+          field: element
+        };
+      }
+    }
+
+    if (meta.required && !text) {
+      return {
+        ok: false,
+        error: `El valor de ${meta.key || meta.id || 'la variable'} no puede estar vacio.`,
+        field: element
+      };
+    }
+
+    return {
+      ok: true,
+      value: coerceSystemVariableValue(meta, rawValue),
+      field: element
+    };
+  }
+
+  function collectSystemVariableFormValues() {
+    const sourceSystemVars =
+      panelSettings?.systemVariables && typeof panelSettings.systemVariables === 'object' ? panelSettings.systemVariables : {};
+    const nextSystemVariables = normalizeSystemVariables(sourceSystemVars);
+    let nextSystemPrompt = String(panelSettings.systemPrompt || '').trim() || DEFAULT_CHAT_SYSTEM_PROMPT;
+
+    for (const definition of SYSTEM_VARIABLE_DEFINITIONS) {
+      const field = systemVariablesList?.querySelector(`[data-system-variable-id="${definition.id}"]`) || null;
+      if (!field) {
+        continue;
+      }
+
+      const parsed = parseSystemVariableInput(definition, field);
+      if (!parsed.ok) {
+        return parsed;
+      }
+
+      if (definition.target === 'systemPrompt') {
+        nextSystemPrompt = String(parsed.value || '').trim() || DEFAULT_CHAT_SYSTEM_PROMPT;
+      } else {
+        nextSystemVariables[definition.id] = parsed.value;
+      }
+    }
+
+    return {
+      ok: true,
+      value: {
+        systemPrompt: nextSystemPrompt,
+        systemVariables: normalizeSystemVariables(nextSystemVariables)
+      }
+    };
+  }
+
+  async function saveSystemVariablesFromScreen() {
+    const parsed = collectSystemVariableFormValues();
+    if (!parsed.ok) {
+      setStatus(systemVariablesStatus, parsed.error || 'No se pudieron validar las variables.', true);
+      parsed.field?.focus();
+      return;
+    }
+
+    const nextSettings = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+    const ok = await savePanelSettings(nextSettings);
+    if (!ok) {
+      setStatus(systemVariablesStatus, 'No se pudieron guardar las system variables.', true);
+      return;
+    }
+
+    settingsScreenController?.applyPanelSettingsToUi();
+    renderSystemVariables();
+    setStatus(systemVariablesStatus, 'System variables guardadas.');
+    setStatus(chatStatus, 'System variables actualizadas.');
+  }
+
+  async function resetSystemVariablesToDefaults() {
+    const defaultPrompt = buildDefaultChatSystemPrompt(panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE);
+    const ok = await savePanelSettings({
+      systemPrompt: defaultPrompt,
+      systemVariables: normalizeSystemVariables(SYSTEM_VARIABLE_DEFAULTS)
+    });
+
+    if (!ok) {
+      setStatus(systemVariablesStatus, 'No se pudieron restaurar defaults.', true);
+      return;
+    }
+
+    settingsScreenController?.applyPanelSettingsToUi();
+    renderSystemVariables();
+    setStatus(systemVariablesStatus, 'System variables restauradas a defaults.');
+    setStatus(chatStatus, 'System variables restauradas.');
   }
 
   function renderSystemVariables() {
@@ -3873,39 +4895,94 @@ export function initPanelApp() {
       return;
     }
 
-    const entries = buildSystemVariableEntries();
+    const groupedEntries = groupSystemVariableEntries(buildSystemVariableEntries());
     systemVariablesList.textContent = '';
 
-    for (const item of entries) {
-      const li = document.createElement('li');
-      li.className = 'system-var-item';
+    for (const group of groupedEntries) {
+      const section = document.createElement('section');
+      section.className = 'system-var-group';
 
-      const head = document.createElement('div');
-      head.className = 'system-var-item__head';
+      const head = document.createElement('header');
+      head.className = 'system-var-group__head';
 
-      const scope = document.createElement('span');
-      scope.className = 'system-var-item__scope';
-      scope.textContent = String(item.scope || 'system');
+      const title = document.createElement('h4');
+      title.className = 'system-var-group__title';
+      title.textContent = group.label;
 
-      const key = document.createElement('p');
-      key.className = 'system-var-item__key';
-      key.textContent = String(item.key || '');
+      const count = document.createElement('span');
+      count.className = 'system-var-group__count';
+      count.textContent = `${group.entries.length} vars`;
 
-      head.appendChild(scope);
-      head.appendChild(key);
+      head.appendChild(title);
+      head.appendChild(count);
+      section.appendChild(head);
 
-      const value = document.createElement('pre');
-      value.className = 'system-var-item__value';
-      value.textContent = formatSystemVariableValue(item.value);
+      for (const entry of group.entries) {
+        const card = document.createElement('article');
+        card.className = 'system-var-item';
 
-      const description = document.createElement('p');
-      description.className = 'system-var-item__desc';
-      description.textContent = String(item.description || '');
+        const cardHead = document.createElement('div');
+        cardHead.className = 'system-var-item__head';
 
-      li.appendChild(head);
-      li.appendChild(value);
-      li.appendChild(description);
-      systemVariablesList.appendChild(li);
+        const key = document.createElement('p');
+        key.className = 'system-var-item__key';
+        key.textContent = String(entry.key || entry.id || '');
+
+        const type = document.createElement('span');
+        type.className = 'system-var-item__type';
+        type.textContent = entry.editable ? String(entry.type || 'text') : 'solo lectura';
+
+        cardHead.appendChild(key);
+        cardHead.appendChild(type);
+
+        const valueWrap = document.createElement('div');
+        valueWrap.className = 'system-var-item__value-wrap';
+
+        if (entry.editable) {
+          if (entry.type === 'prompt') {
+            const textarea = document.createElement('textarea');
+            textarea.className = 'system-var-item__textarea';
+            textarea.rows = 8;
+            textarea.dataset.systemVariableId = String(entry.id || '');
+            textarea.value = String(entry.value || '');
+            valueWrap.appendChild(textarea);
+          } else {
+            const input = document.createElement('input');
+            input.className = 'system-var-item__input';
+            input.type = entry.type === 'number' ? 'number' : 'text';
+            input.dataset.systemVariableId = String(entry.id || '');
+            input.value = String(entry.value ?? '');
+            if (entry.type === 'number') {
+              if (Number.isFinite(entry.min)) {
+                input.min = String(entry.min);
+              }
+              if (Number.isFinite(entry.max)) {
+                input.max = String(entry.max);
+              }
+              if (Number.isFinite(entry.step)) {
+                input.step = String(entry.step);
+              }
+            }
+            valueWrap.appendChild(input);
+          }
+        } else {
+          const value = document.createElement('pre');
+          value.className = 'system-var-item__value';
+          value.textContent = formatSystemVariableValue(entry.value);
+          valueWrap.appendChild(value);
+        }
+
+        const description = document.createElement('p');
+        description.className = 'system-var-item__desc';
+        description.textContent = String(entry.description || '');
+
+        card.appendChild(cardHead);
+        card.appendChild(valueWrap);
+        card.appendChild(description);
+        section.appendChild(card);
+      }
+
+      systemVariablesList.appendChild(section);
     }
   }
 
@@ -3988,7 +5065,7 @@ export function initPanelApp() {
         const summary = response
           .replace(/\s+/g, ' ')
           .trim()
-          .slice(0, TAB_SUMMARY_MAX_CHARS);
+          .slice(0, getSystemVariableNumber('context.tabSummaryMaxChars', TAB_SUMMARY_MAX_CHARS));
 
         tabSummaryByKey.set(next.key, summary);
       } catch (_) {
@@ -4057,10 +5134,10 @@ export function initPanelApp() {
     }
 
     const syncResult = await syncWhatsappChatContext(tabContext, {
-      messageLimit: MAX_WHATSAPP_PERSISTED_MESSAGES
+      messageLimit: getSystemVariableNumber('whatsapp.maxPersistedMessages', MAX_WHATSAPP_PERSISTED_MESSAGES)
     });
     const historyPayload = await readWhatsappChatHistory(tabContext, {
-      limit: WHATSAPP_SUGGESTION_HISTORY_LIMIT
+      limit: getSystemVariableNumber('whatsapp.suggestionHistoryLimit', WHATSAPP_SUGGESTION_HISTORY_LIMIT)
     });
     const mergedContext = mergeWhatsappContextWithHistory(tabContext, historyPayload);
 
@@ -4285,7 +5362,9 @@ export function initPanelApp() {
     const startedAt = Date.now();
 
     try {
-      const prompt = buildWhatsappReplyPrompt(suggestionContext);
+      const prompt = buildWhatsappReplyPrompt(suggestionContext, {
+        basePrompt: getWhatsappSuggestionBasePrompt()
+      });
       const profileForSuggestion = resolveModelProfileForInference();
       if (!profileForSuggestion) {
         throw new Error('No hay modelo disponible para sugerencias.');
@@ -4454,10 +5533,17 @@ export function initPanelApp() {
   }
 
   function queueContextIngestion(snapshot, options = {}) {
-    const tabsLimit = Math.max(1, Math.min(120, Number(options.tabsLimit) || MAX_TABS_FOR_AI_SUMMARY));
+    const tabsLimit = Math.max(
+      1,
+      Math.min(120, Number(options.tabsLimit) || getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY))
+    );
     const historyLimit = Math.max(
       1,
-      Math.min(INITIAL_CONTEXT_SYNC_HISTORY_LIMIT, Number(options.historyLimit) || INCREMENTAL_HISTORY_INGEST_LIMIT)
+      Math.min(
+        getSystemVariableNumber('bootstrap.initialContextSyncHistoryLimit', INITIAL_CONTEXT_SYNC_HISTORY_LIMIT),
+        Number(options.historyLimit) ||
+          getSystemVariableNumber('context.incrementalHistoryIngestLimit', INCREMENTAL_HISTORY_INGEST_LIMIT)
+      )
     );
     const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs.slice(0, tabsLimit) : [];
     const historyItems = Array.isArray(snapshot?.history) ? snapshot.history.slice(0, historyLimit) : [];
@@ -4488,7 +5574,12 @@ export function initPanelApp() {
     const whatsappTabs = tabs.filter((tab) => isWhatsappContext(tab));
     const messageLimit = Math.max(
       80,
-      Math.min(2000, Number(options.messageLimit) || Number(MAX_WHATSAPP_PERSISTED_MESSAGES) || 640)
+      Math.min(
+        MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT,
+        Number(options.messageLimit) ||
+          Number(getSystemVariableNumber('whatsapp.maxPersistedMessages', MAX_WHATSAPP_PERSISTED_MESSAGES)) ||
+          MAX_WHATSAPP_PERSISTED_MESSAGES
+      )
     );
 
     if (!whatsappTabs.length) {
@@ -4557,14 +5648,14 @@ export function initPanelApp() {
 
     return Array.from(byUrl.values())
       .sort((a, b) => (b.lastVisitTime || 0) - (a.lastVisitTime || 0))
-      .slice(0, INITIAL_CONTEXT_SYNC_HISTORY_LIMIT);
+      .slice(0, getSystemVariableNumber('bootstrap.initialContextSyncHistoryLimit', INITIAL_CONTEXT_SYNC_HISTORY_LIMIT));
   }
 
   async function requestExtendedHistoryForInitialSync() {
     try {
       const response = await tabContextService.runBrowserAction('getRecentHistory', {
-        limit: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT,
-        days: INITIAL_CONTEXT_SYNC_HISTORY_DAYS
+        limit: getSystemVariableNumber('bootstrap.initialContextSyncHistoryLimit', INITIAL_CONTEXT_SYNC_HISTORY_LIMIT),
+        days: getSystemVariableNumber('bootstrap.initialContextSyncHistoryDays', INITIAL_CONTEXT_SYNC_HISTORY_DAYS)
       });
 
       if (!response || response.ok !== true) {
@@ -4615,7 +5706,9 @@ export function initPanelApp() {
       try {
         await contextMemoryService.warmupEmbeddings();
         const snapshot = await tabContextService.requestSnapshot();
-        const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs.slice(0, MAX_TABS_FOR_AI_SUMMARY) : [];
+        const tabs = Array.isArray(snapshot?.tabs)
+          ? snapshot.tabs.slice(0, getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY))
+          : [];
         const baseHistory = Array.isArray(snapshot?.history) ? snapshot.history : [];
         const extendedHistory = await requestExtendedHistoryForInitialSync();
         const mergedHistory = mergeHistoryForInitialSync(extendedHistory, baseHistory);
@@ -4626,15 +5719,15 @@ export function initPanelApp() {
             history: mergedHistory
           },
           {
-            tabsLimit: MAX_TABS_FOR_AI_SUMMARY,
-            historyLimit: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT
+            tabsLimit: getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY),
+            historyLimit: getSystemVariableNumber('bootstrap.initialContextSyncHistoryLimit', INITIAL_CONTEXT_SYNC_HISTORY_LIMIT)
           }
         );
         await contextIngestionPromise;
 
         const chatSeed = chatHistory.length ? chatHistory : await readChatHistory();
         const chatIngestion = await contextMemoryService.ingestChatHistory(chatSeed, {
-          limit: INITIAL_CONTEXT_SYNC_CHAT_LIMIT
+          limit: getSystemVariableNumber('bootstrap.initialContextSyncChatLimit', INITIAL_CONTEXT_SYNC_CHAT_LIMIT)
         });
         const profileIngestedId = await contextMemoryService.ingestUserProfile({
           user_name: panelSettings.displayName || '',
@@ -4698,7 +5791,7 @@ export function initPanelApp() {
 
     trimTabSummaryCache();
 
-    const tabsForSummary = tabs.slice(0, MAX_TABS_FOR_AI_SUMMARY);
+    const tabsForSummary = tabs.slice(0, getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY));
     for (const tab of tabsForSummary) {
       enqueueTabSummary(tab);
     }
@@ -5346,6 +6439,7 @@ export function initPanelApp() {
     syncModelSelectors();
     renderAiModelsSettings();
     renderPinStatus();
+    renderCrmErpDatabaseSettings({ syncInput: true });
     await contextMemoryService.syncIdentityProfile({
       user_name: panelSettings.displayName || ''
     });
@@ -5390,6 +6484,11 @@ export function initPanelApp() {
 
   async function hydrateChatHistory() {
     chatHistory = await readChatHistory();
+    const maxHistoryMessages = getSystemVariableNumber('chat.maxHistoryMessages', MAX_CHAT_HISTORY_MESSAGES);
+    if (chatHistory.length > maxHistoryMessages) {
+      chatHistory = chatHistory.slice(-maxHistoryMessages);
+      await saveChatHistory();
+    }
     renderChatMessages();
     scrollChatToBottom();
 
@@ -5460,6 +6559,39 @@ export function initPanelApp() {
 
     settingsAssistantSaveBtn?.addEventListener('click', () => {
       saveAssistantSettingsScreen();
+    });
+
+    settingsCrmErpDbSaveBtn?.addEventListener('click', () => {
+      void saveCrmErpDatabaseSettingsFromScreen({ analyzeAfterSave: false });
+    });
+
+    settingsCrmErpDbAnalyzeBtn?.addEventListener('click', () => {
+      void saveCrmErpDatabaseSettingsFromScreen({ analyzeAfterSave: true });
+    });
+
+    settingsCrmErpDbUrlInput?.addEventListener('input', () => {
+      setStatus(settingsCrmErpDbStatus, '');
+    });
+
+    settingsCrmErpDbUrlInput?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
+      event.preventDefault();
+      void saveCrmErpDatabaseSettingsFromScreen({ analyzeAfterSave: false });
+    });
+
+    systemVariablesSaveBtn?.addEventListener('click', () => {
+      saveSystemVariablesFromScreen();
+    });
+
+    systemVariablesResetBtn?.addEventListener('click', () => {
+      resetSystemVariablesToDefaults();
+    });
+
+    systemVariablesList?.addEventListener('input', () => {
+      setStatus(systemVariablesStatus, '');
     });
 
     chatModelSelect?.addEventListener('change', () => {
