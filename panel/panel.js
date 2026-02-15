@@ -108,7 +108,7 @@
 
   const CHAT_DB = Object.freeze({
     NAME: 'greenstudio-chat-db',
-    VERSION: 2,
+    VERSION: 3,
     CHAT_STORE: 'chat_state',
     CHAT_KEY: 'home_history',
     SETTINGS_STORE: 'panel_settings',
@@ -132,9 +132,8 @@
 
   const app = document.getElementById('app');
   const stageTrack = document.getElementById('stageTrack');
-  const onboardingScreen = document.getElementById('onboardingScreen');
+  const brandHomeBtn = document.getElementById('brandHomeBtn');
   const toolsScreen = document.getElementById('toolsScreen');
-  const settingsScreen = document.getElementById('settingsScreen');
   const openToolsBtn = document.getElementById('openToolsBtn');
   const openSettingsBtn = document.getElementById('openSettingsBtn');
   const goHomeBtn = document.getElementById('goHomeBtn');
@@ -212,6 +211,7 @@
   let brandEmotionMetricsPath = null;
   let randomEmotionTimer = 0;
   let randomEmotionEnabled = false;
+  let stageResizeObserver = null;
 
   const prefersDarkMedia =
     typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -793,12 +793,67 @@
     }
 
     if (stageTrack) {
-      stageTrack.style.setProperty('--screen-index', String(SCREEN_INDEX[safeScreen]));
+      const viewport = stageTrack.parentElement;
+      const viewportWidth = viewport ? viewport.clientWidth : 0;
+      const offset = viewportWidth > 0 ? SCREEN_INDEX[safeScreen] * viewportWidth * -1 : 0;
+      stageTrack.style.setProperty('--stage-offset-x', `${offset}px`);
     }
 
     if (safeScreen !== 'tools') {
       setDropUi(false);
     }
+  }
+
+  function setStageTransitionEnabled(enabled) {
+    if (!stageTrack) {
+      return;
+    }
+
+    if (enabled) {
+      stageTrack.style.removeProperty('transition');
+      return;
+    }
+
+    stageTrack.style.setProperty('transition', 'none');
+  }
+
+  function realignStageToScreen(screenName = '') {
+    const fromDom = app && app.dataset ? app.dataset.screen : '';
+    const candidate = Object.prototype.hasOwnProperty.call(SCREEN_INDEX, screenName)
+      ? screenName
+      : Object.prototype.hasOwnProperty.call(SCREEN_INDEX, fromDom)
+        ? fromDom
+        : 'onboarding';
+
+    setStageTransitionEnabled(false);
+    setScreen(candidate);
+
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        setStageTransitionEnabled(true);
+      });
+      return;
+    }
+
+    setStageTransitionEnabled(true);
+  }
+
+  function observeStageSizeChanges() {
+    if (!stageTrack || typeof ResizeObserver !== 'function' || stageResizeObserver) {
+      return;
+    }
+
+    const viewport = stageTrack.parentElement;
+    if (!viewport) {
+      return;
+    }
+
+    stageResizeObserver = new ResizeObserver(() => {
+      const current = app && app.dataset ? app.dataset.screen : '';
+      setScreen(current || 'onboarding');
+    });
+
+    stageResizeObserver.observe(viewport);
   }
 
   function setActiveTool(toolName) {
@@ -906,11 +961,23 @@
   }
 
   function isOnboardingComplete() {
-    return Boolean(panelSettings.onboardingDone && String(panelSettings.displayName || '').trim());
+    return panelSettings.onboardingDone === true;
   }
 
   function resolveHomeOrOnboardingScreen() {
     return isOnboardingComplete() ? 'home' : 'onboarding';
+  }
+
+  function goToPrimaryScreen() {
+    const nextScreen = resolveHomeOrOnboardingScreen();
+    setScreen(nextScreen);
+
+    if (nextScreen === 'home') {
+      requestChatAutofocus(8, 80);
+      return;
+    }
+
+    onboardingNameInput?.focus();
   }
 
   async function fetchAvailableModelsFromOllama() {
@@ -964,14 +1031,15 @@
       syncModelSelectors();
       if (!silent) {
         setStatus(chatStatus, `Modelos cargados: ${availableChatModels.length}.`);
+        setStatus(settingsStatus, `Modelos cargados: ${availableChatModels.length}.`);
       }
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudieron cargar modelos.';
       if (!silent) {
         setStatus(chatStatus, message, true);
+        setStatus(settingsStatus, message, true);
       }
-      setStatus(settingsStatus, message, true);
       syncModelSelectors();
       return false;
     }
@@ -985,6 +1053,7 @@
       setStatus(settingsStatus, 'No se pudo guardar el modelo default.', true);
     }
     syncModelSelectors();
+    warmupLocalModel();
   }
 
   function canShowImageDropOverlay() {
@@ -1390,14 +1459,24 @@
     return chatDbPromise;
   }
 
+  function hasDbStore(db, storeName) {
+    return Boolean(db && db.objectStoreNames && db.objectStoreNames.contains(storeName));
+  }
+
   async function readChatHistory() {
     const db = await getChatDatabase();
-    if (!db) {
+    if (!db || !hasDbStore(db, CHAT_DB.CHAT_STORE)) {
       return [];
     }
 
     return new Promise((resolve) => {
-      const tx = db.transaction(CHAT_DB.CHAT_STORE, 'readonly');
+      let tx;
+      try {
+        tx = db.transaction(CHAT_DB.CHAT_STORE, 'readonly');
+      } catch {
+        resolve([]);
+        return;
+      }
       const store = tx.objectStore(CHAT_DB.CHAT_STORE);
       const req = store.get(CHAT_DB.CHAT_KEY);
 
@@ -1415,7 +1494,7 @@
 
   async function saveChatHistory() {
     const db = await getChatDatabase();
-    if (!db) {
+    if (!db || !hasDbStore(db, CHAT_DB.CHAT_STORE)) {
       return false;
     }
 
@@ -1426,7 +1505,13 @@
     };
 
     return new Promise((resolve) => {
-      const tx = db.transaction(CHAT_DB.CHAT_STORE, 'readwrite');
+      let tx;
+      try {
+        tx = db.transaction(CHAT_DB.CHAT_STORE, 'readwrite');
+      } catch {
+        resolve(false);
+        return;
+      }
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
       tx.objectStore(CHAT_DB.CHAT_STORE).put(payload);
@@ -1435,12 +1520,18 @@
 
   async function readPanelSettings() {
     const db = await getChatDatabase();
-    if (!db) {
+    if (!db || !hasDbStore(db, CHAT_DB.SETTINGS_STORE)) {
       return { ...PANEL_SETTINGS_DEFAULTS };
     }
 
     return new Promise((resolve) => {
-      const tx = db.transaction(CHAT_DB.SETTINGS_STORE, 'readonly');
+      let tx;
+      try {
+        tx = db.transaction(CHAT_DB.SETTINGS_STORE, 'readonly');
+      } catch {
+        resolve({ ...PANEL_SETTINGS_DEFAULTS });
+        return;
+      }
       const store = tx.objectStore(CHAT_DB.SETTINGS_STORE);
       const req = store.get(CHAT_DB.SETTINGS_KEY);
 
@@ -1457,9 +1548,9 @@
 
   async function savePanelSettings(nextSettings) {
     const db = await getChatDatabase();
-    if (!db) {
+    if (!db || !hasDbStore(db, CHAT_DB.SETTINGS_STORE)) {
       panelSettings = { ...panelSettings, ...nextSettings };
-      return false;
+      return true;
     }
 
     panelSettings = { ...panelSettings, ...nextSettings };
@@ -1470,7 +1561,13 @@
     };
 
     return new Promise((resolve) => {
-      const tx = db.transaction(CHAT_DB.SETTINGS_STORE, 'readwrite');
+      let tx;
+      try {
+        tx = db.transaction(CHAT_DB.SETTINGS_STORE, 'readwrite');
+      } catch {
+        resolve(false);
+        return;
+      }
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
       tx.objectStore(CHAT_DB.SETTINGS_STORE).put(payload);
@@ -1571,11 +1668,17 @@
   }
 
   function openToolMenu() {
+    if (!chatToolMenu || !chatToolBtn) {
+      return;
+    }
     chatToolMenu.hidden = false;
     chatToolBtn.setAttribute('aria-expanded', 'true');
   }
 
   function closeToolMenu() {
+    if (!chatToolMenu || !chatToolBtn) {
+      return;
+    }
     chatToolMenu.hidden = true;
     chatToolBtn.setAttribute('aria-expanded', 'false');
   }
@@ -1602,7 +1705,8 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble';
-    bubble.textContent = message.role === 'assistant' ? stripEmotionTag(message.content) : message.content;
+    const visibleText = message.role === 'assistant' ? stripEmotionTag(message.content) : message.content;
+    bubble.textContent = visibleText || message.content;
 
     article.appendChild(bubble);
 
@@ -1675,6 +1779,7 @@
     renderChatMessages();
     await saveChatHistory();
     setStatus(chatStatus, 'Historial limpiado.');
+    startRandomEmotionCycle({ immediate: true });
   }
 
   function buildChatConversation() {
@@ -2416,7 +2521,11 @@
   }
 
   async function hydratePanelSettings() {
-    panelSettings = await readPanelSettings();
+    const stored = await readPanelSettings();
+    panelSettings = { ...PANEL_SETTINGS_DEFAULTS, ...stored };
+    panelSettings.displayName = String(panelSettings.displayName || '').trim();
+    panelSettings.onboardingDone =
+      panelSettings.onboardingDone === true || String(panelSettings.onboardingDone).toLowerCase() === 'true';
     panelSettings.systemPrompt = panelSettings.systemPrompt || DEFAULT_CHAT_SYSTEM_PROMPT;
     panelSettings.defaultModel = normalizeModelName(panelSettings.defaultModel) || DEFAULT_OLLAMA_MODEL;
     applyPanelSettingsToUi();
@@ -2499,13 +2608,58 @@
   }
 
   function wireEvents() {
-    openToolsBtn.addEventListener('click', () => {
+    brandHomeBtn?.addEventListener('click', () => {
+      goToPrimaryScreen();
+    });
+
+    openToolsBtn?.addEventListener('click', () => {
       openTools('image');
     });
 
-    goHomeBtn.addEventListener('click', () => {
-      setScreen('home');
-      requestChatAutofocus(8, 80);
+    openSettingsBtn?.addEventListener('click', () => {
+      openSettings();
+    });
+
+    goHomeBtn?.addEventListener('click', () => {
+      goToPrimaryScreen();
+    });
+
+    closeSettingsBtn?.addEventListener('click', () => {
+      goToPrimaryScreen();
+    });
+
+    onboardingContinueBtn?.addEventListener('click', () => {
+      handleOnboardingContinue();
+    });
+
+    onboardingNameInput?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
+      event.preventDefault();
+      handleOnboardingContinue();
+    });
+
+    settingsSaveBtn?.addEventListener('click', () => {
+      saveSettingsScreen();
+    });
+
+    refreshModelsBtn?.addEventListener('click', () => {
+      refreshAvailableModels({ silent: false });
+    });
+
+    settingsRefreshModelsBtn?.addEventListener('click', () => {
+      refreshAvailableModels({ silent: false });
+    });
+
+    chatModelSelect?.addEventListener('change', () => {
+      updateDefaultModel(chatModelSelect.value);
+      setStatus(chatStatus, `Modelo activo: ${getActiveModel()}.`);
+    });
+
+    settingsModelSelect?.addEventListener('change', () => {
+      fillModelSelect(settingsModelSelect, settingsModelSelect.value);
     });
 
     for (const tab of toolTabs) {
@@ -2534,7 +2688,7 @@
       }
     }
 
-    chatToolBtn.addEventListener('click', (event) => {
+    chatToolBtn?.addEventListener('click', (event) => {
       event.stopPropagation();
       if (chatToolMenu.hidden) {
         openToolMenu();
@@ -2544,7 +2698,7 @@
       closeToolMenu();
     });
 
-    chatToolMenu.addEventListener('click', (event) => {
+    chatToolMenu?.addEventListener('click', (event) => {
       event.stopPropagation();
       const option = event.target.closest('[data-chat-tool]');
       if (!option) {
@@ -2557,7 +2711,7 @@
     });
 
     document.addEventListener('click', (event) => {
-      if (!chatToolPicker.contains(event.target)) {
+      if (!chatToolPicker || !chatToolPicker.contains(event.target)) {
         closeToolMenu();
       }
     });
@@ -2568,15 +2722,15 @@
       }
     });
 
-    chatResetBtn.addEventListener('click', () => {
+    chatResetBtn?.addEventListener('click', () => {
       resetChatHistory();
     });
 
-    chatInput.addEventListener('input', () => {
+    chatInput?.addEventListener('input', () => {
       updateChatInputSize();
     });
 
-    chatInput.addEventListener('keydown', (event) => {
+    chatInput?.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
         return;
       }
@@ -2585,15 +2739,15 @@
       sendChatMessage();
     });
 
-    chatSendBtn.addEventListener('click', () => {
+    chatSendBtn?.addEventListener('click', () => {
       sendChatMessage();
     });
 
-    imagePickBtn.addEventListener('click', () => {
+    imagePickBtn?.addEventListener('click', () => {
       imageInput.click();
     });
 
-    imageDropzone.addEventListener('click', (event) => {
+    imageDropzone?.addEventListener('click', (event) => {
       if (event.target.closest('#imagePickBtn')) {
         return;
       }
@@ -2601,7 +2755,7 @@
       imageInput.click();
     });
 
-    imageDropzone.addEventListener('keydown', (event) => {
+    imageDropzone?.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' && event.key !== ' ') {
         return;
       }
@@ -2610,15 +2764,15 @@
       imageInput.click();
     });
 
-    imageInput.addEventListener('change', () => {
+    imageInput?.addEventListener('change', () => {
       handleImageFileChange();
     });
 
-    imageQuality.addEventListener('input', () => {
+    imageQuality?.addEventListener('input', () => {
       updateImageQualityLabel(imageQuality.value);
     });
 
-    imageQuality.addEventListener('change', async () => {
+    imageQuality?.addEventListener('change', async () => {
       const nextQuality = Number(imageQuality.value);
       await saveSettings({ [PREFERENCE_KEYS.IMAGE_QUALITY]: nextQuality });
       clearQueueOutputs();
@@ -2629,11 +2783,11 @@
       }
     });
 
-    imageClearBtn.addEventListener('click', () => {
+    imageClearBtn?.addEventListener('click', () => {
       clearImageQueue();
     });
 
-    imageQueueList.addEventListener('click', (event) => {
+    imageQueueList?.addEventListener('click', (event) => {
       const copyButton = event.target.closest('[data-copy-id]');
       if (copyButton) {
         copyImageForItem(copyButton.dataset.copyId || '', copyButton);
@@ -2692,7 +2846,7 @@
       addImageFiles(event.dataTransfer ? event.dataTransfer.files : []);
     });
 
-    retoolToggle.addEventListener('change', async () => {
+    retoolToggle?.addEventListener('change', async () => {
       const ok = await saveSettings({ [TOOL_KEYS.RETOOL_LAYOUT_CLEANUP]: retoolToggle.checked });
       if (!ok) {
         setStatus(retoolStatus, 'No se pudo guardar la configuracion de Retool Cleanup.', true);
@@ -2702,14 +2856,24 @@
       setStatus(retoolStatus, `Retool Cleanup ${retoolToggle.checked ? 'activada' : 'desactivada'}.`);
     });
 
-    applyRetoolBtn.addEventListener('click', () => {
+    applyRetoolBtn?.addEventListener('click', () => {
       applyInActiveTab();
     });
 
     window.addEventListener('beforeunload', () => {
+      stopRandomEmotionCycle();
       for (const item of imageQueue) {
         releaseQueueItem(item);
       }
+
+      if (stageResizeObserver) {
+        stageResizeObserver.disconnect();
+        stageResizeObserver = null;
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      realignStageToScreen();
     });
 
     window.addEventListener('focus', () => {
@@ -2724,25 +2888,45 @@
   }
 
   async function init() {
+    setStageTransitionEnabled(false);
     wireEvents();
+    observeStageSizeChanges();
     setChatTool(DEFAULT_CHAT_TOOL);
     closeToolMenu();
     updateChatInputSize();
     renderImageQueue();
 
     await hydrateSettings();
+    await hydratePanelSettings();
+    setActiveTool('image');
+    const initialScreen = resolveHomeOrOnboardingScreen();
+    setScreen(initialScreen);
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        setScreen(initialScreen);
+        requestAnimationFrame(() => {
+          setStageTransitionEnabled(true);
+        });
+      });
+    } else {
+      setStageTransitionEnabled(true);
+    }
+
     await hydrateBrandEmotions();
     await hydrateChatHistory();
-
-    setActiveTool('image');
-    setScreen('home');
+    await refreshAvailableModels({ silent: true });
+    syncModelSelectors();
 
     if (!chatHistory.length) {
-      setStatus(chatStatus, `Precargando ${LOCAL_OLLAMA_MODEL}...`);
+      setStatus(chatStatus, `Precargando ${getActiveModel()}...`);
     }
     warmupLocalModel();
 
-    requestChatAutofocus(10, 80);
+    if (initialScreen === 'home') {
+      requestChatAutofocus(10, 80);
+    } else {
+      onboardingNameInput?.focus();
+    }
   }
 
   init();

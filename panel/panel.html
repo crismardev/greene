@@ -12,7 +12,7 @@
 <body>
   <main class="app" id="app" data-screen="onboarding">
     <header class="topbar">
-      <div class="brand">
+      <button id="brandHomeBtn" class="brand brand--home-trigger" type="button" aria-label="Ir al chat principal">
         <div class="brand__emotion" id="brandEmotion" role="img" aria-label="Greene emotion neutral">
           <svg id="brandEmotionSvg" viewBox="0 0 67 47" fill="none" aria-hidden="true" focusable="false">
             <path id="brandEmotionEyeRight" class="brand__emotion-path"
@@ -27,7 +27,7 @@
           <p class="brand__eyebrow">assistant</p>
           <h1>Grenne</h1>
         </div>
-      </div>
+      </button>
       <div class="topbar__actions">
         <button id="themeToggleBtn" class="theme-toggle" type="button" aria-label="Cambiar tema" title="Tema: sistema">
           <span id="themeToggleIcon" class="theme-toggle__icon" aria-hidden="true"></span>
@@ -52,7 +52,7 @@
     </header>
 
     <section class="stage" aria-live="polite">
-      <div class="stage__track" id="stageTrack" style="--screen-count: 4; --screen-index: 0;">
+      <div class="stage__track" id="stageTrack" style="--stage-offset-x: 0px;">
         <section class="screen screen--onboarding" id="onboardingScreen" aria-label="Onboarding">
           <article class="onboarding-shell">
             <div class="onboarding-card">
