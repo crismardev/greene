@@ -318,6 +318,7 @@ a {
 .chat-toolbar {
   display: flex;
   align-items: center;
+  flex-direction: row ;
   gap: 8px;
 }
 
@@ -338,10 +339,14 @@ a {
   border-radius: 999px;
   padding: 0 10px;
   min-width: 140px;
-  max-width: 180px;
+  max-width: 140px;
   background: var(--surface);
   color: var(--text);
   outline: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
   font-size: 12px;
 }
 
@@ -1034,9 +1039,6 @@ a {
     padding: 0 10px;
   }
 
-  .chat-toolbar {
-    flex-wrap: wrap;
-  }
 
   .model-picker {
     width: 100%;
