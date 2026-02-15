@@ -16,6 +16,19 @@
   const tabTemporalState = new Map();
   const recentHistoryByUrl = new Map();
   const HISTORY_CACHE_LIMIT = 240;
+  const INITIAL_CONTEXT_SYNC_STORAGE_KEY = 'greenstudio_initial_context_sync_v1';
+  const INITIAL_CONTEXT_SYNC_VERSION = 1;
+  const EXTENDED_HISTORY_MIN_RESULTS = 20;
+  const EXTENDED_HISTORY_MAX_RESULTS = 600;
+  const EXTENDED_HISTORY_MIN_DAYS = 1;
+  const EXTENDED_HISTORY_MAX_DAYS = 365;
+  const HISTORY_RANGE_DEFAULT_LIMIT = 220;
+  const HISTORY_RANGE_MAX_LIMIT = 1200;
+  const OLDEST_HISTORY_DEFAULT_CHUNK = 320;
+  const OLDEST_HISTORY_MAX_CHUNK = 800;
+  const OLDEST_HISTORY_DEFAULT_CHUNKS = 10;
+  const OLDEST_HISTORY_MAX_CHUNKS = 30;
+  const whatsappContextLogByTab = new Map();
   let activeTabId = -1;
 
   function logDebug(message, payload) {
@@ -34,6 +47,56 @@
     }
 
     console.warn(`${LOG_PREFIX} ${message}`, payload);
+  }
+
+  function logWhatsappContextSnapshot(context, reason = 'update') {
+    const safeContext = context && typeof context === 'object' ? context : {};
+    const site = String(safeContext.site || '').toLowerCase();
+    if (site !== 'whatsapp') {
+      return;
+    }
+
+    const tabId = Number(safeContext.tabId);
+    if (!Number.isFinite(tabId) || tabId < 0) {
+      return;
+    }
+
+    const details = safeContext.details && typeof safeContext.details === 'object' ? safeContext.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const messages = Array.isArray(details.messages) ? details.messages : [];
+    const chatKey = toSafeText(currentChat.key || currentChat.phone || currentChat.title || '', 180);
+    if (!chatKey) {
+      return;
+    }
+
+    const previous = whatsappContextLogByTab.get(tabId);
+    const now = Date.now();
+
+    if (previous && previous.chatKey === chatKey) {
+      return;
+    }
+
+    whatsappContextLogByTab.set(tabId, {
+      chatKey,
+      at: now
+    });
+
+    logDebug('whatsapp_context:upsert', {
+      reason,
+      tabId,
+      url: toSafeText(safeContext.url || '', 220),
+      chat: {
+        title: toSafeText(currentChat.title || '', 120),
+        phone: toSafeText(currentChat.phone || '', 42),
+        key: chatKey
+      },
+      messageCount: messages.length,
+      messageTail: messages.slice(-4).map((item) => ({
+        role: item?.role === 'me' ? 'me' : 'contact',
+        timestamp: toSafeText(item?.timestamp || '', 80),
+        text: toSafeText(item?.text || '', 160)
+      }))
+    });
   }
 
   async function enablePanelOnActionClick() {
@@ -261,6 +324,288 @@
       }));
   }
 
+  function normalizeHistoryRecord(entry) {
+    const url = toSafeUrl(entry?.url);
+    if (!url) {
+      return null;
+    }
+
+    return {
+      url,
+      title: toSafeText(entry?.title || '', 240),
+      lastVisitTime: Math.max(0, Number(entry?.lastVisitTime) || 0),
+      visitCount: Math.max(0, Number(entry?.visitCount) || 0),
+      typedCount: Math.max(0, Number(entry?.typedCount) || 0)
+    };
+  }
+
+  function parseTimestamp(value) {
+    if (Number.isFinite(value)) {
+      return Math.max(0, Math.floor(value));
+    }
+
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return 0;
+    }
+
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) {
+      return Math.max(0, Math.floor(numeric));
+    }
+
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, Math.floor(parsed));
+    }
+
+    return 0;
+  }
+
+  function startOfLocalDay(timestamp) {
+    const date = new Date(timestamp);
+    date.setHours(0, 0, 0, 0);
+    return date.getTime();
+  }
+
+  function endOfLocalDay(timestamp) {
+    const date = new Date(timestamp);
+    date.setHours(23, 59, 59, 999);
+    return date.getTime();
+  }
+
+  function startOfLocalWeekMonday(timestamp) {
+    const date = new Date(timestamp);
+    date.setHours(0, 0, 0, 0);
+    const day = date.getDay();
+    const diff = (day + 6) % 7;
+    date.setDate(date.getDate() - diff);
+    return date.getTime();
+  }
+
+  function buildPresetHistoryRange(preset, now = Date.now()) {
+    const key = String(preset || '').trim().toLowerCase();
+    if (!key) {
+      return null;
+    }
+
+    if (key === 'today') {
+      return {
+        startTime: startOfLocalDay(now),
+        endTime: now
+      };
+    }
+
+    if (key === 'yesterday') {
+      const dayStart = startOfLocalDay(now);
+      const previousDay = dayStart - 24 * 60 * 60 * 1000;
+      return {
+        startTime: startOfLocalDay(previousDay),
+        endTime: endOfLocalDay(previousDay)
+      };
+    }
+
+    if (key === 'this_week') {
+      return {
+        startTime: startOfLocalWeekMonday(now),
+        endTime: now
+      };
+    }
+
+    if (key === 'last_week') {
+      const thisWeekStart = startOfLocalWeekMonday(now);
+      const previousWeekEnd = thisWeekStart - 1;
+      const previousWeekStart = startOfLocalWeekMonday(previousWeekEnd);
+      return {
+        startTime: previousWeekStart,
+        endTime: previousWeekEnd
+      };
+    }
+
+    if (key === 'last_friday_afternoon') {
+      const anchor = new Date(now);
+      anchor.setHours(0, 0, 0, 0);
+      const day = anchor.getDay();
+      let daysSinceFriday = (day + 2) % 7;
+      if (daysSinceFriday === 0) {
+        daysSinceFriday = 7;
+      }
+
+      anchor.setDate(anchor.getDate() - daysSinceFriday);
+      const start = new Date(anchor);
+      start.setHours(12, 0, 0, 0);
+      const end = new Date(anchor);
+      end.setHours(18, 59, 59, 999);
+      return {
+        startTime: start.getTime(),
+        endTime: end.getTime()
+      };
+    }
+
+    return null;
+  }
+
+  function toIsoTimestamp(value) {
+    if (!Number.isFinite(value) || value <= 0) {
+      return '';
+    }
+
+    try {
+      return new Date(value).toISOString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function getHostname(url) {
+    try {
+      return new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function summarizeHistoryRecords(records) {
+    const list = Array.isArray(records) ? records : [];
+    if (!list.length) {
+      return {
+        count: 0,
+        firstVisitAt: 0,
+        lastVisitAt: 0,
+        firstVisitIso: '',
+        lastVisitIso: '',
+        topDomains: []
+      };
+    }
+
+    let firstVisitAt = Number.MAX_SAFE_INTEGER;
+    let lastVisitAt = 0;
+    const domainCounts = new Map();
+
+    for (const item of list) {
+      const ts = Number(item?.lastVisitTime) || 0;
+      if (ts > 0 && ts < firstVisitAt) {
+        firstVisitAt = ts;
+      }
+      if (ts > lastVisitAt) {
+        lastVisitAt = ts;
+      }
+
+      const domain = getHostname(item?.url || '');
+      if (!domain) {
+        continue;
+      }
+
+      const known = domainCounts.get(domain) || 0;
+      domainCounts.set(domain, known + 1);
+    }
+
+    const topDomains = Array.from(domainCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([domain, count]) => ({
+        domain,
+        count
+      }));
+
+    if (firstVisitAt === Number.MAX_SAFE_INTEGER) {
+      firstVisitAt = 0;
+    }
+
+    return {
+      count: list.length,
+      firstVisitAt,
+      lastVisitAt,
+      firstVisitIso: toIsoTimestamp(firstVisitAt),
+      lastVisitIso: toIsoTimestamp(lastVisitAt),
+      topDomains
+    };
+  }
+
+  function buildHistoryRangeArgs(rawArgs = {}) {
+    const safeArgs = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const now = Date.now();
+    const limit = Math.round(clamp(Number(safeArgs.limit) || HISTORY_RANGE_DEFAULT_LIMIT, 1, HISTORY_RANGE_MAX_LIMIT));
+    const text = toSafeText(safeArgs.text || '', 120);
+    const sort = String(safeArgs.sort || '').toLowerCase() === 'asc' ? 'asc' : 'desc';
+    const days = Math.round(clamp(Number(safeArgs.days) || 0, 0, EXTENDED_HISTORY_MAX_DAYS));
+    const preset = toSafeText(safeArgs.preset || '', 60).toLowerCase();
+    const startCandidate =
+      parseTimestamp(safeArgs.startTime || safeArgs.start || safeArgs.from || safeArgs.startISO || safeArgs.startDate) || 0;
+    const endCandidate =
+      parseTimestamp(safeArgs.endTime || safeArgs.end || safeArgs.to || safeArgs.endISO || safeArgs.endDate) || 0;
+
+    let startTime = startCandidate;
+    let endTime = endCandidate;
+
+    if (!startTime && !endTime && preset) {
+      const presetRange = buildPresetHistoryRange(preset, now);
+      if (presetRange) {
+        startTime = presetRange.startTime;
+        endTime = presetRange.endTime;
+      }
+    }
+
+    if (!startTime && !endTime && days > 0) {
+      endTime = now;
+      startTime = now - days * 24 * 60 * 60 * 1000;
+    }
+
+    if (!startTime) {
+      startTime = now - 24 * 60 * 60 * 1000;
+    }
+    if (!endTime) {
+      endTime = now;
+    }
+
+    if (endTime < startTime) {
+      const temp = startTime;
+      startTime = endTime;
+      endTime = temp;
+    }
+
+    return {
+      text,
+      sort,
+      limit,
+      days,
+      preset,
+      startTime,
+      endTime
+    };
+  }
+
+  function queryHistory(query = {}) {
+    return new Promise((resolve) => {
+      if (!chrome.history || typeof chrome.history.search !== 'function') {
+        resolve([]);
+        return;
+      }
+
+      chrome.history.search(query, (items) => {
+        if (chrome.runtime.lastError || !Array.isArray(items)) {
+          resolve([]);
+          return;
+        }
+
+        resolve(items);
+      });
+    });
+  }
+
+  function writeChromeLocal(patch) {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.local) {
+        resolve(false);
+        return;
+      }
+
+      chrome.storage.local.set(patch, () => {
+        resolve(!chrome.runtime.lastError);
+      });
+    });
+  }
+
   function queryTabs(queryInfo = {}) {
     return new Promise((resolve) => {
       chrome.tabs.query(queryInfo, (tabs) => {
@@ -417,6 +762,179 @@
       };
     }
 
+    if (safeAction === 'getRecentHistory') {
+      const limit = Math.round(
+        clamp(Number(safeArgs.limit) || 260, EXTENDED_HISTORY_MIN_RESULTS, EXTENDED_HISTORY_MAX_RESULTS)
+      );
+      const days = Math.round(clamp(Number(safeArgs.days) || 45, EXTENDED_HISTORY_MIN_DAYS, EXTENDED_HISTORY_MAX_DAYS));
+      const text = toSafeText(safeArgs.text || '', 120);
+      const startTime = Date.now() - days * 24 * 60 * 60 * 1000;
+      const historyItems = await queryHistory({
+        text,
+        maxResults: limit,
+        startTime
+      });
+      const records = [];
+
+      for (const entry of historyItems) {
+        const normalized = normalizeHistoryRecord(entry);
+        if (!normalized) {
+          continue;
+        }
+
+        records.push(normalized);
+        upsertHistoryRecord(normalized);
+      }
+
+      logDebug(`runBrowserAction:done:${safeAction}`, {
+        requestId,
+        count: records.length,
+        days,
+        limit
+      });
+
+      return {
+        ok: true,
+        result: {
+          items: records,
+          days,
+          limit,
+          text
+        }
+      };
+    }
+
+    if (safeAction === 'queryHistoryRange') {
+      const range = buildHistoryRangeArgs(safeArgs);
+      const historyItems = await queryHistory({
+        text: range.text,
+        maxResults: range.limit,
+        startTime: range.startTime,
+        endTime: range.endTime
+      });
+      const records = [];
+
+      for (const entry of historyItems) {
+        const normalized = normalizeHistoryRecord(entry);
+        if (!normalized) {
+          continue;
+        }
+
+        records.push(normalized);
+        upsertHistoryRecord(normalized);
+      }
+
+      records.sort((a, b) =>
+        range.sort === 'asc' ? (a.lastVisitTime || 0) - (b.lastVisitTime || 0) : (b.lastVisitTime || 0) - (a.lastVisitTime || 0)
+      );
+
+      const summary = summarizeHistoryRecords(records);
+
+      logDebug(`runBrowserAction:done:${safeAction}`, {
+        requestId,
+        count: records.length,
+        range
+      });
+
+      return {
+        ok: true,
+        result: {
+          items: records,
+          range: {
+            ...range,
+            startIso: toIsoTimestamp(range.startTime),
+            endIso: toIsoTimestamp(range.endTime)
+          },
+          summary
+        }
+      };
+    }
+
+    if (safeAction === 'getOldestHistoryVisit') {
+      const text = toSafeText(safeArgs.text || '', 120);
+      const chunkSize = Math.round(clamp(Number(safeArgs.chunkSize) || OLDEST_HISTORY_DEFAULT_CHUNK, 40, OLDEST_HISTORY_MAX_CHUNK));
+      const maxChunks = Math.round(clamp(Number(safeArgs.maxChunks) || OLDEST_HISTORY_DEFAULT_CHUNKS, 1, OLDEST_HISTORY_MAX_CHUNKS));
+      const rangeStart = Math.max(0, parseTimestamp(safeArgs.startTime || safeArgs.start || safeArgs.startISO || 0));
+      let endTime = Math.max(0, parseTimestamp(safeArgs.endTime || safeArgs.end || safeArgs.endISO || Date.now()));
+      if (!endTime) {
+        endTime = Date.now();
+      }
+
+      let oldest = null;
+      let scannedItems = 0;
+      let chunksUsed = 0;
+
+      for (let chunkIndex = 0; chunkIndex < maxChunks; chunkIndex += 1) {
+        const items = await queryHistory({
+          text,
+          maxResults: chunkSize,
+          startTime: rangeStart,
+          endTime
+        });
+
+        if (!Array.isArray(items) || !items.length) {
+          break;
+        }
+
+        chunksUsed += 1;
+        const normalizedChunk = [];
+
+        for (const entry of items) {
+          const normalized = normalizeHistoryRecord(entry);
+          if (!normalized) {
+            continue;
+          }
+
+          normalizedChunk.push(normalized);
+          upsertHistoryRecord(normalized);
+
+          if (!oldest || normalized.lastVisitTime < oldest.lastVisitTime) {
+            oldest = normalized;
+          }
+        }
+
+        scannedItems += normalizedChunk.length;
+        if (!normalizedChunk.length) {
+          break;
+        }
+
+        const minTimestamp = normalizedChunk.reduce((lowest, item) => {
+          const ts = Number(item.lastVisitTime) || 0;
+          if (!lowest || (ts > 0 && ts < lowest)) {
+            return ts;
+          }
+          return lowest;
+        }, 0);
+
+        if (!minTimestamp || minTimestamp <= rangeStart || normalizedChunk.length < chunkSize) {
+          break;
+        }
+
+        endTime = minTimestamp - 1;
+      }
+
+      logDebug(`runBrowserAction:done:${safeAction}`, {
+        requestId,
+        found: Boolean(oldest),
+        scannedItems,
+        chunksUsed
+      });
+
+      return {
+        ok: true,
+        result: {
+          oldest,
+          scannedItems,
+          chunksUsed,
+          approximate: chunksUsed >= maxChunks,
+          rangeStart,
+          rangeStartIso: toIsoTimestamp(rangeStart),
+          endTime,
+          endIso: toIsoTimestamp(endTime)
+        }
+      };
+    }
+
     if (safeAction === 'openNewTab') {
       const targetUrl = toSafeUrl(safeArgs.url);
       const createOptions = {
@@ -545,6 +1063,7 @@
       await removeTabs(targetTab.id);
       tabContextState.delete(targetTab.id);
       tabTemporalState.delete(targetTab.id);
+      whatsappContextLogByTab.delete(targetTab.id);
       if (activeTabId === targetTab.id) {
         setActiveTab(-1);
         syncActiveTabFromWindow();
@@ -598,6 +1117,7 @@
         for (const tab of candidates) {
           tabContextState.delete(tab.id);
           tabTemporalState.delete(tab.id);
+          whatsappContextLogByTab.delete(tab.id);
         }
       }
 
@@ -721,6 +1241,7 @@
       return;
     }
 
+    logWhatsappContextSnapshot(normalized, reason);
     tabContextState.set(normalized.tabId, normalized);
 
     if (activeTabId === -1 && tab.active) {
@@ -760,6 +1281,7 @@
     if (!tab) {
       tabContextState.delete(tabId);
       tabTemporalState.delete(tabId);
+      whatsappContextLogByTab.delete(tabId);
       broadcastSnapshot('tab_removed');
       return;
     }
@@ -811,9 +1333,32 @@
     });
   }
 
-  chrome.runtime.onInstalled.addListener(() => {
+  chrome.runtime.onInstalled.addListener((details) => {
     enablePanelOnActionClick();
     refreshAllTabs('installed');
+
+    const reason = typeof details?.reason === 'string' ? details.reason : 'install';
+    if (reason === 'install') {
+      const now = Date.now();
+      void writeChromeLocal({
+        [INITIAL_CONTEXT_SYNC_STORAGE_KEY]: {
+          version: INITIAL_CONTEXT_SYNC_VERSION,
+          status: 'pending',
+          reason,
+          startedAt: 0,
+          completedAt: 0,
+          updatedAt: now,
+          error: '',
+          sourceCounts: {
+            tabs: 0,
+            history: 0,
+            chat: 0,
+            profile: 0,
+            facts: 0
+          }
+        }
+      });
+    }
   });
 
   chrome.runtime.onStartup.addListener(() => {
@@ -865,6 +1410,7 @@
     pauseTabActiveSession(tabId, Date.now());
     tabContextState.delete(tabId);
     tabTemporalState.delete(tabId);
+    whatsappContextLogByTab.delete(tabId);
     if (activeTabId === tabId) {
       setActiveTab(-1);
       syncActiveTabFromWindow();
@@ -998,6 +1544,7 @@
           if (!known.has(tabId)) {
             tabContextState.delete(tabId);
             tabTemporalState.delete(tabId);
+            whatsappContextLogByTab.delete(tabId);
           }
         }
 

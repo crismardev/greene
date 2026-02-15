@@ -73,14 +73,38 @@
 
             <section class="site-widgets" id="siteWidgets">
               <article id="whatsappSuggestionCard" class="tool-card site-widget" hidden>
-                <div class="settings-card__head">
-                  <h3>WhatsApp Suggestion</h3>
-                  <p id="whatsappSuggestionMeta" class="tool-copy"></p>
+                <div class="site-widget__head">
+                  <div class="site-widget__head-main">
+                    <h3>WhatsApp Suggestion</h3>
+                    <p id="whatsappSuggestionMeta" class="tool-copy"></p>
+                  </div>
+                  <button id="whatsappSuggestionCloseBtn" class="icon-btn icon-btn--ghost icon-btn--mini" type="button"
+                    aria-label="Cerrar sugerencia de WhatsApp" title="Cerrar sugerencia">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M18 6L6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
                 </div>
                 <p id="whatsappSuggestionText" class="site-widget__suggestion"></p>
-                <div class="actions">
-                  <button id="whatsappSuggestionRunBtn" class="btn" type="button">Ejecutar</button>
-                  <button id="whatsappSuggestionRefreshBtn" class="btn btn--ghost" type="button">Regenerar</button>
+                <div class="site-widget__actions">
+                  <button id="whatsappSuggestionRunBtn" class="icon-btn icon-btn--send" type="button"
+                    aria-label="Ejecutar sugerencia" title="Ejecutar sugerencia">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M19 12H5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                      <path d="M11 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
+                  <button id="whatsappSuggestionRefreshBtn" class="icon-btn icon-btn--ghost" type="button"
+                    aria-label="Regenerar sugerencia" title="Regenerar sugerencia">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M20 11a8 8 0 1 0 2.3 5.7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                      <path d="M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
                 </div>
                 <p id="whatsappSuggestionStatus" class="status" role="status"></p>
               </article>
@@ -266,6 +290,13 @@
                         stroke-linejoin="round"></path>
                     </svg>
                   </button>
+                  <button type="button" class="settings-nav-item" data-settings-target="system_variables">
+                    <span>System Variables</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
                 </nav>
               </article>
 
@@ -339,28 +370,38 @@
                   </button>
                 </div>
 
-                <label class="field">
-                  <span>Modelo principal global</span>
-                  <select id="aiPrimaryModelSelect"></select>
-                </label>
-
-                <div class="actions">
-                  <button id="settingsRefreshLocalModelsBtn" class="btn btn--ghost" type="button">Actualizar modelos locales</button>
-                </div>
-
-                <ul id="aiModelsList" class="ai-models-list" aria-live="polite"></ul>
-
-                <section class="settings-security">
-                  <div class="settings-card__head">
-                    <h3>Seguridad API keys</h3>
-                    <p id="settingsPinStatus" class="tool-copy"></p>
-                  </div>
+                <section id="aiModelsAccessWall" class="ai-models-wall" hidden>
+                  <h4>Acceso protegido</h4>
+                  <p id="aiModelsAccessCopy" class="tool-copy"></p>
                   <div class="actions">
-                    <button id="settingsSetupPinBtn" class="btn btn--ghost" type="button">Configurar PIN</button>
-                    <button id="settingsUnlockPinBtn" class="btn btn--ghost" type="button">Desbloquear</button>
-                    <button id="settingsLockPinBtn" class="btn btn--ghost" type="button">Bloquear</button>
+                    <button id="aiModelsAccessActionBtn" class="btn" type="button"></button>
                   </div>
                 </section>
+
+                <div id="aiModelsProtectedContent" class="ai-models-content">
+                  <label class="field">
+                    <span>Modelo principal global</span>
+                    <select id="aiPrimaryModelSelect"></select>
+                  </label>
+
+                  <div class="actions">
+                    <button id="settingsRefreshLocalModelsBtn" class="btn btn--ghost" type="button">Actualizar modelos locales</button>
+                  </div>
+
+                  <ul id="aiModelsList" class="ai-models-list" aria-live="polite"></ul>
+
+                  <section class="settings-security">
+                    <div class="settings-card__head">
+                      <h3>Seguridad API keys</h3>
+                      <p id="settingsPinStatus" class="tool-copy"></p>
+                    </div>
+                    <div class="actions">
+                      <button id="settingsSetupPinBtn" class="btn btn--ghost" type="button">Configurar PIN</button>
+                      <button id="settingsUnlockPinBtn" class="btn btn--ghost" type="button">Desbloquear</button>
+                      <button id="settingsLockPinBtn" class="btn btn--ghost" type="button">Bloquear</button>
+                    </div>
+                  </section>
+                </div>
 
                 <p id="aiModelsStatus" class="status" role="status"></p>
               </article>
@@ -371,6 +412,13 @@
                   <p class="tool-copy">JSON vivo de tabs abiertas con title, description, extracto y aiSummary usando el modelo principal.</p>
                 </div>
                 <pre id="tabsContextJson" class="tabs-context-json"></pre>
+              </article>
+
+              <article class="tool-card settings-card settings-page" data-settings-page="system_variables">
+                <div class="settings-card__head">
+                  <h3>System Variables</h3>
+                </div>
+                <ul id="systemVariablesList" class="system-vars-list" aria-live="polite"></ul>
               </article>
             </section>
           </article>
@@ -446,13 +494,32 @@
 
         <label class="field">
           <span>PIN de 4 digitos</span>
-          <input id="pinInput" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="0000" autocomplete="off" />
+          <input id="pinInput" type="hidden" autocomplete="off" />
+          <div class="pin-code-inputs" data-pin-group="pin">
+            <input class="pin-digit-input" data-pin-target="pin" data-pin-index="0" type="password" inputmode="numeric" maxlength="1"
+              pattern="[0-9]" aria-label="Digito 1 del PIN" autocomplete="one-time-code" autofocus />
+            <input class="pin-digit-input" data-pin-target="pin" data-pin-index="1" type="password" inputmode="numeric" maxlength="1"
+              pattern="[0-9]" aria-label="Digito 2 del PIN" autocomplete="one-time-code" />
+            <input class="pin-digit-input" data-pin-target="pin" data-pin-index="2" type="password" inputmode="numeric" maxlength="1"
+              pattern="[0-9]" aria-label="Digito 3 del PIN" autocomplete="one-time-code" />
+            <input class="pin-digit-input" data-pin-target="pin" data-pin-index="3" type="password" inputmode="numeric" maxlength="1"
+              pattern="[0-9]" aria-label="Digito 4 del PIN" autocomplete="one-time-code" />
+          </div>
         </label>
 
         <label id="pinConfirmField" class="field">
           <span>Confirmar PIN</span>
-          <input id="pinConfirmInput" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="0000"
-            autocomplete="off" />
+          <input id="pinConfirmInput" type="hidden" autocomplete="off" />
+          <div class="pin-code-inputs" data-pin-group="confirm">
+            <input class="pin-digit-input" data-pin-target="confirm" data-pin-index="0" type="password" inputmode="numeric"
+              maxlength="1" pattern="[0-9]" aria-label="Digito 1 de confirmacion" autocomplete="off" />
+            <input class="pin-digit-input" data-pin-target="confirm" data-pin-index="1" type="password" inputmode="numeric"
+              maxlength="1" pattern="[0-9]" aria-label="Digito 2 de confirmacion" autocomplete="off" />
+            <input class="pin-digit-input" data-pin-target="confirm" data-pin-index="2" type="password" inputmode="numeric"
+              maxlength="1" pattern="[0-9]" aria-label="Digito 3 de confirmacion" autocomplete="off" />
+            <input class="pin-digit-input" data-pin-target="confirm" data-pin-index="3" type="password" inputmode="numeric"
+              maxlength="1" pattern="[0-9]" aria-label="Digito 4 de confirmacion" autocomplete="off" />
+          </div>
         </label>
 
         <div class="actions">

@@ -17,6 +17,7 @@ import {
   buildWhatsappReplyPrompt,
   buildWhatsappSignalKey,
   getWhatsappChatKey,
+  hasWhatsappConversationHistory,
   isWhatsappContext
 } from './services/site-context/whatsapp-site-context.js';
 
@@ -38,13 +39,16 @@ export function initPanelApp() {
     USER: 'user',
     ASSISTANT: 'assistant',
     AI_MODELS: 'ai_models',
-    TABS: 'tabs'
+    TABS: 'tabs',
+    SYSTEM_VARIABLES: 'system_variables'
   });
   const PIN_MODAL_MODES = Object.freeze({
     SETUP: 'setup',
     UNLOCK: 'unlock'
   });
   const SECRET_KEY_PREFIX = 'ai-key::';
+  const PIN_UNLOCK_SESSION_STORAGE_KEY = 'greenstudio_pin_unlock_session_v1';
+  const PIN_UNLOCK_SESSION_TTL_MS = 1000 * 60 * 60 * 8;
   const SCREEN_INDEX = Object.freeze({
     onboarding: 0,
     home: 1,
@@ -119,6 +123,7 @@ export function initPanelApp() {
   const MAX_IMAGE_FILES = 10;
   const MAX_TABS_FOR_AI_SUMMARY = 20;
   const TAB_SUMMARY_MAX_CHARS = 160;
+  const INCREMENTAL_HISTORY_INGEST_LIMIT = 80;
 
   const DEFAULT_OLLAMA_MODEL = 'gpt-oss:20b';
   const DEFAULT_PRIMARY_MODEL_ID = 'model-local-ollama';
@@ -145,6 +150,12 @@ export function initPanelApp() {
     SETTINGS_KEY: 'panel',
     SECRET_STORE: 'panel_secrets'
   });
+  const INITIAL_CONTEXT_SYNC_STORAGE_KEY = 'greenstudio_initial_context_sync_v1';
+  const INITIAL_CONTEXT_SYNC_VERSION = 1;
+  const INITIAL_CONTEXT_SYNC_STALE_MS = 1000 * 60 * 12;
+  const INITIAL_CONTEXT_SYNC_HISTORY_LIMIT = 320;
+  const INITIAL_CONTEXT_SYNC_HISTORY_DAYS = 45;
+  const INITIAL_CONTEXT_SYNC_CHAT_LIMIT = 140;
 
   function createPreloadedModelProfiles() {
     const now = Date.now();
@@ -253,6 +264,7 @@ export function initPanelApp() {
   const whatsappSuggestionStatus = document.getElementById('whatsappSuggestionStatus');
   const whatsappSuggestionRunBtn = document.getElementById('whatsappSuggestionRunBtn');
   const whatsappSuggestionRefreshBtn = document.getElementById('whatsappSuggestionRefreshBtn');
+  const whatsappSuggestionCloseBtn = document.getElementById('whatsappSuggestionCloseBtn');
 
   const imageInput = document.getElementById('imageInput');
   const imagePickBtn = document.getElementById('imagePickBtn');
@@ -282,6 +294,10 @@ export function initPanelApp() {
   const aiPrimaryModelSelect = document.getElementById('aiPrimaryModelSelect');
   const settingsAddModelBtn = document.getElementById('settingsAddModelBtn');
   const settingsRefreshLocalModelsBtn = document.getElementById('settingsRefreshLocalModelsBtn');
+  const aiModelsAccessWall = document.getElementById('aiModelsAccessWall');
+  const aiModelsAccessCopy = document.getElementById('aiModelsAccessCopy');
+  const aiModelsAccessActionBtn = document.getElementById('aiModelsAccessActionBtn');
+  const aiModelsProtectedContent = document.getElementById('aiModelsProtectedContent');
   const aiModelsList = document.getElementById('aiModelsList');
   const aiModelsStatus = document.getElementById('aiModelsStatus');
   const settingsPinStatus = document.getElementById('settingsPinStatus');
@@ -289,6 +305,7 @@ export function initPanelApp() {
   const settingsUnlockPinBtn = document.getElementById('settingsUnlockPinBtn');
   const settingsLockPinBtn = document.getElementById('settingsLockPinBtn');
   const tabsContextJson = document.getElementById('tabsContextJson');
+  const systemVariablesList = document.getElementById('systemVariablesList');
   const modelConfigModal = document.getElementById('modelConfigModal');
   const modelConfigTitle = document.getElementById('modelConfigTitle');
   const modelProviderSelect = document.getElementById('modelProviderSelect');
@@ -307,8 +324,10 @@ export function initPanelApp() {
   const pinModalTitle = document.getElementById('pinModalTitle');
   const pinModalCopy = document.getElementById('pinModalCopy');
   const pinInput = document.getElementById('pinInput');
+  const pinDigitInputs = Array.from(document.querySelectorAll('input[data-pin-target="pin"]'));
   const pinConfirmField = document.getElementById('pinConfirmField');
   const pinConfirmInput = document.getElementById('pinConfirmInput');
+  const pinConfirmDigitInputs = Array.from(document.querySelectorAll('input[data-pin-target="confirm"]'));
   const pinModalCloseBtn = document.getElementById('pinModalCloseBtn');
   const pinModalSaveBtn = document.getElementById('pinModalSaveBtn');
   const pinModalCancelBtn = document.getElementById('pinModalCancelBtn');
@@ -332,6 +351,8 @@ export function initPanelApp() {
   let modelModalState = { mode: 'add', profileId: '' };
   let pinModalMode = PIN_MODAL_MODES.SETUP;
   let unlockedPin = '';
+  let unlockedPinExpiresAt = 0;
+  let pinModalRequest = null;
   let isGeneratingChat = false;
   let pendingChatRenderRaf = 0;
   let modelWarmupPromise = null;
@@ -356,7 +377,9 @@ export function initPanelApp() {
     loading: false
   };
   let whatsappSuggestionToken = 0;
+  let whatsappSuggestionDismissedSignalKey = '';
   let contextIngestionPromise = Promise.resolve();
+  let initialContextSyncPromise = null;
 
   const prefersDarkMedia =
     typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -404,6 +427,338 @@ export function initPanelApp() {
     }
 
     console.warn(`${LOG_PREFIX} ${message}`, payload);
+  }
+
+  function toSafeLogText(value, limit = 180) {
+    const text = String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) {
+      return '';
+    }
+    return text.slice(0, limit);
+  }
+
+  function normalizePinDigits(value, max = 4) {
+    return String(value || '')
+      .replace(/\D/g, '')
+      .slice(0, Math.max(0, Number(max) || 4));
+  }
+
+  function readPinDigits(inputs) {
+    return (Array.isArray(inputs) ? inputs : [])
+      .map((item) => normalizePinDigits(item?.value || '', 1))
+      .join('');
+  }
+
+  function setPinDigits(inputs, value) {
+    const safeInputs = Array.isArray(inputs) ? inputs : [];
+    const digits = normalizePinDigits(value, safeInputs.length || 4).split('');
+    safeInputs.forEach((input, index) => {
+      if (!input) {
+        return;
+      }
+      input.value = digits[index] || '';
+    });
+  }
+
+  function syncPinHiddenInputs() {
+    if (pinInput) {
+      pinInput.value = readPinDigits(pinDigitInputs);
+    }
+    if (pinConfirmInput) {
+      pinConfirmInput.value = readPinDigits(pinConfirmDigitInputs);
+    }
+  }
+
+  function fillPinDigitsFrom(inputs, startIndex, text) {
+    const safeInputs = Array.isArray(inputs) ? inputs : [];
+    const digits = normalizePinDigits(text, safeInputs.length);
+    if (!digits || !safeInputs.length) {
+      return;
+    }
+
+    let cursor = Math.max(0, Number(startIndex) || 0);
+    for (const digit of digits) {
+      if (cursor >= safeInputs.length) {
+        break;
+      }
+      const target = safeInputs[cursor];
+      if (target && !target.disabled) {
+        target.value = digit;
+      }
+      cursor += 1;
+    }
+
+    const focusIndex = Math.min(cursor, safeInputs.length - 1);
+    const focusTarget = safeInputs[focusIndex];
+    focusTarget?.focus();
+    focusTarget?.select?.();
+  }
+
+  function clearPinInputs() {
+    setPinDigits(pinDigitInputs, '');
+    setPinDigits(pinConfirmDigitInputs, '');
+    syncPinHiddenInputs();
+  }
+
+  function focusPinFirstDigit() {
+    const first = pinDigitInputs.find((item) => item && !item.disabled) || null;
+    first?.focus();
+    first?.select?.();
+  }
+
+  function wirePinDigitGroup(inputs) {
+    const safeInputs = Array.isArray(inputs) ? inputs : [];
+    if (!safeInputs.length) {
+      return;
+    }
+
+    safeInputs.forEach((input, index) => {
+      if (!input) {
+        return;
+      }
+
+      input.addEventListener('input', (event) => {
+        const target = event.currentTarget;
+        if (!(target instanceof HTMLInputElement)) {
+          return;
+        }
+
+        const raw = String(target.value || '');
+        const digits = normalizePinDigits(raw, safeInputs.length);
+        if (!digits) {
+          target.value = '';
+          syncPinHiddenInputs();
+          return;
+        }
+
+        if (digits.length > 1) {
+          fillPinDigitsFrom(safeInputs, index, digits);
+          syncPinHiddenInputs();
+          return;
+        }
+
+        target.value = digits;
+        const next = safeInputs[index + 1];
+        next?.focus();
+        next?.select?.();
+        syncPinHiddenInputs();
+      });
+
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Backspace') {
+          const hasValue = Boolean(normalizePinDigits(input.value || '', 1));
+          if (hasValue) {
+            input.value = '';
+            syncPinHiddenInputs();
+            event.preventDefault();
+            return;
+          }
+
+          const previous = safeInputs[index - 1];
+          if (previous) {
+            previous.value = '';
+            previous.focus();
+            previous.select?.();
+            syncPinHiddenInputs();
+            event.preventDefault();
+          }
+          return;
+        }
+
+        if (event.key === 'ArrowLeft') {
+          const previous = safeInputs[index - 1];
+          if (previous) {
+            previous.focus();
+            previous.select?.();
+            event.preventDefault();
+          }
+          return;
+        }
+
+        if (event.key === 'ArrowRight') {
+          const next = safeInputs[index + 1];
+          if (next) {
+            next.focus();
+            next.select?.();
+            event.preventDefault();
+          }
+          return;
+        }
+
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          savePinFromModal();
+          return;
+        }
+
+        if (event.key.length === 1 && /\D/.test(event.key)) {
+          event.preventDefault();
+        }
+      });
+
+      input.addEventListener('paste', (event) => {
+        const text = event.clipboardData?.getData('text') || '';
+        if (!text) {
+          return;
+        }
+        event.preventDefault();
+        fillPinDigitsFrom(safeInputs, index, text);
+        syncPinHiddenInputs();
+      });
+    });
+  }
+
+  function readChromeLocal(defaultValue) {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.local) {
+        resolve(defaultValue);
+        return;
+      }
+
+      chrome.storage.local.get(defaultValue, (items) => {
+        if (chrome.runtime.lastError) {
+          resolve(defaultValue);
+          return;
+        }
+
+        resolve(items);
+      });
+    });
+  }
+
+  function writeChromeLocal(patch) {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.local) {
+        resolve(false);
+        return;
+      }
+
+      chrome.storage.local.set(patch, () => {
+        resolve(!chrome.runtime.lastError);
+      });
+    });
+  }
+
+  function readChromeSession(defaultValue) {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.session) {
+        resolve(defaultValue);
+        return;
+      }
+
+      chrome.storage.session.get(defaultValue, (items) => {
+        if (chrome.runtime.lastError) {
+          resolve(defaultValue);
+          return;
+        }
+
+        resolve(items);
+      });
+    });
+  }
+
+  function writeChromeSession(patch) {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.session) {
+        resolve(false);
+        return;
+      }
+
+      chrome.storage.session.set(patch, () => {
+        resolve(!chrome.runtime.lastError);
+      });
+    });
+  }
+
+  function removeChromeSession(keys) {
+    const list = (Array.isArray(keys) ? keys : [keys]).map((item) => String(item || '').trim()).filter(Boolean);
+    if (!list.length) {
+      return Promise.resolve(false);
+    }
+
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.session) {
+        resolve(false);
+        return;
+      }
+
+      chrome.storage.session.remove(list, () => {
+        resolve(!chrome.runtime.lastError);
+      });
+    });
+  }
+
+  function normalizeInitialContextSyncState(rawState) {
+    const state = rawState && typeof rawState === 'object' ? rawState : {};
+    const sourceCounts = state.sourceCounts && typeof state.sourceCounts === 'object' ? state.sourceCounts : {};
+    const status = String(state.status || '').toLowerCase();
+    const validStatus = ['pending', 'running', 'done', 'failed'].includes(status) ? status : 'pending';
+
+    return {
+      version: Number(state.version) || INITIAL_CONTEXT_SYNC_VERSION,
+      status: validStatus,
+      reason: String(state.reason || ''),
+      startedAt: Math.max(0, Number(state.startedAt) || 0),
+      completedAt: Math.max(0, Number(state.completedAt) || 0),
+      updatedAt: Math.max(0, Number(state.updatedAt) || 0),
+      error: String(state.error || ''),
+      sourceCounts: {
+        tabs: Math.max(0, Number(sourceCounts.tabs) || 0),
+        history: Math.max(0, Number(sourceCounts.history) || 0),
+        chat: Math.max(0, Number(sourceCounts.chat) || 0),
+        profile: Math.max(0, Number(sourceCounts.profile) || 0),
+        facts: Math.max(0, Number(sourceCounts.facts) || 0)
+      }
+    };
+  }
+
+  async function readInitialContextSyncState() {
+    const payload = await readChromeLocal({
+      [INITIAL_CONTEXT_SYNC_STORAGE_KEY]: null
+    });
+    return normalizeInitialContextSyncState(payload?.[INITIAL_CONTEXT_SYNC_STORAGE_KEY]);
+  }
+
+  async function writeInitialContextSyncState(patch = {}) {
+    const current = await readInitialContextSyncState();
+    const safePatch = patch && typeof patch === 'object' ? patch : {};
+    const sourceCountsPatch =
+      safePatch.sourceCounts && typeof safePatch.sourceCounts === 'object' ? safePatch.sourceCounts : {};
+    const next = normalizeInitialContextSyncState({
+      ...current,
+      ...safePatch,
+      version: INITIAL_CONTEXT_SYNC_VERSION,
+      sourceCounts: {
+        ...current.sourceCounts,
+        ...sourceCountsPatch
+      },
+      updatedAt: Date.now()
+    });
+
+    await writeChromeLocal({
+      [INITIAL_CONTEXT_SYNC_STORAGE_KEY]: next
+    });
+
+    return next;
+  }
+
+  function shouldRunInitialContextSync(state) {
+    const current = normalizeInitialContextSyncState(state);
+    if (current.version !== INITIAL_CONTEXT_SYNC_VERSION) {
+      return true;
+    }
+
+    if (current.status === 'done') {
+      return false;
+    }
+
+    if (current.status === 'running' && Date.now() - current.startedAt < INITIAL_CONTEXT_SYNC_STALE_MS) {
+      return false;
+    }
+
+    return true;
   }
 
   function focusChatInput() {
@@ -1135,6 +1490,7 @@ export function initPanelApp() {
     populateSettingsForm();
     setSettingsPage(SETTINGS_PAGES.HOME);
     renderAiModelsSettings();
+    renderSystemVariables();
     setScreen('settings');
   }
 
@@ -1214,6 +1570,17 @@ export function initPanelApp() {
     if (settingsSectionBackBtn) {
       settingsSectionBackBtn.hidden = safePage === SETTINGS_PAGES.HOME;
     }
+
+    if (safePage === SETTINGS_PAGES.AI_MODELS) {
+      renderAiModelsSettings();
+      if (isAiModelsAccessLocked()) {
+        aiModelsAccessActionBtn?.focus();
+      }
+    }
+
+    if (safePage === SETTINGS_PAGES.SYSTEM_VARIABLES) {
+      renderSystemVariables();
+    }
   }
 
   function getModelProfiles() {
@@ -1280,7 +1647,7 @@ export function initPanelApp() {
       return false;
     }
 
-    return isPinUnlocked();
+    return true;
   }
 
   function getProviderDefaultModel(providerId) {
@@ -1309,19 +1676,43 @@ export function initPanelApp() {
     }
 
     const preferred = getPrimaryProfileId();
-    const preferredProfile = profiles.find((item) => item.id === preferred) || null;
-    if (preferredProfile && profileCanBeUsed(preferredProfile)) {
+    const preferredProfile = profiles.find((item) => item.id === preferred);
+    if (preferredProfile) {
       return preferredProfile.id;
     }
 
+    return profiles[0].id;
+  }
+
+  function resolveUsableProfileId() {
+    const profiles = getModelProfiles();
+    if (!profiles.length) {
+      return '';
+    }
+
     const firstReady = profiles.find((item) => profileCanBeUsed(item));
-    return firstReady ? firstReady.id : profiles[0].id;
+    return firstReady ? firstReady.id : resolvePrimaryProfileId();
+  }
+
+  function resolveModelProfileForInference() {
+    const activeProfile = getActiveModelProfile();
+    if (activeProfile && profileCanBeUsed(activeProfile)) {
+      return activeProfile;
+    }
+
+    const fallbackId = resolveUsableProfileId();
+    return getModelProfileById(fallbackId);
   }
 
   function syncModelSelectors() {
     const profiles = getModelProfiles();
     const resolvedPrimary = resolvePrimaryProfileId();
-    currentChatModelProfileId = resolvedPrimary || currentChatModelProfileId;
+
+    if (!profiles.length) {
+      currentChatModelProfileId = '';
+    } else if (!profiles.some((item) => item.id === currentChatModelProfileId)) {
+      currentChatModelProfileId = resolvedPrimary;
+    }
 
     if (chatModelSelect) {
       chatModelSelect.textContent = '';
@@ -1330,13 +1721,15 @@ export function initPanelApp() {
         const option = document.createElement('option');
         option.value = profile.id;
         option.textContent = getModelProfileLabel(profile);
-        option.disabled = !profileCanBeUsed(profile);
+        option.disabled = !profileCanBeUsed(profile) && profile.id !== currentChatModelProfileId;
         chatModelSelect.appendChild(option);
       }
 
-      chatModelSelect.value = profiles.some((item) => item.id === currentChatModelProfileId)
+      const selectedId = profiles.some((item) => item.id === currentChatModelProfileId)
         ? currentChatModelProfileId
         : resolvedPrimary;
+      chatModelSelect.value = selectedId;
+      currentChatModelProfileId = selectedId;
     }
 
     if (aiPrimaryModelSelect) {
@@ -1346,7 +1739,7 @@ export function initPanelApp() {
         const option = document.createElement('option');
         option.value = profile.id;
         option.textContent = getModelProfileLabel(profile);
-        option.disabled = !profileCanBeUsed(profile);
+        option.disabled = !profileCanBeUsed(profile) && profile.id !== resolvedPrimary;
         aiPrimaryModelSelect.appendChild(option);
       }
 
@@ -1364,12 +1757,147 @@ export function initPanelApp() {
     return pinCryptoService.isConfigured(getSecurityConfig());
   }
 
-  function isPinUnlocked() {
-    return isPinConfigured() && Boolean(unlockedPin);
+  function normalizePinUnlockSession(rawValue) {
+    const raw = rawValue && typeof rawValue === 'object' ? rawValue : {};
+    const pin = String(raw.pin || '').trim();
+    const expiresAt = Math.max(0, Number(raw.expiresAt) || 0);
+
+    if (!/^\d{4}$/.test(pin) || !expiresAt) {
+      return null;
+    }
+
+    return {
+      pin,
+      expiresAt
+    };
   }
 
-  function resetPinSession() {
+  async function readPinUnlockSession() {
+    const payload = await readChromeSession({
+      [PIN_UNLOCK_SESSION_STORAGE_KEY]: null
+    });
+    return normalizePinUnlockSession(payload?.[PIN_UNLOCK_SESSION_STORAGE_KEY]);
+  }
+
+  async function writePinUnlockSession(pin, expiresAt) {
+    const safePin = pinCryptoService.validatePin(pin);
+    const safeExpiresAt = Math.max(Date.now() + 60000, Number(expiresAt) || 0);
+
+    return writeChromeSession({
+      [PIN_UNLOCK_SESSION_STORAGE_KEY]: {
+        pin: safePin,
+        expiresAt: safeExpiresAt,
+        updatedAt: Date.now()
+      }
+    });
+  }
+
+  async function clearPinUnlockSession() {
+    await removeChromeSession(PIN_UNLOCK_SESSION_STORAGE_KEY);
+  }
+
+  async function setPinUnlockedSession(pin, ttlMs = PIN_UNLOCK_SESSION_TTL_MS) {
+    const safePin = pinCryptoService.validatePin(pin);
+    const safeTtl = Math.max(60000, Number(ttlMs) || PIN_UNLOCK_SESSION_TTL_MS);
+    const expiresAt = Date.now() + safeTtl;
+
+    unlockedPin = safePin;
+    unlockedPinExpiresAt = expiresAt;
+    await writePinUnlockSession(safePin, expiresAt);
+  }
+
+  async function hydratePinUnlockSession() {
+    if (!isPinConfigured()) {
+      resetPinSession();
+      return false;
+    }
+
+    const persistedSession = await readPinUnlockSession();
+    if (!persistedSession) {
+      unlockedPin = '';
+      unlockedPinExpiresAt = 0;
+      return false;
+    }
+
+    if (persistedSession.expiresAt <= Date.now()) {
+      resetPinSession();
+      return false;
+    }
+
+    const isValid = await pinCryptoService.verifyPin(persistedSession.pin, getSecurityConfig());
+    if (!isValid) {
+      resetPinSession();
+      return false;
+    }
+
+    unlockedPin = persistedSession.pin;
+    unlockedPinExpiresAt = persistedSession.expiresAt;
+    return true;
+  }
+
+  function isPinUnlocked() {
+    if (!isPinConfigured() || !unlockedPin) {
+      return false;
+    }
+
+    if (unlockedPinExpiresAt > 0 && Date.now() > unlockedPinExpiresAt) {
+      resetPinSession();
+      return false;
+    }
+
+    return true;
+  }
+
+  function resetPinSession(options = {}) {
+    const clearPersisted = options.clearPersisted !== false;
     unlockedPin = '';
+    unlockedPinExpiresAt = 0;
+
+    if (clearPersisted) {
+      void clearPinUnlockSession();
+    }
+  }
+
+  function getAiModelsAccessMode() {
+    if (!isPinConfigured()) {
+      return PIN_MODAL_MODES.SETUP;
+    }
+
+    if (!isPinUnlocked()) {
+      return PIN_MODAL_MODES.UNLOCK;
+    }
+
+    return '';
+  }
+
+  function isAiModelsAccessLocked() {
+    return Boolean(getAiModelsAccessMode());
+  }
+
+  function renderAiModelsAccessWall() {
+    const mode = getAiModelsAccessMode();
+    const isLocked = Boolean(mode);
+
+    if (aiModelsAccessWall) {
+      aiModelsAccessWall.hidden = !isLocked;
+    }
+    if (aiModelsProtectedContent) {
+      aiModelsProtectedContent.hidden = isLocked;
+    }
+
+    if (!isLocked) {
+      return;
+    }
+
+    if (aiModelsAccessCopy) {
+      aiModelsAccessCopy.textContent =
+        mode === PIN_MODAL_MODES.SETUP
+          ? 'Configura un PIN de 4 digitos para proteger API keys y habilitar AI Models.'
+          : 'Ingresa tu PIN para desbloquear el acceso a AI Models y usar API keys.';
+    }
+    if (aiModelsAccessActionBtn) {
+      aiModelsAccessActionBtn.textContent = mode === PIN_MODAL_MODES.SETUP ? 'Configurar PIN' : 'Desbloquear PIN';
+    }
   }
 
   function renderPinStatus() {
@@ -1399,8 +1927,14 @@ export function initPanelApp() {
   function renderAiModelsSettings() {
     syncModelSelectors();
     renderPinStatus();
+    renderAiModelsAccessWall();
 
     if (!aiModelsList) {
+      return;
+    }
+
+    if (isAiModelsAccessLocked()) {
+      aiModelsList.textContent = '';
       return;
     }
 
@@ -1616,7 +2150,7 @@ export function initPanelApp() {
       }
 
       try {
-        await saveApiKeyForProfile(profile.id, apiKey);
+        await saveApiKeyForProfile(profile.id, apiKey, { statusTarget: modelConfigStatus });
         renderAiModelsSettings();
         closeModelConfigModal();
         setStatus(aiModelsStatus, `API key actualizada para ${profile.name}.`);
@@ -1640,13 +2174,11 @@ export function initPanelApp() {
     }
 
     if (needsApiKey && apiKey) {
-      if (!isPinConfigured()) {
-        setStatus(modelConfigStatus, 'Configura un PIN antes de guardar API keys.', true);
-        return;
-      }
-
-      if (!isPinUnlocked()) {
-        setStatus(modelConfigStatus, 'Desbloquea el PIN antes de guardar API keys.', true);
+      const pinReady = await ensurePinAccess({
+        allowSetup: true,
+        statusTarget: modelConfigStatus
+      });
+      if (!pinReady) {
         return;
       }
     }
@@ -1686,7 +2218,7 @@ export function initPanelApp() {
 
     if (needsApiKey && apiKey) {
       try {
-        await saveApiKeyForProfile(profile.id, apiKey);
+        await saveApiKeyForProfile(profile.id, apiKey, { statusTarget: modelConfigStatus });
       } catch (error) {
         const message = error instanceof Error ? error.message : 'No se pudo guardar API key.';
         setStatus(modelConfigStatus, message, true);
@@ -1717,7 +2249,7 @@ export function initPanelApp() {
       return;
     }
 
-    const fallbackPrimary = resolvePrimaryProfileId();
+    const fallbackPrimary = resolveUsableProfileId();
     if (fallbackPrimary && fallbackPrimary !== getPrimaryProfileId()) {
       await updatePrimaryModel(fallbackPrimary);
     } else {
@@ -1728,10 +2260,86 @@ export function initPanelApp() {
     setStatus(aiModelsStatus, `API key eliminada para ${profile.name}.`);
   }
 
+  function resolvePinModalRequest(granted) {
+    if (!pinModalRequest) {
+      return;
+    }
+
+    const resolver = pinModalRequest.resolve;
+    pinModalRequest = null;
+    resolver(Boolean(granted));
+  }
+
+  function requestPinModal(mode) {
+    const targetMode = mode === PIN_MODAL_MODES.SETUP ? PIN_MODAL_MODES.SETUP : PIN_MODAL_MODES.UNLOCK;
+    if (targetMode === PIN_MODAL_MODES.UNLOCK && isPinUnlocked()) {
+      return Promise.resolve(true);
+    }
+
+    if (pinModalRequest) {
+      if (pinModalMode !== targetMode) {
+        openPinModal(targetMode);
+      }
+      return pinModalRequest.promise;
+    }
+
+    let resolver = () => {};
+    const promise = new Promise((resolve) => {
+      resolver = resolve;
+    });
+    pinModalRequest = {
+      mode: targetMode,
+      promise,
+      resolve: resolver
+    };
+
+    openPinModal(targetMode);
+    return promise;
+  }
+
+  async function ensurePinAccess(options = {}) {
+    const allowSetup = options.allowSetup === true;
+    const statusTarget = options.statusTarget || null;
+
+    if (isPinUnlocked()) {
+      return true;
+    }
+
+    if (!isPinConfigured()) {
+      if (!allowSetup) {
+        if (statusTarget) {
+          setStatus(statusTarget, 'Configura un PIN de seguridad para continuar.', true);
+        }
+        return false;
+      }
+
+      const setupReady = await requestPinModal(PIN_MODAL_MODES.SETUP);
+      if (!setupReady || !isPinUnlocked()) {
+        if (statusTarget) {
+          setStatus(statusTarget, 'Se requiere PIN para continuar.', true);
+        }
+        return false;
+      }
+
+      return true;
+    }
+
+    const unlocked = await requestPinModal(PIN_MODAL_MODES.UNLOCK);
+    if (!unlocked || !isPinUnlocked()) {
+      if (statusTarget) {
+        setStatus(statusTarget, 'Se requiere PIN para continuar.', true);
+      }
+      return false;
+    }
+
+    return true;
+  }
+
   function openPinModal(mode = PIN_MODAL_MODES.SETUP) {
     pinModalMode = mode === PIN_MODAL_MODES.UNLOCK ? PIN_MODAL_MODES.UNLOCK : PIN_MODAL_MODES.SETUP;
+    const unlockMode = pinModalMode === PIN_MODAL_MODES.UNLOCK;
 
-    if (pinModalMode === PIN_MODAL_MODES.UNLOCK) {
+    if (unlockMode) {
       if (pinModalTitle) {
         pinModalTitle.textContent = 'Desbloquear PIN';
       }
@@ -1740,9 +2348,6 @@ export function initPanelApp() {
       }
       if (pinModalSaveBtn) {
         pinModalSaveBtn.textContent = 'Desbloquear';
-      }
-      if (pinConfirmField) {
-        pinConfirmField.hidden = true;
       }
     } else {
       if (pinModalTitle) {
@@ -1755,10 +2360,21 @@ export function initPanelApp() {
       if (pinModalSaveBtn) {
         pinModalSaveBtn.textContent = isPinConfigured() ? 'Cambiar PIN' : 'Guardar PIN';
       }
-      if (pinConfirmField) {
-        pinConfirmField.hidden = false;
-      }
     }
+
+    if (pinConfirmField) {
+      pinConfirmField.hidden = unlockMode;
+      pinConfirmField.style.display = unlockMode ? 'none' : '';
+      pinConfirmField.setAttribute('aria-hidden', unlockMode ? 'true' : 'false');
+    }
+
+    pinConfirmDigitInputs.forEach((input) => {
+      if (!input) {
+        return;
+      }
+      input.disabled = unlockMode;
+      input.tabIndex = unlockMode ? -1 : 0;
+    });
 
     if (pinInput) {
       pinInput.value = '';
@@ -1766,20 +2382,26 @@ export function initPanelApp() {
     if (pinConfirmInput) {
       pinConfirmInput.value = '';
     }
+    clearPinInputs();
     setStatus(pinModalStatus, '');
 
     if (pinModal) {
       pinModal.hidden = false;
     }
 
-    pinInput?.focus();
+    focusPinFirstDigit();
   }
 
-  function closePinModal() {
+  function closePinModal(options = {}) {
+    const keepRequest = options.keepRequest === true;
     if (pinModal) {
       pinModal.hidden = true;
     }
     setStatus(pinModalStatus, '');
+
+    if (!keepRequest) {
+      resolvePinModalRequest(false);
+    }
   }
 
   async function rotateEncryptedApiKeys({ oldPin, oldConfig, newPin, newConfig }) {
@@ -1805,7 +2427,8 @@ export function initPanelApp() {
   }
 
   async function savePinFromModal() {
-    const pin = String(pinInput?.value || '').trim();
+    syncPinHiddenInputs();
+    const pin = readPinDigits(pinDigitInputs);
 
     try {
       pinCryptoService.validatePin(pin);
@@ -1823,16 +2446,17 @@ export function initPanelApp() {
         return;
       }
 
-      unlockedPin = pin;
+      await setPinUnlockedSession(pin);
       syncModelSelectors();
       renderAiModelsSettings();
       renderPinStatus();
-      closePinModal();
+      resolvePinModalRequest(true);
+      closePinModal({ keepRequest: true });
       setStatus(aiModelsStatus, 'PIN desbloqueado. Ya puedes usar modelos externos.');
       return;
     }
 
-    const confirmPin = String(pinConfirmInput?.value || '').trim();
+    const confirmPin = readPinDigits(pinConfirmDigitInputs);
     if (pin !== confirmPin) {
       setStatus(pinModalStatus, 'El PIN y la confirmacion no coinciden.', true);
       return;
@@ -1855,7 +2479,7 @@ export function initPanelApp() {
         return;
       }
 
-      unlockedPin = pin;
+      await setPinUnlockedSession(pin);
 
       if (hadPin && oldConfig) {
         await rotateEncryptedApiKeys({ oldPin, oldConfig, newPin: pin, newConfig });
@@ -1863,7 +2487,8 @@ export function initPanelApp() {
       syncModelSelectors();
       renderAiModelsSettings();
       renderPinStatus();
-      closePinModal();
+      resolvePinModalRequest(true);
+      closePinModal({ keepRequest: true });
       setStatus(aiModelsStatus, hadPin ? 'PIN actualizado.' : 'PIN configurado.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo configurar el PIN.';
@@ -2073,7 +2698,8 @@ export function initPanelApp() {
     return persistModelProfiles(profiles);
   }
 
-  async function saveApiKeyForProfile(profileId, apiKey) {
+  async function saveApiKeyForProfile(profileId, apiKey, options = {}) {
+    const statusTarget = options?.statusTarget || null;
     const profile = getModelProfileById(profileId);
     if (!profile) {
       throw new Error('Modelo no encontrado.');
@@ -2083,12 +2709,12 @@ export function initPanelApp() {
       return true;
     }
 
-    if (!isPinConfigured()) {
-      throw new Error('Configura un PIN antes de guardar API keys.');
-    }
-
-    if (!isPinUnlocked()) {
-      throw new Error('Desbloquea el PIN para guardar API keys.');
+    const pinReady = await ensurePinAccess({
+      allowSetup: true,
+      statusTarget
+    });
+    if (!pinReady) {
+      throw new Error('Operacion cancelada. Se requiere PIN para guardar API keys.');
     }
 
     const token = String(apiKey || '').trim();
@@ -2122,7 +2748,8 @@ export function initPanelApp() {
     return patchModelProfile(profile.id, { hasApiKey: false });
   }
 
-  async function getApiKeyForProfile(profile) {
+  async function getApiKeyForProfile(profile, options = {}) {
+    const statusTarget = options?.statusTarget || null;
     const safeProfile = aiProviderService.normalizeProfile(profile);
 
     if (!aiProviderService.requiresApiKey(safeProfile.provider)) {
@@ -2137,8 +2764,12 @@ export function initPanelApp() {
       throw new Error('Configura un PIN de seguridad para usar API keys.');
     }
 
-    if (!isPinUnlocked()) {
-      throw new Error('PIN bloqueado. Ve a Settings > AI Models y desbloquea.');
+    const pinReady = await ensurePinAccess({
+      allowSetup: false,
+      statusTarget
+    });
+    if (!pinReady) {
+      throw new Error('Operacion cancelada. Se requiere PIN para usar API keys.');
     }
 
     const payload = await readSecret(buildProfileSecretKey(safeProfile.id));
@@ -2448,14 +3079,29 @@ export function initPanelApp() {
       '```',
       'Tools disponibles:',
       '- browser.listTabs',
+      '- browser.getRecentHistory (args: days, limit, text)',
+      '- browser.queryHistoryRange (args: preset=today|yesterday|this_week|last_week|last_friday_afternoon o startISO/endISO/startTime/endTime, days, text, limit, sort)',
+      '- browser.getOldestHistoryVisit (args: text, chunkSize, maxChunks)',
       '- browser.openNewTab (args: url, active)',
       '- browser.focusTab (args: tabId o urlContains/titleContains)',
       '- browser.closeTab (args: tabId o url/urlContains/titleContains, preventActive)',
       '- browser.closeNonProductivityTabs (args: dryRun, keepPinned, keepActive, onlyCurrentWindow)',
+      'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
       'No inventes tools fuera de esa lista.',
       buildActiveTabsSystemContext(),
       buildRecentHistorySystemContext()
     ].join('\n');
+  }
+
+  function shouldForceHistoryToolForQuery(query) {
+    const text = String(query || '').toLowerCase();
+    if (!text) {
+      return false;
+    }
+
+    return /(historial|visita|naveg|hoy|ayer|semana pasada|viernes|mes pasado|mas antigu|oldest|today|yesterday|last week)/.test(
+      text
+    );
   }
 
   function normalizeLocalToolCall(raw) {
@@ -2464,6 +3110,17 @@ export function initPanelApp() {
     const aliases = {
       'browser.list_tabs': 'browser.listTabs',
       'browser.listTabs': 'browser.listTabs',
+      'browser.get_recent_history': 'browser.getRecentHistory',
+      'browser.getRecentHistory': 'browser.getRecentHistory',
+      'browser.query_history_range': 'browser.queryHistoryRange',
+      'browser.history_range': 'browser.queryHistoryRange',
+      'browser.query_history_by_date_range': 'browser.queryHistoryRange',
+      'browser.queryHistoryByDateRange': 'browser.queryHistoryRange',
+      'browser.historyByRange': 'browser.queryHistoryRange',
+      'browser.queryHistoryRange': 'browser.queryHistoryRange',
+      'browser.get_oldest_history_visit': 'browser.getOldestHistoryVisit',
+      'browser.oldest_history_visit': 'browser.getOldestHistoryVisit',
+      'browser.getOldestHistoryVisit': 'browser.getOldestHistoryVisit',
       'browser.open_new_tab': 'browser.openNewTab',
       'browser.openTab': 'browser.openNewTab',
       'browser.openNewTab': 'browser.openNewTab',
@@ -2627,6 +3284,10 @@ export function initPanelApp() {
     let dynamicSystemPrompt = systemPrompt;
     let contextUsed = [];
     const localToolPrompt = selectedChatTool === 'chat' ? buildLocalToolSystemPrompt() : '';
+    const forceHistoryTools = selectedChatTool === 'chat' && shouldForceHistoryToolForQuery(userQuery);
+    const historyToolDirective = forceHistoryTools
+      ? 'La consulta del usuario parece temporal sobre historial. Debes ejecutar una tool de historial antes de responder.'
+      : '';
 
     try {
       const identityPayload = await contextMemoryService.buildDynamicIdentityHeader(userQuery, {
@@ -2636,9 +3297,12 @@ export function initPanelApp() {
       const contextHits = Array.isArray(identityPayload?.contextHits) ? identityPayload.contextHits : [];
       contextUsed = contextHits.map((item) => String(item?.id || '').trim()).filter(Boolean);
 
-      dynamicSystemPrompt = [contextHeader, localToolPrompt, systemPrompt].filter(Boolean).join('\n\n').trim();
+      dynamicSystemPrompt = [contextHeader, localToolPrompt, historyToolDirective, systemPrompt]
+        .filter(Boolean)
+        .join('\n\n')
+        .trim();
     } catch (_) {
-      dynamicSystemPrompt = [localToolPrompt, systemPrompt].filter(Boolean).join('\n\n').trim();
+      dynamicSystemPrompt = [localToolPrompt, historyToolDirective, systemPrompt].filter(Boolean).join('\n\n').trim();
     }
 
     const context = chatHistory
@@ -2679,7 +3343,7 @@ export function initPanelApp() {
       throw new Error('No hay modelo configurado.');
     }
 
-    const apiKey = await getApiKeyForProfile(activeProfile);
+    const apiKey = await getApiKeyForProfile(activeProfile, { statusTarget: chatStatus });
 
     const handleChunk = (chunk) => {
       if (!chunk) {
@@ -2913,6 +3577,205 @@ export function initPanelApp() {
     }
   }
 
+  function formatSystemVariableValue(value) {
+    if (value === null || value === undefined) {
+      return 'null';
+    }
+
+    if (typeof value === 'string') {
+      return value || '""';
+    }
+
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+
+    if (Array.isArray(value)) {
+      return JSON.stringify(value);
+    }
+
+    if (typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+
+    return String(value);
+  }
+
+  function buildSystemVariableEntries() {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const locale = navigator.language || 'n/a';
+    const memoryConfig =
+      typeof contextMemoryService.getConfigSnapshot === 'function' ? contextMemoryService.getConfigSnapshot() : {};
+    const entries = [
+      {
+        scope: 'chat',
+        key: 'MAX_CHAT_CONTEXT_MESSAGES',
+        value: MAX_CHAT_CONTEXT_MESSAGES,
+        description: 'Cantidad de mensajes previos usados para construir el prompt de chat.'
+      },
+      {
+        scope: 'chat',
+        key: 'MAX_CHAT_HISTORY_MESSAGES',
+        value: MAX_CHAT_HISTORY_MESSAGES,
+        description: 'Cantidad maxima de mensajes persistidos en historial local.'
+      },
+      {
+        scope: 'chat',
+        key: 'MAX_LOCAL_TOOL_CALLS',
+        value: MAX_LOCAL_TOOL_CALLS,
+        description: 'Numero maximo de tools locales permitidas por respuesta.'
+      },
+      {
+        scope: 'context',
+        key: 'MAX_TABS_FOR_AI_SUMMARY',
+        value: MAX_TABS_FOR_AI_SUMMARY,
+        description: 'Tabs maximas consideradas para resumen e ingesta de contexto.'
+      },
+      {
+        scope: 'context',
+        key: 'TAB_SUMMARY_MAX_CHARS',
+        value: TAB_SUMMARY_MAX_CHARS,
+        description: 'Longitud maxima por resumen de tab.'
+      },
+      {
+        scope: 'context',
+        key: 'INCREMENTAL_HISTORY_INGEST_LIMIT',
+        value: INCREMENTAL_HISTORY_INGEST_LIMIT,
+        description: 'Registros de historial usados por ingesta incremental en snapshots.'
+      },
+      {
+        scope: 'bootstrap',
+        key: 'INITIAL_CONTEXT_SYNC_HISTORY_LIMIT',
+        value: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT,
+        description: 'Limite de historial para sincronizacion inicial.'
+      },
+      {
+        scope: 'bootstrap',
+        key: 'INITIAL_CONTEXT_SYNC_HISTORY_DAYS',
+        value: INITIAL_CONTEXT_SYNC_HISTORY_DAYS,
+        description: 'Dias de historial consultados en bootstrap inicial.'
+      },
+      {
+        scope: 'bootstrap',
+        key: 'INITIAL_CONTEXT_SYNC_CHAT_LIMIT',
+        value: INITIAL_CONTEXT_SYNC_CHAT_LIMIT,
+        description: 'Mensajes de chat historico considerados en bootstrap inicial.'
+      },
+      {
+        scope: 'bootstrap',
+        key: 'INITIAL_CONTEXT_SYNC_STALE_MS',
+        value: INITIAL_CONTEXT_SYNC_STALE_MS,
+        description: 'TTL para considerar stale una sincronizacion inicial en estado running.'
+      },
+      {
+        scope: 'ai',
+        key: 'DEFAULT_OLLAMA_MODEL',
+        value: DEFAULT_OLLAMA_MODEL,
+        description: 'Modelo local por defecto para perfiles Ollama.'
+      },
+      {
+        scope: 'ai',
+        key: 'LOCAL_MODEL_KEEP_ALIVE',
+        value: LOCAL_MODEL_KEEP_ALIVE,
+        description: 'Tiempo keep-alive del modelo local.'
+      },
+      {
+        scope: 'storage',
+        key: 'CHAT_DB',
+        value: CHAT_DB,
+        description: 'Configuracion de stores IndexedDB para chat/panel/secrets.'
+      },
+      {
+        scope: 'runtime',
+        key: 'panelSettings.language',
+        value: panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE,
+        description: 'Idioma actual configurado del assistant.'
+      },
+      {
+        scope: 'runtime',
+        key: 'panelSettings.displayName',
+        value: panelSettings.displayName || '',
+        description: 'Nombre local del usuario en onboarding/settings.'
+      },
+      {
+        scope: 'runtime',
+        key: 'themeMode',
+        value: themeMode,
+        description: 'Tema visual activo en la UI.'
+      },
+      {
+        scope: 'runtime',
+        key: 'navigator.language',
+        value: locale,
+        description: 'Locale principal del navegador.'
+      },
+      {
+        scope: 'runtime',
+        key: 'Intl.timeZone',
+        value: timezone,
+        description: 'Zona horaria local detectada.'
+      },
+      {
+        scope: 'memory',
+        key: 'contextMemory.config',
+        value: memoryConfig,
+        description: 'Configuracion interna del motor vectorial local.'
+      }
+    ];
+
+    for (const [key, value] of Object.entries(DEFAULT_SETTINGS || {})) {
+      entries.push({
+        scope: 'defaults',
+        key: `DEFAULT_SETTINGS.${key}`,
+        value,
+        description: 'Default de preferencias almacenadas en chrome.storage.sync.'
+      });
+    }
+
+    return entries;
+  }
+
+  function renderSystemVariables() {
+    if (!systemVariablesList) {
+      return;
+    }
+
+    const entries = buildSystemVariableEntries();
+    systemVariablesList.textContent = '';
+
+    for (const item of entries) {
+      const li = document.createElement('li');
+      li.className = 'system-var-item';
+
+      const head = document.createElement('div');
+      head.className = 'system-var-item__head';
+
+      const scope = document.createElement('span');
+      scope.className = 'system-var-item__scope';
+      scope.textContent = String(item.scope || 'system');
+
+      const key = document.createElement('p');
+      key.className = 'system-var-item__key';
+      key.textContent = String(item.key || '');
+
+      head.appendChild(scope);
+      head.appendChild(key);
+
+      const value = document.createElement('pre');
+      value.className = 'system-var-item__value';
+      value.textContent = formatSystemVariableValue(item.value);
+
+      const description = document.createElement('p');
+      description.className = 'system-var-item__desc';
+      description.textContent = String(item.description || '');
+
+      li.appendChild(head);
+      li.appendChild(value);
+      li.appendChild(description);
+      systemVariablesList.appendChild(li);
+    }
+  }
+
   function renderTabsContextJson() {
     if (!tabsContextJson) {
       return;
@@ -2937,7 +3800,9 @@ export function initPanelApp() {
       throw new Error('No hay modelo configurado.');
     }
 
-    const apiKey = await getApiKeyForProfile(profile);
+    const apiKey = await getApiKeyForProfile(profile, {
+      statusTarget: options.statusTarget || null
+    });
     let output = '';
 
     await aiProviderService.streamWithProfile({
@@ -3007,6 +3872,26 @@ export function initPanelApp() {
     return tabContextSnapshot.tabs.find((item) => item.tabId === tabContextSnapshot.activeTabId) || null;
   }
 
+  function summarizeWhatsappSuggestionContext(tabContext, tailLimit = 6) {
+    const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
+    const details = context.details && typeof context.details === 'object' ? context.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const messages = Array.isArray(details.messages) ? details.messages : [];
+
+    return {
+      tabId: Number(context.tabId) || -1,
+      chatKey: toSafeLogText(currentChat.key || getWhatsappChatKey(context), 160),
+      chatTitle: toSafeLogText(currentChat.title || '', 120),
+      chatPhone: toSafeLogText(currentChat.phone || '', 42),
+      messageCount: messages.length,
+      messageTail: messages.slice(-tailLimit).map((item) => ({
+        role: item?.role === 'me' ? 'me' : 'contact',
+        timestamp: toSafeLogText(item?.timestamp || '', 80),
+        text: toSafeLogText(item?.text || '', 160)
+      }))
+    };
+  }
+
   function hideWhatsappSuggestion() {
     whatsappSuggestionToken += 1;
     whatsappSuggestionState = {
@@ -3038,6 +3923,11 @@ export function initPanelApp() {
     }
 
     setStatus(whatsappSuggestionStatus, '');
+  }
+
+  function dismissWhatsappSuggestion() {
+    whatsappSuggestionDismissedSignalKey = whatsappSuggestionState.signalKey || '';
+    hideWhatsappSuggestion();
   }
 
   function setWhatsappSuggestionLoading(tabContext) {
@@ -3104,17 +3994,55 @@ export function initPanelApp() {
     const chatKey = getWhatsappChatKey(tabContext);
     const signalKey = buildWhatsappSignalKey(tabContext);
     const force = Boolean(options.force);
+    const contextSummary = summarizeWhatsappSuggestionContext(tabContext);
 
-    if (!chatKey || !signalKey) {
+    logDebug('whatsapp_suggestion:start', {
+      ...contextSummary,
+      force,
+      signalKey: toSafeLogText(signalKey, 220),
+      dismissedSignalKey: toSafeLogText(whatsappSuggestionDismissedSignalKey, 220)
+    });
+
+    if (!signalKey || signalKey === '::') {
+      logWarn('whatsapp_suggestion:skip_no_signal', {
+        ...contextSummary,
+        signalKey: toSafeLogText(signalKey, 120)
+      });
+      hideWhatsappSuggestion();
+      return;
+    }
+
+    if (!hasWhatsappConversationHistory(tabContext, 1)) {
+      logDebug('whatsapp_suggestion:skip_no_messages', {
+        ...contextSummary,
+        signalKey: toSafeLogText(signalKey, 220)
+      });
+      hideWhatsappSuggestion();
+      return;
+    }
+
+    if (!force && whatsappSuggestionDismissedSignalKey && whatsappSuggestionDismissedSignalKey === signalKey) {
+      logDebug('whatsapp_suggestion:skip_dismissed', {
+        tabId: contextSummary.tabId,
+        chatKey: contextSummary.chatKey,
+        signalKey: toSafeLogText(signalKey, 220)
+      });
       hideWhatsappSuggestion();
       return;
     }
 
     if (!force && whatsappSuggestionState.signalKey === signalKey && whatsappSuggestionState.text) {
+      logDebug('whatsapp_suggestion:reuse_cached', {
+        tabId: contextSummary.tabId,
+        chatKey: contextSummary.chatKey,
+        signalKey: toSafeLogText(signalKey, 220),
+        suggestionChars: whatsappSuggestionState.text.length
+      });
       setWhatsappSuggestionResult(tabContext, whatsappSuggestionState.text);
       return;
     }
 
+    whatsappSuggestionDismissedSignalKey = '';
     const token = ++whatsappSuggestionToken;
     whatsappSuggestionState = {
       tabId: tabContext.tabId,
@@ -3125,16 +4053,55 @@ export function initPanelApp() {
     };
 
     setWhatsappSuggestionLoading(tabContext);
+    const startedAt = Date.now();
 
     try {
       const prompt = buildWhatsappReplyPrompt(tabContext);
-      const suggestionRaw = await generateWithActiveModel(prompt, { temperature: 0.35 });
+      const profileForSuggestion = resolveModelProfileForInference();
+      if (!profileForSuggestion) {
+        throw new Error('No hay modelo disponible para sugerencias.');
+      }
+
+      logDebug('whatsapp_suggestion:model_start', {
+        tabId: contextSummary.tabId,
+        chatKey: contextSummary.chatKey,
+        signalKey: toSafeLogText(signalKey, 220),
+        promptChars: prompt.length,
+        promptPreview: toSafeLogText(prompt, 280),
+        profile: {
+          id: toSafeLogText(profileForSuggestion.id || '', 80),
+          provider: toSafeLogText(profileForSuggestion.provider || '', 40),
+          model: toSafeLogText(profileForSuggestion.model || '', 80)
+        }
+      });
+
+      const suggestionRaw = await generateWithActiveModel(prompt, {
+        temperature: 0.35,
+        profile: profileForSuggestion,
+        statusTarget: whatsappSuggestionStatus
+      });
       const suggestion = suggestionRaw
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 280);
 
+      logDebug('whatsapp_suggestion:model_done', {
+        tabId: contextSummary.tabId,
+        chatKey: contextSummary.chatKey,
+        signalKey: toSafeLogText(signalKey, 220),
+        elapsedMs: Date.now() - startedAt,
+        rawChars: suggestionRaw.length,
+        suggestionChars: suggestion.length,
+        suggestionPreview: toSafeLogText(suggestion, 200)
+      });
+
       if (token !== whatsappSuggestionToken) {
+        logDebug('whatsapp_suggestion:ignored_outdated_token', {
+          token,
+          currentToken: whatsappSuggestionToken,
+          tabId: contextSummary.tabId,
+          chatKey: contextSummary.chatKey
+        });
         return;
       }
 
@@ -3155,6 +4122,14 @@ export function initPanelApp() {
       if (token !== whatsappSuggestionToken) {
         return;
       }
+
+      logWarn('whatsapp_suggestion:error', {
+        tabId: contextSummary.tabId,
+        chatKey: contextSummary.chatKey,
+        signalKey: toSafeLogText(signalKey, 220),
+        elapsedMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error || '')
+      });
 
       whatsappSuggestionState = {
         tabId: tabContext.tabId,
@@ -3223,7 +4198,16 @@ export function initPanelApp() {
       return;
     }
 
-    setStatus(whatsappSuggestionStatus, 'Mensaje enviado.');
+    const confirmed = response?.result?.confirmed !== false;
+    const dispatchMethod = String(response?.result?.dispatchMethod || '').trim();
+    if (confirmed) {
+      setStatus(whatsappSuggestionStatus, 'Mensaje enviado.');
+    } else {
+      setStatus(
+        whatsappSuggestionStatus,
+        `Mensaje despachado (${dispatchMethod || 'sin confirmacion de metodo'}), esperando confirmacion en chat.`
+      );
+    }
     if (whatsappSuggestionRunBtn) {
       whatsappSuggestionRunBtn.disabled = false;
     }
@@ -3236,9 +4220,14 @@ export function initPanelApp() {
     }, 350);
   }
 
-  function queueContextIngestion(snapshot) {
-    const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs.slice(0, MAX_TABS_FOR_AI_SUMMARY) : [];
-    const historyItems = Array.isArray(snapshot?.history) ? snapshot.history.slice(0, 80) : [];
+  function queueContextIngestion(snapshot, options = {}) {
+    const tabsLimit = Math.max(1, Math.min(120, Number(options.tabsLimit) || MAX_TABS_FOR_AI_SUMMARY));
+    const historyLimit = Math.max(
+      1,
+      Math.min(INITIAL_CONTEXT_SYNC_HISTORY_LIMIT, Number(options.historyLimit) || INCREMENTAL_HISTORY_INGEST_LIMIT)
+    );
+    const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs.slice(0, tabsLimit) : [];
+    const historyItems = Array.isArray(snapshot?.history) ? snapshot.history.slice(0, historyLimit) : [];
 
     contextIngestionPromise = contextIngestionPromise
       .catch(() => {})
@@ -3259,6 +4248,175 @@ export function initPanelApp() {
           }
         }
       });
+  }
+
+  function normalizeHistoryEntryForSync(item) {
+    const entry = item && typeof item === 'object' ? item : {};
+    const url = String(entry.url || '').trim();
+    if (!url) {
+      return null;
+    }
+
+    return {
+      url,
+      title: String(entry.title || '').trim().slice(0, 240),
+      lastVisitTime: Math.max(0, Number(entry.lastVisitTime) || 0),
+      visitCount: Math.max(0, Number(entry.visitCount) || 0),
+      typedCount: Math.max(0, Number(entry.typedCount) || 0)
+    };
+  }
+
+  function mergeHistoryForInitialSync(...historyGroups) {
+    const byUrl = new Map();
+
+    for (const group of historyGroups) {
+      const list = Array.isArray(group) ? group : [];
+      for (const item of list) {
+        const normalized = normalizeHistoryEntryForSync(item);
+        if (!normalized) {
+          continue;
+        }
+
+        const known = byUrl.get(normalized.url);
+        if (!known) {
+          byUrl.set(normalized.url, normalized);
+          continue;
+        }
+
+        byUrl.set(normalized.url, {
+          url: normalized.url,
+          title: normalized.title || known.title || '',
+          lastVisitTime: Math.max(known.lastVisitTime || 0, normalized.lastVisitTime || 0),
+          visitCount: Math.max(known.visitCount || 0, normalized.visitCount || 0),
+          typedCount: Math.max(known.typedCount || 0, normalized.typedCount || 0)
+        });
+      }
+    }
+
+    return Array.from(byUrl.values())
+      .sort((a, b) => (b.lastVisitTime || 0) - (a.lastVisitTime || 0))
+      .slice(0, INITIAL_CONTEXT_SYNC_HISTORY_LIMIT);
+  }
+
+  async function requestExtendedHistoryForInitialSync() {
+    try {
+      const response = await tabContextService.runBrowserAction('getRecentHistory', {
+        limit: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT,
+        days: INITIAL_CONTEXT_SYNC_HISTORY_DAYS
+      });
+
+      if (!response || response.ok !== true) {
+        logWarn('initial_context_sync:history_unavailable', {
+          response
+        });
+        return [];
+      }
+
+      const result = response.result && typeof response.result === 'object' ? response.result : {};
+      const items = Array.isArray(result.items) ? result.items : [];
+      return items.map(normalizeHistoryEntryForSync).filter(Boolean);
+    } catch (error) {
+      logWarn('initial_context_sync:history_fetch_error', {
+        error: error instanceof Error ? error.message : String(error || '')
+      });
+      return [];
+    }
+  }
+
+  async function runInitialContextBootstrap() {
+    if (initialContextSyncPromise) {
+      return initialContextSyncPromise;
+    }
+
+    initialContextSyncPromise = (async () => {
+      const currentState = await readInitialContextSyncState();
+      if (!shouldRunInitialContextSync(currentState)) {
+        logDebug('initial_context_sync:skip', currentState);
+        return currentState;
+      }
+
+      await writeInitialContextSyncState({
+        status: 'running',
+        reason: currentState.reason || 'panel_open',
+        startedAt: Date.now(),
+        completedAt: 0,
+        error: '',
+        sourceCounts: {
+          tabs: 0,
+          history: 0,
+          chat: 0,
+          profile: 0,
+          facts: 0
+        }
+      });
+
+      try {
+        await contextMemoryService.warmupEmbeddings();
+        const snapshot = await tabContextService.requestSnapshot();
+        const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs.slice(0, MAX_TABS_FOR_AI_SUMMARY) : [];
+        const baseHistory = Array.isArray(snapshot?.history) ? snapshot.history : [];
+        const extendedHistory = await requestExtendedHistoryForInitialSync();
+        const mergedHistory = mergeHistoryForInitialSync(extendedHistory, baseHistory);
+
+        queueContextIngestion(
+          {
+            tabs,
+            history: mergedHistory
+          },
+          {
+            tabsLimit: MAX_TABS_FOR_AI_SUMMARY,
+            historyLimit: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT
+          }
+        );
+        await contextIngestionPromise;
+
+        const chatSeed = chatHistory.length ? chatHistory : await readChatHistory();
+        const chatIngestion = await contextMemoryService.ingestChatHistory(chatSeed, {
+          limit: INITIAL_CONTEXT_SYNC_CHAT_LIMIT
+        });
+        const profileIngestedId = await contextMemoryService.ingestUserProfile({
+          user_name: panelSettings.displayName || '',
+          displayName: panelSettings.displayName || '',
+          birthday: panelSettings.birthday || '',
+          language: panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE
+        });
+        const sourceCounts = {
+          tabs: tabs.length,
+          history: mergedHistory.length,
+          chat: Math.max(0, Number(chatIngestion?.ingestedMessages) || 0),
+          profile: profileIngestedId ? 1 : 0,
+          facts: Math.max(0, Number(chatIngestion?.ingestedFacts) || 0)
+        };
+        const completedState = await writeInitialContextSyncState({
+          status: 'done',
+          completedAt: Date.now(),
+          error: '',
+          sourceCounts
+        });
+
+        logDebug('initial_context_sync:done', {
+          sourceCounts
+        });
+
+        return completedState;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'initial_context_sync_failed';
+        const failedState = await writeInitialContextSyncState({
+          status: 'failed',
+          error: message
+        });
+
+        logWarn('initial_context_sync:failed', {
+          error: message
+        });
+
+        return failedState;
+      } finally {
+        initialContextSyncPromise = null;
+      }
+    })();
+
+    return initialContextSyncPromise;
   }
 
   function handleTabContextSnapshot(snapshot) {
@@ -3920,6 +5078,7 @@ export function initPanelApp() {
       settingsScreenState.panelSettings = { ...panelSettings };
     }
 
+    await hydratePinUnlockSession();
     currentChatModelProfileId = resolvePrimaryProfileId();
     syncModelSelectors();
     renderAiModelsSettings();
@@ -3985,6 +5144,10 @@ export function initPanelApp() {
   }
 
   function wireEvents() {
+    wirePinDigitGroup(pinDigitInputs);
+    wirePinDigitGroup(pinConfirmDigitInputs);
+    syncPinHiddenInputs();
+
     brandHomeBtn?.addEventListener('click', () => {
       goToPrimaryScreen();
     });
@@ -4052,6 +5215,15 @@ export function initPanelApp() {
       refreshLocalModels({ silent: false });
     });
 
+    aiModelsAccessActionBtn?.addEventListener('click', () => {
+      const mode = getAiModelsAccessMode();
+      if (!mode) {
+        return;
+      }
+
+      openPinModal(mode);
+    });
+
     aiModelsList?.addEventListener('click', (event) => {
       const button = event.target.closest('[data-model-action]');
       if (!button) {
@@ -4076,6 +5248,11 @@ export function initPanelApp() {
     });
 
     settingsSetupPinBtn?.addEventListener('click', () => {
+      if (isPinConfigured() && !isPinUnlocked()) {
+        openPinModal(PIN_MODAL_MODES.UNLOCK);
+        return;
+      }
+
       openPinModal(PIN_MODAL_MODES.SETUP);
     });
 
@@ -4222,6 +5399,10 @@ export function initPanelApp() {
 
     whatsappSuggestionRunBtn?.addEventListener('click', () => {
       executeWhatsappSuggestion();
+    });
+
+    whatsappSuggestionCloseBtn?.addEventListener('click', () => {
+      dismissWhatsappSuggestion();
     });
 
     whatsappSuggestionRefreshBtn?.addEventListener('click', () => {
@@ -4425,7 +5606,7 @@ export function initPanelApp() {
 
     await hydrateSettings();
     await hydratePanelSettings();
-    resetPinSession();
+    void runInitialContextBootstrap();
     setActiveTool('image');
     const initialScreen = resolveHomeOrOnboardingScreen();
     setScreen(initialScreen);

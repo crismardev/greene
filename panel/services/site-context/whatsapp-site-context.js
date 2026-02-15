@@ -20,8 +20,16 @@ export function getWhatsappMessages(tabContext, limit = 24) {
   return raw.slice(raw.length - safeLimit);
 }
 
+export function hasWhatsappConversationHistory(tabContext, minMessages = 1) {
+  const safeMin = Math.max(1, Number(minMessages) || 1);
+  const messages = getWhatsappMessages(tabContext, 120);
+  const usable = messages.filter((item) => toSafeText(item?.text || '', 320).length > 0);
+  return usable.length >= safeMin;
+}
+
 export function getWhatsappChatKey(tabContext) {
-  const details = tabContext && typeof tabContext.details === 'object' ? tabContext.details : {};
+  const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
+  const details = context.details && typeof context.details === 'object' ? context.details : {};
   const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
 
   const keyCandidate = String(currentChat.key || '').trim();
@@ -37,6 +45,31 @@ export function getWhatsappChatKey(tabContext) {
   const title = String(currentChat.title || '').trim();
   if (title) {
     return title;
+  }
+
+  const tabTitle = String(context.title || '').trim();
+  if (tabTitle) {
+    return tabTitle;
+  }
+
+  const url = String(context.url || '').trim();
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      const keyFromHash = String(parsed.hash || '').replace(/^#/, '').trim();
+      if (keyFromHash) {
+        return keyFromHash;
+      }
+
+      const path = String(parsed.pathname || '').trim();
+      if (path && path !== '/') {
+        return `${parsed.hostname}${path}`;
+      }
+
+      return parsed.hostname || url;
+    } catch (_) {
+      return url;
+    }
   }
 
   return '';
@@ -57,7 +90,10 @@ export function buildWhatsappMetaLabel(tabContext) {
 }
 
 export function buildWhatsappSignalKey(tabContext) {
-  const chatKey = getWhatsappChatKey(tabContext);
+  const details = tabContext && typeof tabContext.details === 'object' ? tabContext.details : {};
+  const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+  const channelId = String(currentChat.channelId || '').trim();
+  const chatKey = channelId || getWhatsappChatKey(tabContext);
   const messages = getWhatsappMessages(tabContext, 3);
   const tail = messages
     .map((item) => `${item?.id || ''}:${item?.text || ''}`)
