@@ -180,7 +180,7 @@ a {
 .stage__track {
   display: flex;
   height: 100%;
-  transform: translate3d(var(--stage-offset-x, 0px), 0, 0);
+  transform: translate3d(calc(var(--stage-index, 0) * -100%), 0, 0);
   transition: transform var(--anim-slow) cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
@@ -382,6 +382,20 @@ a {
   padding: 0 10px;
   display: grid;
   gap: 6px;
+  position: relative;
+}
+
+.ai-dynamic-context::after {
+  content: '';
+  width: 100%;
+  display: block;
+  height: 50px;
+  z-index: 100;
+  background: linear-gradient(to bottom, var(--bg) 0%, transparent 100%);
+  left: 5px;
+  top:100%;
+  position: absolute;
+  pointer-events: none;
 }
 
 .ai-dynamic-area {

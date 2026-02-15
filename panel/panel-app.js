@@ -90,7 +90,8 @@ export function initPanelApp() {
     excited: 'assets/greene-eyes/eyes_exited.svg',
     intrigued: 'assets/greene-eyes/eyes_intrigated.svg',
     disappointed: 'assets/greene-eyes/eyes_deceptioned.svg',
-    wtf: 'assets/greene-eyes/eyes_wtf.svg'
+    wtf: 'assets/greene-eyes/eyes_wtf.svg',
+    closed: 'assets/greene-eyes/eyes_closed.svg'
   });
 
   const BRAND_EMOTION_ALIASES = Object.freeze({
@@ -115,7 +116,11 @@ export function initPanelApp() {
     disappointed: 'disappointed',
     deceptioned: 'disappointed',
     decepcionado: 'disappointed',
-    wtf: 'wtf'
+    wtf: 'wtf',
+    closed: 'closed',
+    close: 'closed',
+    blink: 'closed',
+    parpadeo: 'closed'
   });
 
   const BRAND_EMOTION_POINT_COUNT = 72;
@@ -393,6 +398,14 @@ export function initPanelApp() {
     aliasesByEmotion: BRAND_EMOTION_ALIASES,
     pointCount: BRAND_EMOTION_POINT_COUNT,
     morphDurationMs: BRAND_EMOTION_MORPH_DURATION,
+    blinkEmotion: 'closed',
+    blinkIntervalMinMs: 2400,
+    blinkIntervalMaxMs: 5600,
+    blinkCloseDurationMinMs: 72,
+    blinkCloseDurationMaxMs: 148,
+    blinkDoubleChance: 0.2,
+    lookMaxOffsetPx: 2.6,
+    lookLerp: 0.24,
     targets: [
       {
         container: brandEmotion,
@@ -1809,12 +1822,29 @@ export function initPanelApp() {
     brandEmotionController.setEmotion(emotionName, options);
   }
 
+  function blinkBrandEmotion(options = {}) {
+    return brandEmotionController.blink(options);
+  }
+
+  function startRandomBlinkCycle(options = {}) {
+    brandEmotionController.startBlinkCycle(options);
+  }
+
+  function setBrandEmotionLookVector(normalizedX, normalizedY, options = {}) {
+    brandEmotionController.setLookVector(normalizedX, normalizedY, options);
+  }
+
+  function resetBrandEmotionLookVector(options = {}) {
+    brandEmotionController.resetLookVector(options);
+  }
+
   function extractEmotionFromAssistantMessage(message) {
     return brandEmotionController.extractEmotionFromAssistantMessage(message);
   }
 
   async function hydrateBrandEmotions() {
     await brandEmotionController.hydrate();
+    startRandomBlinkCycle({ immediate: false });
   }
 
   function getSettings() {
@@ -1834,10 +1864,7 @@ export function initPanelApp() {
     }
 
     if (stageTrack) {
-      const viewport = stageTrack.parentElement;
-      const viewportWidth = viewport ? viewport.clientWidth : 0;
-      const offset = viewportWidth > 0 ? SCREEN_INDEX[safeScreen] * viewportWidth * -1 : 0;
-      stageTrack.style.setProperty('--stage-offset-x', `${offset}px`);
+      stageTrack.style.setProperty('--stage-index', String(SCREEN_INDEX[safeScreen]));
     }
 
     if (safeScreen !== 'tools') {
@@ -1877,6 +1904,30 @@ export function initPanelApp() {
     }
 
     setStageTransitionEnabled(true);
+  }
+
+  function scheduleStageStabilization(screenName = '') {
+    const fromDom = app && app.dataset ? app.dataset.screen : '';
+    const safeScreen = Object.prototype.hasOwnProperty.call(SCREEN_INDEX, screenName)
+      ? screenName
+      : Object.prototype.hasOwnProperty.call(SCREEN_INDEX, fromDom)
+        ? fromDom
+        : 'onboarding';
+
+    realignStageToScreen(safeScreen);
+
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        realignStageToScreen(safeScreen);
+        requestAnimationFrame(() => {
+          realignStageToScreen(safeScreen);
+        });
+      });
+    }
+
+    window.setTimeout(() => {
+      realignStageToScreen(safeScreen);
+    }, 120);
   }
 
   function observeStageSizeChanges() {
@@ -8508,6 +8559,21 @@ export function initPanelApp() {
   }
 
   function wireEvents() {
+    const handleAppMouseMove = (event) => {
+      if (!app) {
+        return;
+      }
+
+      const rect = app.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+
+      const normalizedX = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      const normalizedY = ((event.clientY - rect.top) / rect.height) * 2 - 1;
+      setBrandEmotionLookVector(normalizedX, normalizedY);
+    };
+
     const handleDynamicAreaWheel = (event) => {
       const container = event.currentTarget;
       if (!(container instanceof HTMLElement) || event.ctrlKey) {
@@ -8540,6 +8606,7 @@ export function initPanelApp() {
     syncPinHiddenInputs();
 
     brandHomeBtn?.addEventListener('click', () => {
+      blinkBrandEmotion({ force: true, preserveRandom: true });
       goToPrimaryScreen();
     });
 
@@ -8552,11 +8619,18 @@ export function initPanelApp() {
     });
 
     goHomeBtn?.addEventListener('click', () => {
+      blinkBrandEmotion({ force: true, preserveRandom: true });
       goToPrimaryScreen();
     });
 
     closeSettingsBtn?.addEventListener('click', () => {
+      blinkBrandEmotion({ force: true, preserveRandom: true });
       goToPrimaryScreen();
+    });
+
+    app?.addEventListener('mousemove', handleAppMouseMove);
+    app?.addEventListener('mouseleave', () => {
+      resetBrandEmotionLookVector();
     });
 
     onboardingContinueBtn?.addEventListener('click', () => {
@@ -9088,6 +9162,7 @@ export function initPanelApp() {
     } else {
       setStageTransitionEnabled(true);
     }
+    scheduleStageStabilization(initialScreen);
 
     await hydrateBrandEmotions();
     await hydrateChatHistory();
@@ -9108,6 +9183,8 @@ export function initPanelApp() {
     } else {
       onboardingNameInput?.focus();
     }
+
+    scheduleStageStabilization(initialScreen);
   }
 
   init();

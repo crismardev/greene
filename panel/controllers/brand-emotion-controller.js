@@ -5,14 +5,57 @@ export function createBrandEmotionController(options = {}) {
   const pointCount = Math.max(8, Number(cfg.pointCount) || 72)
   const morphDurationMs = Math.max(120, Number(cfg.morphDurationMs) || 420)
   const targets = Array.isArray(cfg.targets) ? cfg.targets : []
+  const configuredBlinkEmotionName = sanitizeEmotionToken(cfg.blinkEmotion || 'closed') || 'closed'
+  const blinkIntervalMinMs = Math.max(900, Number(cfg.blinkIntervalMinMs) || 2400)
+  const blinkIntervalMaxMs = Math.max(blinkIntervalMinMs + 120, Number(cfg.blinkIntervalMaxMs) || 5600)
+  const blinkCloseDurationMinMs = Math.max(45, Number(cfg.blinkCloseDurationMinMs) || 70)
+  const blinkCloseDurationMaxMs = Math.max(blinkCloseDurationMinMs + 12, Number(cfg.blinkCloseDurationMaxMs) || 145)
+  const blinkDoubleChance = clamp(
+    Number.isFinite(Number(cfg.blinkDoubleChance)) ? Number(cfg.blinkDoubleChance) : 0.16,
+    0,
+    0.92
+  )
+  const lookMaxOffsetPx = Math.max(
+    0,
+    Number.isFinite(Number(cfg.lookMaxOffsetPx)) ? Number(cfg.lookMaxOffsetPx) : 2.4
+  )
+  const lookLerp = clamp(Number.isFinite(Number(cfg.lookLerp)) ? Number(cfg.lookLerp) : 0.24, 0.05, 1)
 
   const emotionNames = Object.freeze(Object.keys(assetsByEmotion))
   let emotionLibrary = Object.create(null)
   let currentEmotion = ''
+  let preferredEmotion = ''
   let morphToken = 0
   let metricsPath = null
   let randomTimer = 0
   let randomEnabled = false
+  let blinkTimer = 0
+  let blinkRestoreTimer = 0
+  let blinkFollowupTimer = 0
+  let blinkEnabled = false
+  let isBlinking = false
+  let lookTargetX = 0
+  let lookTargetY = 0
+  let lookCurrentX = 0
+  let lookCurrentY = 0
+  let lookRaf = 0
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value))
+  }
+
+  function sanitizeEmotionToken(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z_]/g, '')
+  }
+
+  function randomBetweenInt(min, max) {
+    const safeMin = Math.max(0, Math.floor(min))
+    const safeMax = Math.max(safeMin, Math.floor(max))
+    return safeMin + Math.floor(Math.random() * (safeMax - safeMin + 1))
+  }
 
   function getAssetUrl(path) {
     if (typeof cfg.assetUrlResolver === 'function') {
@@ -35,17 +78,33 @@ export function createBrandEmotionController(options = {}) {
     return Number.isFinite(numeric) ? numeric : fallback
   }
 
-  function clamp(value, min, max) {
-    return Math.min(max, Math.max(min, value))
+  function normalizeEmotionName(value) {
+    const key = sanitizeEmotionToken(value)
+    return aliasesByEmotion[key] || ''
   }
 
-  function normalizeEmotionName(value) {
-    const key = String(value || '')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z_]/g, '')
+  function resolveSpecificEmotionName(name) {
+    const normalized = normalizeEmotionName(name)
+    if (normalized && emotionLibrary[normalized]) {
+      return normalized
+    }
 
-    return aliasesByEmotion[key] || ''
+    const raw = sanitizeEmotionToken(name)
+    if (raw && emotionLibrary[raw]) {
+      return raw
+    }
+
+    return ''
+  }
+
+  function resolveBlinkEmotionName() {
+    return resolveSpecificEmotionName(configuredBlinkEmotionName)
+  }
+
+  function isBlinkEmotionName(name) {
+    const resolved = resolveSpecificEmotionName(name)
+    const blinkName = resolveBlinkEmotionName()
+    return Boolean(resolved && blinkName && resolved === blinkName)
   }
 
   function extractEmotionFromText(text) {
@@ -252,9 +311,9 @@ export function createBrandEmotionController(options = {}) {
   }
 
   function resolveRenderableEmotionName(name) {
-    const normalized = normalizeEmotionName(name)
-    if (normalized && emotionLibrary[normalized]) {
-      return normalized
+    const direct = resolveSpecificEmotionName(name)
+    if (direct) {
+      return direct
     }
 
     if (emotionLibrary.neutral) {
@@ -269,13 +328,82 @@ export function createBrandEmotionController(options = {}) {
     return targets.filter((target) => target && target.rightPath && target.leftPath)
   }
 
+  function applyLookTransformToPath(pathEl) {
+    if (!pathEl) {
+      return
+    }
+
+    const tx = Math.abs(lookCurrentX) < 0.01 ? 0 : lookCurrentX
+    const ty = Math.abs(lookCurrentY) < 0.01 ? 0 : lookCurrentY
+    if (tx === 0 && ty === 0) {
+      pathEl.removeAttribute('transform')
+      return
+    }
+
+    pathEl.setAttribute('transform', `translate(${tx.toFixed(2)} ${ty.toFixed(2)})`)
+  }
+
+  function applyLookTransformToTargets() {
+    for (const targetRef of getRenderableTargets()) {
+      applyLookTransformToPath(targetRef.rightPath)
+      applyLookTransformToPath(targetRef.leftPath)
+    }
+  }
+
+  function stopLookAnimation() {
+    if (lookRaf && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(lookRaf)
+    }
+    lookRaf = 0
+  }
+
+  function runLookFrame() {
+    lookRaf = 0
+
+    const dx = lookTargetX - lookCurrentX
+    const dy = lookTargetY - lookCurrentY
+    lookCurrentX = Math.abs(dx) <= 0.02 ? lookTargetX : lookCurrentX + dx * lookLerp
+    lookCurrentY = Math.abs(dy) <= 0.02 ? lookTargetY : lookCurrentY + dy * lookLerp
+    applyLookTransformToTargets()
+
+    if (Math.abs(lookTargetX - lookCurrentX) > 0.02 || Math.abs(lookTargetY - lookCurrentY) > 0.02) {
+      if (typeof requestAnimationFrame === 'function') {
+        lookRaf = requestAnimationFrame(runLookFrame)
+      }
+    }
+  }
+
+  function setLookVector(normalizedX, normalizedY, options = {}) {
+    const immediate = Boolean(options.immediate)
+    const safeX = clamp(Number.isFinite(Number(normalizedX)) ? Number(normalizedX) : 0, -1, 1)
+    const safeY = clamp(Number.isFinite(Number(normalizedY)) ? Number(normalizedY) : 0, -1, 1)
+    lookTargetX = safeX * lookMaxOffsetPx
+    lookTargetY = safeY * lookMaxOffsetPx * 0.62
+
+    if (immediate || typeof requestAnimationFrame !== 'function') {
+      stopLookAnimation()
+      lookCurrentX = lookTargetX
+      lookCurrentY = lookTargetY
+      applyLookTransformToTargets()
+      return
+    }
+
+    if (!lookRaf) {
+      lookRaf = requestAnimationFrame(runLookFrame)
+    }
+  }
+
+  function resetLookVector(options = {}) {
+    setLookVector(0, 0, options)
+  }
+
   function pickRandomEmotion(excluded = '') {
     const source = Object.keys(emotionLibrary).length ? Object.keys(emotionLibrary) : emotionNames
-    const pool = source.filter((name) => name !== excluded)
-    const names = pool.length ? pool : source
+    const pool = source.filter((name) => name !== excluded && !isBlinkEmotionName(name))
+    const names = pool.length ? pool : source.filter((name) => !isBlinkEmotionName(name))
 
     if (!names.length) {
-      return 'neutral'
+      return resolveRenderableEmotionName('neutral')
     }
 
     return names[Math.floor(Math.random() * names.length)]
@@ -327,9 +455,132 @@ export function createBrandEmotionController(options = {}) {
     clearRandomTimer()
   }
 
+  function clearBlinkTimer() {
+    if (blinkTimer) {
+      window.clearTimeout(blinkTimer)
+      blinkTimer = 0
+    }
+  }
+
+  function clearBlinkRestoreTimer() {
+    if (blinkRestoreTimer) {
+      window.clearTimeout(blinkRestoreTimer)
+      blinkRestoreTimer = 0
+    }
+  }
+
+  function clearBlinkFollowupTimer() {
+    if (blinkFollowupTimer) {
+      window.clearTimeout(blinkFollowupTimer)
+      blinkFollowupTimer = 0
+    }
+  }
+
+  function clearBlinkTimers() {
+    clearBlinkTimer()
+    clearBlinkRestoreTimer()
+    clearBlinkFollowupTimer()
+  }
+
+  function blink(options = {}) {
+    const force = Boolean(options.force)
+    const preserveRandom = options.preserveRandom !== false
+    const blinkEmotionName = resolveBlinkEmotionName()
+
+    if (!blinkEmotionName) {
+      return false
+    }
+
+    if (isBlinking && !force) {
+      return false
+    }
+
+    clearBlinkRestoreTimer()
+    isBlinking = true
+
+    const restoreEmotion =
+      preferredEmotion || (!isBlinkEmotionName(currentEmotion) ? currentEmotion : '') || resolveRenderableEmotionName('neutral')
+
+    setEmotion(blinkEmotionName, {
+      immediate: true,
+      preserveRandom,
+      preservePreferred: true
+    })
+
+    const closeDuration = randomBetweenInt(blinkCloseDurationMinMs, blinkCloseDurationMaxMs)
+    blinkRestoreTimer = window.setTimeout(() => {
+      isBlinking = false
+      const nextEmotion =
+        preferredEmotion || (!isBlinkEmotionName(currentEmotion) ? currentEmotion : '') || restoreEmotion || ''
+      if (nextEmotion) {
+        setEmotion(nextEmotion, {
+          immediate: true,
+          preserveRandom,
+          preservePreferred: false
+        })
+      }
+    }, closeDuration)
+
+    return true
+  }
+
+  function scheduleBlinkTick() {
+    if (!blinkEnabled) {
+      return
+    }
+
+    clearBlinkTimer()
+    const delay = randomBetweenInt(blinkIntervalMinMs, blinkIntervalMaxMs)
+    blinkTimer = window.setTimeout(() => {
+      if (!blinkEnabled) {
+        return
+      }
+
+      blink({ preserveRandom: true })
+
+      if (blinkEnabled && Math.random() < blinkDoubleChance) {
+        clearBlinkFollowupTimer()
+        blinkFollowupTimer = window.setTimeout(() => {
+          if (blinkEnabled) {
+            blink({ preserveRandom: true })
+          }
+        }, randomBetweenInt(120, 240))
+      }
+
+      scheduleBlinkTick()
+    }, delay)
+  }
+
+  function startBlinkCycle(options = {}) {
+    const immediate = Boolean(options.immediate)
+    if (!Object.keys(emotionLibrary).length) {
+      return
+    }
+    if (!resolveBlinkEmotionName()) {
+      return
+    }
+
+    blinkEnabled = true
+    clearBlinkTimer()
+    clearBlinkFollowupTimer()
+
+    if (immediate) {
+      blink({ preserveRandom: true })
+    }
+
+    scheduleBlinkTick()
+  }
+
+  function stopBlinkCycle() {
+    blinkEnabled = false
+    isBlinking = false
+    clearBlinkTimers()
+  }
+
   function setEmotion(emotionName, options = {}) {
     const immediate = Boolean(options.immediate)
     const preserveRandom = Boolean(options.preserveRandom)
+    const preservePreferred = Boolean(options.preservePreferred)
     const resolvedName = resolveRenderableEmotionName(emotionName)
     const activeTargets = getRenderableTargets()
     if (!resolvedName || !activeTargets.length) {
@@ -341,6 +592,14 @@ export function createBrandEmotionController(options = {}) {
     }
 
     const target = emotionLibrary[resolvedName]
+    if (!target || !target.right || !target.left) {
+      return
+    }
+
+    if (!preservePreferred && !isBlinkEmotionName(resolvedName)) {
+      preferredEmotion = resolvedName
+    }
+
     const from = currentEmotion ? emotionLibrary[currentEmotion] : null
 
     for (const targetRef of activeTargets) {
@@ -359,6 +618,7 @@ export function createBrandEmotionController(options = {}) {
         targetRef.leftPath.setAttribute('d', target.left.morphPathData || target.left.pathData)
       }
       currentEmotion = resolvedName
+      applyLookTransformToTargets()
       return
     }
 
@@ -399,6 +659,7 @@ export function createBrandEmotionController(options = {}) {
         targetRef.rightPath.setAttribute('d', target.right.morphPathData || target.right.pathData)
         targetRef.leftPath.setAttribute('d', target.left.morphPathData || target.left.pathData)
       }
+      applyLookTransformToTargets()
     }
 
     requestAnimationFrame(morphFrame)
@@ -453,6 +714,14 @@ export function createBrandEmotionController(options = {}) {
 
   function destroy() {
     stopRandomCycle()
+    stopBlinkCycle()
+    stopLookAnimation()
+    lookTargetX = 0
+    lookTargetY = 0
+    lookCurrentX = 0
+    lookCurrentY = 0
+    applyLookTransformToTargets()
+
     if (metricsPath && metricsPath.ownerSVGElement) {
       metricsPath.ownerSVGElement.remove()
     }
@@ -467,6 +736,11 @@ export function createBrandEmotionController(options = {}) {
     setEmotion,
     startRandomCycle,
     stopRandomCycle,
+    startBlinkCycle,
+    stopBlinkCycle,
+    blink,
+    setLookVector,
+    resetLookVector,
     destroy
   }
 }
