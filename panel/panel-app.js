@@ -12,6 +12,8 @@ import { createSettingsScreenController } from './screens/settings-screen.js';
 import { createTabContextService } from './services/tab-context-service.js';
 import { createContextMemoryService } from './services/context-memory-service.js';
 import { createPostgresService } from './services/postgres-service.js';
+import { createBrandEmotionController } from './controllers/brand-emotion-controller.js';
+import { createSystemVariablesController } from './controllers/system-variables-controller.js';
 import { buildTabSummaryPrompt, toJsonTabRecord } from './services/site-context/generic-site-context.js';
 import {
   buildWhatsappMetaLabel,
@@ -115,7 +117,6 @@ export function initPanelApp() {
     wtf: 'wtf'
   });
 
-  const BRAND_EMOTION_NAMES = Object.freeze(Object.keys(BRAND_EMOTION_FILES));
   const BRAND_EMOTION_POINT_COUNT = 72;
   const BRAND_EMOTION_MORPH_DURATION = 420;
 
@@ -165,209 +166,28 @@ export function initPanelApp() {
   const INITIAL_CONTEXT_SYNC_HISTORY_LIMIT = 320;
   const INITIAL_CONTEXT_SYNC_HISTORY_DAYS = 45;
   const INITIAL_CONTEXT_SYNC_CHAT_LIMIT = 140;
-  const SYSTEM_VARIABLE_SCOPE_ORDER = Object.freeze([
-    'prompts',
-    'chat',
-    'context',
-    'bootstrap',
-    'whatsapp',
-    'ai',
-    'memory',
-    'runtime',
-    'storage',
-    'defaults'
-  ]);
-  const SYSTEM_VARIABLE_SCOPE_LABELS = Object.freeze({
-    prompts: 'Prompts',
-    chat: 'Chat',
-    context: 'Contexto',
-    bootstrap: 'Bootstrap',
-    whatsapp: 'WhatsApp',
-    ai: 'AI',
-    memory: 'Memoria',
-    runtime: 'Runtime',
-    storage: 'Storage',
-    defaults: 'Defaults'
+  const systemVariablesController = createSystemVariablesController({
+    defaultChatSystemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
+    defaultWhatsappSuggestionBasePrompt: DEFAULT_WHATSAPP_REPLY_PROMPT_BASE,
+    defaultWriteEmailSystemPrompt: DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT,
+    maxChatContextMessages: MAX_CHAT_CONTEXT_MESSAGES,
+    maxChatHistoryMessages: MAX_CHAT_HISTORY_MESSAGES,
+    maxChatHistoryStorageLimit: MAX_CHAT_HISTORY_STORAGE_LIMIT,
+    maxLocalToolCalls: MAX_LOCAL_TOOL_CALLS,
+    maxTabsForAiSummary: MAX_TABS_FOR_AI_SUMMARY,
+    tabSummaryMaxChars: TAB_SUMMARY_MAX_CHARS,
+    incrementalHistoryIngestLimit: INCREMENTAL_HISTORY_INGEST_LIMIT,
+    initialContextSyncHistoryLimit: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT,
+    initialContextSyncHistoryDays: INITIAL_CONTEXT_SYNC_HISTORY_DAYS,
+    initialContextSyncChatLimit: INITIAL_CONTEXT_SYNC_CHAT_LIMIT,
+    initialContextSyncStaleMs: INITIAL_CONTEXT_SYNC_STALE_MS,
+    maxWhatsappPersistedMessages: MAX_WHATSAPP_PERSISTED_MESSAGES,
+    maxWhatsappPersistedMessagesStorageLimit: MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT,
+    whatsappSuggestionHistoryLimit: WHATSAPP_SUGGESTION_HISTORY_LIMIT
   });
-  const SYSTEM_VARIABLE_DEFINITIONS = Object.freeze([
-    {
-      id: 'prompts.assistantSystem',
-      scope: 'prompts',
-      key: 'panelSettings.systemPrompt',
-      label: 'Assistant system prompt',
-      type: 'prompt',
-      target: 'systemPrompt',
-      defaultValue: DEFAULT_CHAT_SYSTEM_PROMPT,
-      required: true,
-      description: 'Prompt principal del chat para la tool "Chat".'
-    },
-    {
-      id: 'prompts.whatsappSuggestionBase',
-      scope: 'prompts',
-      key: 'prompts.whatsappSuggestionBase',
-      label: 'WhatsApp suggestion base prompt',
-      type: 'prompt',
-      defaultValue: DEFAULT_WHATSAPP_REPLY_PROMPT_BASE,
-      required: true,
-      description: 'Bloque base que define como redactar sugerencias automaticas para WhatsApp.'
-    },
-    {
-      id: 'prompts.writeEmailSystem',
-      scope: 'prompts',
-      key: 'prompts.writeEmailSystem',
-      label: 'Write email system prompt',
-      type: 'prompt',
-      defaultValue: DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT,
-      required: true,
-      description: 'Prompt usado por la tool "Write an email".'
-    },
-    {
-      id: 'chat.maxContextMessages',
-      scope: 'chat',
-      key: 'MAX_CHAT_CONTEXT_MESSAGES',
-      type: 'number',
-      defaultValue: MAX_CHAT_CONTEXT_MESSAGES,
-      min: 1,
-      max: 60,
-      step: 1,
-      description: 'Cantidad de mensajes previos usados para construir el prompt de chat.'
-    },
-    {
-      id: 'chat.maxHistoryMessages',
-      scope: 'chat',
-      key: 'MAX_CHAT_HISTORY_MESSAGES',
-      type: 'number',
-      defaultValue: MAX_CHAT_HISTORY_MESSAGES,
-      min: 40,
-      max: MAX_CHAT_HISTORY_STORAGE_LIMIT,
-      step: 1,
-      description: 'Cantidad maxima de mensajes persistidos en historial local.'
-    },
-    {
-      id: 'chat.maxLocalToolCalls',
-      scope: 'chat',
-      key: 'MAX_LOCAL_TOOL_CALLS',
-      type: 'number',
-      defaultValue: MAX_LOCAL_TOOL_CALLS,
-      min: 1,
-      max: 8,
-      step: 1,
-      description: 'Numero maximo de tools locales permitidas por respuesta.'
-    },
-    {
-      id: 'context.maxTabsForAiSummary',
-      scope: 'context',
-      key: 'MAX_TABS_FOR_AI_SUMMARY',
-      type: 'number',
-      defaultValue: MAX_TABS_FOR_AI_SUMMARY,
-      min: 1,
-      max: 120,
-      step: 1,
-      description: 'Tabs maximas consideradas para resumen e ingesta de contexto.'
-    },
-    {
-      id: 'context.tabSummaryMaxChars',
-      scope: 'context',
-      key: 'TAB_SUMMARY_MAX_CHARS',
-      type: 'number',
-      defaultValue: TAB_SUMMARY_MAX_CHARS,
-      min: 80,
-      max: 800,
-      step: 1,
-      description: 'Longitud maxima por resumen de tab.'
-    },
-    {
-      id: 'context.incrementalHistoryIngestLimit',
-      scope: 'context',
-      key: 'INCREMENTAL_HISTORY_INGEST_LIMIT',
-      type: 'number',
-      defaultValue: INCREMENTAL_HISTORY_INGEST_LIMIT,
-      min: 20,
-      max: 1200,
-      step: 1,
-      description: 'Registros de historial usados por ingesta incremental en snapshots.'
-    },
-    {
-      id: 'bootstrap.initialContextSyncHistoryLimit',
-      scope: 'bootstrap',
-      key: 'INITIAL_CONTEXT_SYNC_HISTORY_LIMIT',
-      type: 'number',
-      defaultValue: INITIAL_CONTEXT_SYNC_HISTORY_LIMIT,
-      min: 80,
-      max: 1200,
-      step: 1,
-      description: 'Limite de historial para sincronizacion inicial.'
-    },
-    {
-      id: 'bootstrap.initialContextSyncHistoryDays',
-      scope: 'bootstrap',
-      key: 'INITIAL_CONTEXT_SYNC_HISTORY_DAYS',
-      type: 'number',
-      defaultValue: INITIAL_CONTEXT_SYNC_HISTORY_DAYS,
-      min: 1,
-      max: 365,
-      step: 1,
-      description: 'Dias de historial consultados en bootstrap inicial.'
-    },
-    {
-      id: 'bootstrap.initialContextSyncChatLimit',
-      scope: 'bootstrap',
-      key: 'INITIAL_CONTEXT_SYNC_CHAT_LIMIT',
-      type: 'number',
-      defaultValue: INITIAL_CONTEXT_SYNC_CHAT_LIMIT,
-      min: 40,
-      max: 500,
-      step: 1,
-      description: 'Mensajes de chat historico considerados en bootstrap inicial.'
-    },
-    {
-      id: 'bootstrap.initialContextSyncStaleMs',
-      scope: 'bootstrap',
-      key: 'INITIAL_CONTEXT_SYNC_STALE_MS',
-      type: 'number',
-      defaultValue: INITIAL_CONTEXT_SYNC_STALE_MS,
-      min: 1000,
-      max: 1000 * 60 * 60 * 12,
-      step: 1000,
-      description: 'TTL para considerar stale una sincronizacion inicial en estado running.'
-    },
-    {
-      id: 'whatsapp.maxPersistedMessages',
-      scope: 'whatsapp',
-      key: 'MAX_WHATSAPP_PERSISTED_MESSAGES',
-      type: 'number',
-      defaultValue: MAX_WHATSAPP_PERSISTED_MESSAGES,
-      min: 80,
-      max: MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT,
-      step: 1,
-      description: 'Mensajes maximos por chat en almacenamiento local de WhatsApp.'
-    },
-    {
-      id: 'whatsapp.suggestionHistoryLimit',
-      scope: 'whatsapp',
-      key: 'WHATSAPP_SUGGESTION_HISTORY_LIMIT',
-      type: 'number',
-      defaultValue: WHATSAPP_SUGGESTION_HISTORY_LIMIT,
-      min: 12,
-      max: 300,
-      step: 1,
-      description: 'Cantidad de mensajes que alimentan el prompt de sugerencias de WhatsApp.'
-    }
-  ]);
-  const SYSTEM_VARIABLE_DEFAULTS = Object.freeze(
-    SYSTEM_VARIABLE_DEFINITIONS.reduce((acc, definition) => {
-      if (!definition.target) {
-        acc[definition.id] = definition.defaultValue;
-      }
-      return acc;
-    }, {})
-  );
-  const SYSTEM_VARIABLE_DEFINITION_BY_ID = Object.freeze(
-    SYSTEM_VARIABLE_DEFINITIONS.reduce((acc, definition) => {
-      acc[definition.id] = definition;
-      return acc;
-    }, {})
-  );
+  const SYSTEM_VARIABLE_SCOPE_ORDER = systemVariablesController.scopeOrder;
+  const SYSTEM_VARIABLE_DEFINITIONS = systemVariablesController.definitions;
+  const SYSTEM_VARIABLE_DEFAULTS = systemVariablesController.defaults;
 
   function createPreloadedModelProfiles() {
     const now = Date.now();
@@ -555,6 +375,26 @@ export function initPanelApp() {
   const pinModalSaveBtn = document.getElementById('pinModalSaveBtn');
   const pinModalCancelBtn = document.getElementById('pinModalCancelBtn');
   const pinModalStatus = document.getElementById('pinModalStatus');
+  const brandEmotionController = createBrandEmotionController({
+    assetsByEmotion: BRAND_EMOTION_FILES,
+    aliasesByEmotion: BRAND_EMOTION_ALIASES,
+    pointCount: BRAND_EMOTION_POINT_COUNT,
+    morphDurationMs: BRAND_EMOTION_MORPH_DURATION,
+    targets: [
+      {
+        container: brandEmotion,
+        svg: brandEmotionSvg,
+        rightPath: brandEmotionEyeRight,
+        leftPath: brandEmotionEyeLeft
+      },
+      {
+        container: onboardingEmotion,
+        svg: onboardingEmotionSvg,
+        rightPath: onboardingEmotionEyeRight,
+        leftPath: onboardingEmotionEyeLeft
+      }
+    ]
+  });
 
   let settings = { ...DEFAULT_SETTINGS };
   let imageQueue = [];
@@ -579,12 +419,6 @@ export function initPanelApp() {
   let isGeneratingChat = false;
   let pendingChatRenderRaf = 0;
   let modelWarmupPromise = null;
-  let brandEmotionLibrary = Object.create(null);
-  let currentBrandEmotion = '';
-  let brandEmotionMorphToken = 0;
-  let brandEmotionMetricsPath = null;
-  let randomEmotionTimer = 0;
-  let randomEmotionEnabled = false;
   let stageResizeObserver = null;
   let settingsScreenController = null;
   let settingsScreenState = null;
@@ -667,89 +501,19 @@ export function initPanelApp() {
   }
 
   function formatSystemVariableValue(value) {
-    if (value === null || value === undefined) {
-      return 'null';
-    }
-
-    if (typeof value === 'string') {
-      return value || '""';
-    }
-
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return String(value);
-    }
-
-    if (Array.isArray(value)) {
-      return JSON.stringify(value);
-    }
-
-    if (typeof value === 'object') {
-      return JSON.stringify(value);
-    }
-
-    return String(value);
+    return systemVariablesController.formatValue(value);
   }
 
   function coerceSystemVariableValue(definition, rawValue) {
-    const meta = definition && typeof definition === 'object' ? definition : {};
-    const type = String(meta.type || 'string');
-
-    if (type === 'number') {
-      const fallbackValue = Number(meta.defaultValue);
-      const fallback = Number.isFinite(fallbackValue) ? fallbackValue : 0;
-      let numeric = Number(rawValue);
-      if (!Number.isFinite(numeric)) {
-        numeric = fallback;
-      }
-
-      if (Number.isFinite(meta.min)) {
-        numeric = Math.max(meta.min, numeric);
-      }
-
-      if (Number.isFinite(meta.max)) {
-        numeric = Math.min(meta.max, numeric);
-      }
-
-      const fallbackIsInteger = Number.isInteger(fallback);
-      if (fallbackIsInteger || Number.isInteger(meta.step || 1)) {
-        numeric = Math.round(numeric);
-      }
-
-      return numeric;
-    }
-
-    const text = String(rawValue || '').trim();
-    if (meta.required && !text) {
-      return String(meta.defaultValue || '').trim();
-    }
-
-    if (type === 'prompt') {
-      return text || String(meta.defaultValue || '').trim();
-    }
-
-    return text;
+    return systemVariablesController.coerceValue(definition, rawValue);
   }
 
   function normalizeSystemVariables(storedValues) {
-    const source = storedValues && typeof storedValues === 'object' ? storedValues : {};
-    const normalized = {};
-
-    for (const definition of SYSTEM_VARIABLE_DEFINITIONS) {
-      if (definition.target) {
-        continue;
-      }
-
-      const hasValue = Object.prototype.hasOwnProperty.call(source, definition.id);
-      const value = hasValue ? source[definition.id] : definition.defaultValue;
-      normalized[definition.id] = coerceSystemVariableValue(definition, value);
-    }
-
-    return normalized;
+    return systemVariablesController.normalizeValues(storedValues);
   }
 
   function getSystemVariableDefinition(variableId) {
-    const key = String(variableId || '').trim();
-    return key ? SYSTEM_VARIABLE_DEFINITION_BY_ID[key] || null : null;
+    return systemVariablesController.getDefinition(variableId);
   }
 
   function getSystemVariableValue(variableId) {
@@ -786,11 +550,7 @@ export function initPanelApp() {
   }
 
   function getSystemVariableScopeLabel(scopeId) {
-    const scope = String(scopeId || '').trim();
-    if (!scope) {
-      return 'Sistema';
-    }
-    return SYSTEM_VARIABLE_SCOPE_LABELS[scope] || scope;
+    return systemVariablesController.getScopeLabel(scopeId);
   }
 
   function getActiveChatSystemPrompt() {
@@ -1544,64 +1304,12 @@ export function initPanelApp() {
     }
   }
 
-  function getAssetUrl(path) {
-    if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getURL === 'function') {
-      return chrome.runtime.getURL(path);
-    }
-
-    return `../${path}`;
-  }
-
-  function parseNumericAttr(value, fallback) {
-    if (value === null || value === undefined || String(value).trim() === '') {
-      return fallback;
-    }
-
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? numeric : fallback;
-  }
-
-  function clamp(value, min, max) {
-    return Math.min(max, Math.max(min, value));
-  }
-
-  function normalizeEmotionName(value) {
-    const key = String(value || '')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z_]/g, '');
-
-    return BRAND_EMOTION_ALIASES[key] || '';
-  }
-
   function extractEmotionFromText(text) {
-    const safeText = typeof text === 'string' ? text.trim() : '';
-    if (!safeText) {
-      return '';
-    }
-
-    const startMatch = safeText.match(/^\[?\s*(?:emotion|emocion)\s*[:=]\s*([a-z_]+)\s*\]?/i);
-    if (startMatch) {
-      return normalizeEmotionName(startMatch[1]);
-    }
-
-    const endMatch = safeText.match(/\[?\s*(?:emotion|emocion)\s*[:=]\s*([a-z_]+)\s*\]?\s*$/i);
-    if (endMatch) {
-      return normalizeEmotionName(endMatch[1]);
-    }
-
-    return '';
+    return brandEmotionController.extractEmotionFromText(text);
   }
 
   function stripEmotionTag(text) {
-    const raw = typeof text === 'string' ? text : '';
-    if (!raw) {
-      return '';
-    }
-
-    const withoutStart = raw.replace(/^\s*\[?\s*(?:emotion|emocion)\s*[:=]\s*[a-z_]+\s*\]?\s*/i, '');
-    const withoutEnd = withoutStart.replace(/\s*\[?\s*(?:emotion|emocion)\s*[:=]\s*[a-z_]+\s*\]?\s*$/i, '');
-    return withoutEnd.trim();
+    return brandEmotionController.stripEmotionTag(text);
   }
 
   function escapeHtml(text) {
@@ -1696,407 +1404,24 @@ export function initPanelApp() {
     }
   }
 
-  function ensureBrandEmotionMetricsPath() {
-    if (brandEmotionMetricsPath) {
-      return brandEmotionMetricsPath;
-    }
-
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('aria-hidden', 'true');
-    svg.style.position = 'absolute';
-    svg.style.width = '0';
-    svg.style.height = '0';
-    svg.style.opacity = '0';
-    svg.style.pointerEvents = 'none';
-    svg.style.overflow = 'hidden';
-
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    svg.appendChild(path);
-    document.body.appendChild(svg);
-
-    brandEmotionMetricsPath = path;
-    return brandEmotionMetricsPath;
-  }
-
-  function samplePathPoints(pathData, pointCount = BRAND_EMOTION_POINT_COUNT) {
-    const points = [];
-    const safePointCount = Math.max(8, pointCount);
-    const metricsPath = ensureBrandEmotionMetricsPath();
-    metricsPath.setAttribute('d', pathData);
-
-    let totalLength = 0;
-    try {
-      totalLength = metricsPath.getTotalLength();
-    } catch (_) {
-      return points;
-    }
-
-    if (!Number.isFinite(totalLength) || totalLength <= 0) {
-      return points;
-    }
-
-    for (let i = 0; i < safePointCount; i += 1) {
-      const ratio = safePointCount === 1 ? 0 : i / (safePointCount - 1);
-      const point = metricsPath.getPointAtLength(totalLength * ratio);
-      points.push([point.x, point.y]);
-    }
-
-    return points;
-  }
-
-  function pointsToClosedPath(points) {
-    if (!Array.isArray(points) || !points.length) {
-      return '';
-    }
-
-    const [firstX, firstY] = points[0];
-    const parts = [`M${firstX.toFixed(2)} ${firstY.toFixed(2)}`];
-
-    for (let i = 1; i < points.length; i += 1) {
-      const [x, y] = points[i];
-      parts.push(`L${x.toFixed(2)} ${y.toFixed(2)}`);
-    }
-
-    parts.push('Z');
-    return parts.join(' ');
-  }
-
-  function easeInOutSine(value) {
-    return -(Math.cos(Math.PI * value) - 1) / 2;
-  }
-
-  function interpolatePathPoints(fromPoints, toPoints, progress) {
-    if (!Array.isArray(fromPoints) || !Array.isArray(toPoints) || !fromPoints.length || !toPoints.length) {
-      return [];
-    }
-
-    if (fromPoints.length !== toPoints.length) {
-      return toPoints;
-    }
-
-    const out = [];
-    for (let i = 0; i < fromPoints.length; i += 1) {
-      const from = fromPoints[i];
-      const to = toPoints[i];
-      out.push([from[0] + (to[0] - from[0]) * progress, from[1] + (to[1] - from[1]) * progress]);
-    }
-
-    return out;
-  }
-
-  function setEmotionPathStyle(pathEl, shape) {
-    if (!pathEl || !shape) {
-      return;
-    }
-
-    pathEl.setAttribute('fill', shape.fill);
-    pathEl.setAttribute('stroke', shape.stroke);
-    pathEl.setAttribute('fill-opacity', String(shape.fillOpacity));
-    pathEl.setAttribute('stroke-opacity', String(shape.strokeOpacity));
-    pathEl.setAttribute('stroke-width', String(shape.strokeWidth));
-  }
-
-  function parseEmotionShape(pathNode) {
-    const pathData = pathNode ? pathNode.getAttribute('d') || '' : '';
-    if (!pathData) {
-      return null;
-    }
-
-    const points = samplePathPoints(pathData, BRAND_EMOTION_POINT_COUNT);
-    if (points.length < 8) {
-      return null;
-    }
-
-    return {
-      pathData,
-      points,
-      morphPathData: pointsToClosedPath(points),
-      fill: pathNode.getAttribute('fill') || '#ffffff',
-      stroke: pathNode.getAttribute('stroke') || '#3c3c4a',
-      fillOpacity: clamp(parseNumericAttr(pathNode.getAttribute('fill-opacity'), 1), 0.08, 1),
-      strokeOpacity: clamp(parseNumericAttr(pathNode.getAttribute('stroke-opacity'), 1), 0.08, 1),
-      strokeWidth: Math.max(0.8, parseNumericAttr(pathNode.getAttribute('stroke-width'), 3))
-    };
-  }
-
-  function parseEmotionSvg(source) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(source, 'image/svg+xml');
-
-    if (doc.querySelector('parsererror')) {
-      return null;
-    }
-
-    const svgNode = doc.querySelector('svg');
-    if (!svgNode) {
-      return null;
-    }
-
-    const paths = Array.from(svgNode.querySelectorAll('path'));
-    if (paths.length < 2) {
-      return null;
-    }
-
-    const right = parseEmotionShape(paths[0]);
-    const left = parseEmotionShape(paths[1]);
-    if (!right || !left) {
-      return null;
-    }
-
-    return {
-      viewBox: svgNode.getAttribute('viewBox') || '0 0 67 47',
-      right,
-      left
-    };
-  }
-
-  async function loadEmotionAsset(emotionName, assetPath) {
-    const url = getAssetUrl(assetPath);
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`No se pudo cargar ${assetPath}.`);
-    }
-
-    const markup = await response.text();
-    const parsed = parseEmotionSvg(markup);
-    if (!parsed) {
-      throw new Error(`SVG invalido para la emocion ${emotionName}.`);
-    }
-
-    return {
-      name: emotionName,
-      ...parsed
-    };
-  }
-
-  function resolveRenderableEmotionName(name) {
-    const normalized = normalizeEmotionName(name);
-    if (normalized && brandEmotionLibrary[normalized]) {
-      return normalized;
-    }
-
-    if (brandEmotionLibrary.neutral) {
-      return 'neutral';
-    }
-
-    const available = Object.keys(brandEmotionLibrary);
-    return available.length ? available[0] : '';
-  }
-
-  function getEmotionTargets() {
-    const targets = [];
-
-    if (brandEmotionEyeRight && brandEmotionEyeLeft) {
-      targets.push({
-        container: brandEmotion,
-        svg: brandEmotionSvg,
-        rightPath: brandEmotionEyeRight,
-        leftPath: brandEmotionEyeLeft
-      });
-    }
-
-    if (onboardingEmotionEyeRight && onboardingEmotionEyeLeft) {
-      targets.push({
-        container: onboardingEmotion,
-        svg: onboardingEmotionSvg,
-        rightPath: onboardingEmotionEyeRight,
-        leftPath: onboardingEmotionEyeLeft
-      });
-    }
-
-    return targets;
-  }
-
-  function pickRandomEmotion(excluded = '') {
-    const source = Object.keys(brandEmotionLibrary).length ? Object.keys(brandEmotionLibrary) : BRAND_EMOTION_NAMES;
-    const pool = source.filter((name) => name !== excluded);
-    const names = pool.length ? pool : source;
-
-    if (!names.length) {
-      return 'neutral';
-    }
-
-    return names[Math.floor(Math.random() * names.length)];
-  }
-
-  function clearRandomEmotionTimer() {
-    if (randomEmotionTimer) {
-      window.clearTimeout(randomEmotionTimer);
-      randomEmotionTimer = 0;
-    }
-  }
-
-  function scheduleRandomEmotionTick() {
-    if (!randomEmotionEnabled) {
-      return;
-    }
-
-    clearRandomEmotionTimer();
-    const delay = 1200 + Math.floor(Math.random() * 1600);
-
-    randomEmotionTimer = window.setTimeout(() => {
-      if (!randomEmotionEnabled) {
-        return;
-      }
-
-      setBrandEmotion(pickRandomEmotion(currentBrandEmotion), { preserveRandom: true });
-      scheduleRandomEmotionTick();
-    }, delay);
-  }
-
   function startRandomEmotionCycle(options = {}) {
-    const immediate = options.immediate !== false;
-    if (!Object.keys(brandEmotionLibrary).length) {
-      return;
-    }
-
-    randomEmotionEnabled = true;
-    clearRandomEmotionTimer();
-
-    if (immediate) {
-      setBrandEmotion(pickRandomEmotion(currentBrandEmotion), { preserveRandom: true });
-    }
-
-    scheduleRandomEmotionTick();
+    brandEmotionController.startRandomCycle(options);
   }
 
   function stopRandomEmotionCycle() {
-    randomEmotionEnabled = false;
-    clearRandomEmotionTimer();
+    brandEmotionController.stopRandomCycle();
   }
 
   function setBrandEmotion(emotionName, options = {}) {
-    const immediate = Boolean(options.immediate);
-    const preserveRandom = Boolean(options.preserveRandom);
-    const resolvedName = resolveRenderableEmotionName(emotionName);
-    const targets = getEmotionTargets();
-    if (!resolvedName || !targets.length) {
-      return;
-    }
-
-    if (!preserveRandom) {
-      stopRandomEmotionCycle();
-    }
-
-    const target = brandEmotionLibrary[resolvedName];
-    const from = currentBrandEmotion ? brandEmotionLibrary[currentBrandEmotion] : null;
-
-    for (const targetRef of targets) {
-      if (targetRef.container) {
-        targetRef.container.setAttribute('aria-label', `Greene emotion ${resolvedName}`);
-        targetRef.container.dataset.emotion = resolvedName;
-      }
-
-      setEmotionPathStyle(targetRef.rightPath, target.right);
-      setEmotionPathStyle(targetRef.leftPath, target.left);
-    }
-
-    if (immediate || !from || !from.right || !from.left || resolvedName === currentBrandEmotion) {
-      for (const targetRef of targets) {
-        targetRef.rightPath.setAttribute('d', target.right.morphPathData || target.right.pathData);
-        targetRef.leftPath.setAttribute('d', target.left.morphPathData || target.left.pathData);
-      }
-      currentBrandEmotion = resolvedName;
-      return;
-    }
-
-    const morphToken = ++brandEmotionMorphToken;
-    const startAt = performance.now();
-
-    const morphFrame = (now) => {
-      if (morphToken !== brandEmotionMorphToken) {
-        return;
-      }
-
-      const progress = Math.min(1, (now - startAt) / BRAND_EMOTION_MORPH_DURATION);
-      const eased = easeInOutSine(progress);
-
-      const nextRightPoints = interpolatePathPoints(from.right.points, target.right.points, eased);
-      const nextLeftPoints = interpolatePathPoints(from.left.points, target.left.points, eased);
-
-      const nextRightPath = nextRightPoints.length ? pointsToClosedPath(nextRightPoints) : '';
-      const nextLeftPath = nextLeftPoints.length ? pointsToClosedPath(nextLeftPoints) : '';
-
-      if (nextRightPath || nextLeftPath) {
-        for (const targetRef of targets) {
-          if (nextRightPath) {
-            targetRef.rightPath.setAttribute('d', nextRightPath);
-          }
-          if (nextLeftPath) {
-            targetRef.leftPath.setAttribute('d', nextLeftPath);
-          }
-        }
-      }
-
-      if (progress < 1) {
-        requestAnimationFrame(morphFrame);
-        return;
-      }
-
-      for (const targetRef of targets) {
-        targetRef.rightPath.setAttribute('d', target.right.morphPathData || target.right.pathData);
-        targetRef.leftPath.setAttribute('d', target.left.morphPathData || target.left.pathData);
-      }
-    };
-
-    requestAnimationFrame(morphFrame);
-    currentBrandEmotion = resolvedName;
+    brandEmotionController.setEmotion(emotionName, options);
   }
 
   function extractEmotionFromAssistantMessage(message) {
-    const emotionFromMessage = extractEmotionFromText(message);
-    if (emotionFromMessage) {
-      return emotionFromMessage;
-    }
-
-    return '';
+    return brandEmotionController.extractEmotionFromAssistantMessage(message);
   }
 
   async function hydrateBrandEmotions() {
-    if (!getEmotionTargets().length) {
-      return;
-    }
-
-    const loadedEntries = await Promise.all(
-      BRAND_EMOTION_NAMES.map(async (emotionName) => {
-        const assetPath = BRAND_EMOTION_FILES[emotionName];
-
-        try {
-          return await loadEmotionAsset(emotionName, assetPath);
-        } catch (_) {
-          return null;
-        }
-      })
-    );
-
-    const nextLibrary = Object.create(null);
-    for (const item of loadedEntries) {
-      if (!item) {
-        continue;
-      }
-      nextLibrary[item.name] = item;
-    }
-
-    if (!Object.keys(nextLibrary).length) {
-      return;
-    }
-
-    brandEmotionLibrary = nextLibrary;
-
-    const baseViewBox =
-      brandEmotionLibrary.neutral?.viewBox ||
-      brandEmotionLibrary[Object.keys(brandEmotionLibrary)[0]]?.viewBox ||
-      '0 0 67 47';
-
-    for (const targetRef of getEmotionTargets()) {
-      if (targetRef.svg) {
-        targetRef.svg.setAttribute('viewBox', baseViewBox);
-      }
-    }
-
-    const randomEmotion = pickRandomEmotion();
-    setBrandEmotion(randomEmotion, { immediate: true, preserveRandom: true });
-    startRandomEmotionCycle({ immediate: false });
+    await brandEmotionController.hydrate();
   }
 
   function getSettings() {
@@ -6929,7 +6254,7 @@ export function initPanelApp() {
     window.addEventListener('beforeunload', () => {
       tabContextService.stop();
       void contextMemoryService.shutdown();
-      stopRandomEmotionCycle();
+      brandEmotionController.destroy();
       for (const item of imageQueue) {
         releaseQueueItem(item);
       }
