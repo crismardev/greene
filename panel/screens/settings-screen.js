@@ -12,6 +12,8 @@ export function createSettingsScreenController({
   defaults,
   storage,
   setStatus,
+  getThemeMode,
+  setThemeMode,
   normalizeModelName,
   syncModelSelectors,
   getActiveModel
@@ -21,6 +23,7 @@ export function createSettingsScreenController({
     onboardingStatus,
     settingsNameInput,
     settingsBirthdayInput,
+    settingsThemeModeSelect,
     settingsLanguageSelect,
     settingsSystemPrompt,
     settingsModelSelect,
@@ -45,6 +48,18 @@ export function createSettingsScreenController({
     return raw;
   }
 
+  function normalizeThemeMode(mode) {
+    const raw = String(mode || '')
+      .trim()
+      .toLowerCase();
+
+    if (raw === 'dark' || raw === 'light' || raw === 'system') {
+      return raw;
+    }
+
+    return 'system';
+  }
+
   function applyPanelSettingsToUi() {
     const panelSettings = getPanelSettings();
 
@@ -66,6 +81,10 @@ export function createSettingsScreenController({
 
     if (settingsSystemPrompt) {
       settingsSystemPrompt.value = panelSettings.systemPrompt || buildDefaultChatSystemPrompt(panelSettings.language);
+    }
+
+    if (settingsThemeModeSelect && typeof getThemeMode === 'function') {
+      settingsThemeModeSelect.value = normalizeThemeMode(getThemeMode());
     }
 
     state.currentChatModel = normalizeModelName(panelSettings.defaultModel) || defaults.defaultModel;
@@ -181,6 +200,14 @@ export function createSettingsScreenController({
     if (!ok) {
       setStatus(settingsStatus, 'No se pudieron guardar settings.', true);
       return;
+    }
+
+    if (settingsThemeModeSelect && typeof setThemeMode === 'function') {
+      const themeOk = await setThemeMode(normalizeThemeMode(settingsThemeModeSelect.value), { silent: true });
+      if (!themeOk) {
+        setStatus(settingsStatus, 'No se pudo guardar apariencia.', true);
+        return;
+      }
     }
 
     setPanelSettings(nextSettings);

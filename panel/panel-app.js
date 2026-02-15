@@ -6,6 +6,15 @@ import { setStatus } from './services/status-service.js';
 import { createPanelStorageService } from './services/panel-storage-service.js';
 import { createOllamaService } from './services/ollama-service.js';
 import { createSettingsScreenController } from './screens/settings-screen.js';
+import { createTabContextService } from './services/tab-context-service.js';
+import { buildTabSummaryPrompt, toJsonTabRecord } from './services/site-context/generic-site-context.js';
+import {
+  buildWhatsappMetaLabel,
+  buildWhatsappReplyPrompt,
+  buildWhatsappSignalKey,
+  getWhatsappChatKey,
+  isWhatsappContext
+} from './services/site-context/whatsapp-site-context.js';
 
 export function initPanelApp() {
   'use strict';
@@ -89,7 +98,8 @@ export function initPanelApp() {
   const MAX_CHAT_CONTEXT_MESSAGES = 20;
   const MAX_CHAT_HISTORY_MESSAGES = 160;
   const MAX_IMAGE_FILES = 10;
-  const THEME_SEQUENCE = Object.freeze(['system', 'dark', 'light']);
+  const MAX_TABS_FOR_AI_SUMMARY = 20;
+  const TAB_SUMMARY_MAX_CHARS = 160;
 
   const DEFAULT_OLLAMA_MODEL = 'gpt-oss:20b';
   const LOCAL_MODEL_KEEP_ALIVE = '20m';
@@ -142,9 +152,6 @@ export function initPanelApp() {
   const closeSettingsBtn = document.getElementById('closeSettingsBtn');
   const toolTabs = Array.from(document.querySelectorAll('.tool-tab'));
 
-  const themeToggleBtn = document.getElementById('themeToggleBtn');
-  const themeToggleIcon = document.getElementById('themeToggleIcon');
-  const themeToggleLabel = document.getElementById('themeToggleLabel');
   const brandEmotion = document.getElementById('brandEmotion');
   const brandEmotionSvg = document.getElementById('brandEmotionSvg');
   const brandEmotionEyeRight = document.getElementById('brandEmotionEyeRight');
@@ -167,6 +174,12 @@ export function initPanelApp() {
   const chatToolOptions = Array.from(document.querySelectorAll('[data-chat-tool]'));
   const chatModelSelect = document.getElementById('chatModelSelect');
   const refreshModelsBtn = document.getElementById('refreshModelsBtn');
+  const whatsappSuggestionCard = document.getElementById('whatsappSuggestionCard');
+  const whatsappSuggestionMeta = document.getElementById('whatsappSuggestionMeta');
+  const whatsappSuggestionText = document.getElementById('whatsappSuggestionText');
+  const whatsappSuggestionStatus = document.getElementById('whatsappSuggestionStatus');
+  const whatsappSuggestionRunBtn = document.getElementById('whatsappSuggestionRunBtn');
+  const whatsappSuggestionRefreshBtn = document.getElementById('whatsappSuggestionRefreshBtn');
 
   const imageInput = document.getElementById('imageInput');
   const imagePickBtn = document.getElementById('imagePickBtn');
@@ -186,12 +199,14 @@ export function initPanelApp() {
   const onboardingStatus = document.getElementById('onboardingStatus');
   const settingsNameInput = document.getElementById('settingsNameInput');
   const settingsBirthdayInput = document.getElementById('settingsBirthdayInput');
+  const settingsThemeModeSelect = document.getElementById('settingsThemeModeSelect');
   const settingsLanguageSelect = document.getElementById('settingsLanguageSelect');
   const settingsSystemPrompt = document.getElementById('settingsSystemPrompt');
   const settingsModelSelect = document.getElementById('settingsModelSelect');
   const settingsSaveBtn = document.getElementById('settingsSaveBtn');
   const settingsStatus = document.getElementById('settingsStatus');
   const settingsRefreshModelsBtn = document.getElementById('settingsRefreshModelsBtn');
+  const tabsContextJson = document.getElementById('tabsContextJson');
 
   let settings = { ...DEFAULT_SETTINGS };
   let imageQueue = [];
@@ -217,6 +232,18 @@ export function initPanelApp() {
   let stageResizeObserver = null;
   let settingsScreenController = null;
   let settingsScreenState = null;
+  let tabContextSnapshot = { activeTabId: -1, tabs: [], updatedAt: Date.now(), reason: 'init' };
+  let tabSummaryByKey = new Map();
+  let tabSummaryQueue = [];
+  let tabSummaryQueueRunning = false;
+  let whatsappSuggestionState = {
+    tabId: -1,
+    chatKey: '',
+    signalKey: '',
+    text: '',
+    loading: false
+  };
+  let whatsappSuggestionToken = 0;
 
   const prefersDarkMedia =
     typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -232,6 +259,9 @@ export function initPanelApp() {
     chatEndpoints: OLLAMA_CHAT_ENDPOINTS,
     generateEndpoints: OLLAMA_GENERATE_ENDPOINTS,
     tagsEndpoints: OLLAMA_TAGS_ENDPOINTS
+  });
+  const tabContextService = createTabContextService({
+    onSnapshot: handleTabContextSnapshot
   });
 
   function focusChatInput() {
@@ -1122,62 +1152,42 @@ export function initPanelApp() {
     return 'Sistema';
   }
 
-  function getThemeIconSvg(mode) {
-    if (mode === 'dark') {
-      return [
-        '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
-        '<path d="M15.5 3.4a8.7 8.7 0 1 0 5.1 15.9 7.6 7.6 0 1 1-5.1-15.9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>',
-        '</svg>'
-      ].join('');
+  function normalizeThemeMode(mode) {
+    const raw = String(mode || '')
+      .trim()
+      .toLowerCase();
+
+    if (raw === 'dark' || raw === 'light' || raw === 'system') {
+      return raw;
     }
 
-    if (mode === 'light') {
-      return [
-        '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
-        '<circle cx="12" cy="12" r="4.3" fill="none" stroke="currentColor" stroke-width="1.8"></circle>',
-        '<path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.8 5.2l-1.7 1.7M6.9 17.1l-1.7 1.7M18.8 18.8l-1.7-1.7M6.9 6.9 5.2 5.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>',
-        '</svg>'
-      ].join('');
-    }
-
-    return [
-      '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
-      '<rect x="3.5" y="4.5" width="17" height="11.5" rx="1.9" fill="none" stroke="currentColor" stroke-width="1.7"></rect>',
-      '<path d="M8.5 19.5h7M10.2 16v3.5M13.8 16v3.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>',
-      '</svg>'
-    ].join('');
+    return 'system';
   }
 
   function applyTheme(mode) {
-    const safeMode = THEME_SEQUENCE.includes(mode) ? mode : 'system';
+    const safeMode = normalizeThemeMode(mode);
     const resolvedMode = getResolvedTheme(safeMode);
 
     themeMode = safeMode;
     document.documentElement.dataset.theme = resolvedMode;
-
-    if (themeToggleLabel) {
-      themeToggleLabel.textContent = getThemeLabel(safeMode);
-    }
-
-    if (themeToggleIcon) {
-      themeToggleIcon.innerHTML = getThemeIconSvg(safeMode);
-    }
-
-    if (themeToggleBtn) {
-      themeToggleBtn.title = `Tema: ${getThemeLabel(safeMode).toLowerCase()}`;
-      themeToggleBtn.setAttribute('aria-label', `Cambiar tema. Actual: ${getThemeLabel(safeMode)}`);
-    }
   }
 
-  async function cycleTheme() {
-    const currentIndex = THEME_SEQUENCE.indexOf(themeMode);
-    const nextMode = THEME_SEQUENCE[(currentIndex + 1) % THEME_SEQUENCE.length];
+  async function setThemeMode(nextMode, options = {}) {
+    const silent = Boolean(options.silent);
+    const safeMode = normalizeThemeMode(nextMode);
+    applyTheme(safeMode);
 
-    applyTheme(nextMode);
-    const ok = await saveSettings({ [PREFERENCE_KEYS.UI_THEME_MODE]: nextMode });
-    if (!ok) {
-      setStatus(chatStatus, 'No se pudo guardar el tema.', true);
+    const ok = await saveSettings({ [PREFERENCE_KEYS.UI_THEME_MODE]: safeMode });
+    if (!ok && !silent) {
+      setStatus(settingsStatus, 'No se pudo guardar apariencia.', true);
+      return false;
     }
+
+    if (!silent) {
+      setStatus(settingsStatus, `Apariencia: ${getThemeLabel(safeMode)}.`);
+    }
+
+    return ok;
   }
 
   function openToolMenu() {
@@ -1222,11 +1232,12 @@ export function initPanelApp() {
 
     if (message.role === 'assistant' && message.pending && !visibleText) {
       const loader = document.createElement('span');
-      loader.className = 'chat-inline-loader';
+      loader.className = 'chat-inline-loader chat-inline-loader--solo';
       loader.setAttribute('aria-hidden', 'true');
 
       const label = document.createElement('span');
-      label.textContent = 'Procesando...';
+      label.className = 'sr-only';
+      label.textContent = 'Generando respuesta';
 
       bubble.append(loader, label);
     } else {
@@ -1440,6 +1451,385 @@ export function initPanelApp() {
       chatResetBtn.disabled = false;
       requestChatAutofocus(6, 60);
     }
+  }
+
+  function hashText(value) {
+    const text = String(value || '');
+    let hash = 0;
+
+    for (let index = 0; index < text.length; index += 1) {
+      hash = (hash << 5) - hash + text.charCodeAt(index);
+      hash |= 0;
+    }
+
+    return Math.abs(hash).toString(36);
+  }
+
+  function getTabSummaryKey(tabContext) {
+    const tabId = Number(tabContext?.tabId) || -1;
+    const site = String(tabContext?.site || 'generic');
+    const url = String(tabContext?.url || '');
+    const title = String(tabContext?.title || '');
+    const description = String(tabContext?.description || '');
+    const excerpt = String(tabContext?.textExcerpt || '').slice(0, 620);
+    const payload = `${site}|${url}|${title}|${description}|${excerpt}`;
+    return `${tabId}:${hashText(payload)}`;
+  }
+
+  function getTabSummary(tabContext) {
+    const key = getTabSummaryKey(tabContext);
+    return tabSummaryByKey.get(key) || '';
+  }
+
+  function trimTabSummaryCache() {
+    const keepKeys = new Set(tabContextSnapshot.tabs.map((item) => getTabSummaryKey(item)));
+    for (const key of tabSummaryByKey.keys()) {
+      if (!keepKeys.has(key)) {
+        tabSummaryByKey.delete(key);
+      }
+    }
+  }
+
+  function renderTabsContextJson() {
+    if (!tabsContextJson) {
+      return;
+    }
+
+    const tabsPayload = tabContextSnapshot.tabs.map((tab) => toJsonTabRecord(tab, getTabSummary(tab)));
+    const payload = {
+      activeTabId: tabContextSnapshot.activeTabId,
+      reason: tabContextSnapshot.reason,
+      updatedAt: tabContextSnapshot.updatedAt,
+      tabs: tabsPayload
+    };
+
+    tabsContextJson.textContent = JSON.stringify(payload, null, 2);
+  }
+
+  async function generateWithLocalModel(prompt, options = {}) {
+    const temperature = Number.isFinite(options.temperature) ? options.temperature : 0.2;
+    const model = options.model || getActiveModel();
+    let output = '';
+
+    await streamWithOllamaPrompt(model, prompt, temperature, (chunk) => {
+      output += chunk || '';
+    });
+
+    return output.trim();
+  }
+
+  function enqueueTabSummary(tabContext) {
+    if (!tabContext || typeof tabContext.tabId !== 'number' || tabContext.tabId < 0) {
+      return;
+    }
+
+    if (isWhatsappContext(tabContext)) {
+      return;
+    }
+
+    const key = getTabSummaryKey(tabContext);
+    if (!key || tabSummaryByKey.has(key) || tabSummaryQueue.some((item) => item.key === key)) {
+      return;
+    }
+
+    tabSummaryQueue.push({ key, tabContext });
+    processTabSummaryQueue();
+  }
+
+  async function processTabSummaryQueue() {
+    if (tabSummaryQueueRunning) {
+      return;
+    }
+
+    tabSummaryQueueRunning = true;
+
+    while (tabSummaryQueue.length) {
+      const next = tabSummaryQueue.shift();
+      if (!next || !next.tabContext) {
+        continue;
+      }
+
+      try {
+        const prompt = buildTabSummaryPrompt(next.tabContext);
+        const response = await generateWithLocalModel(prompt, { temperature: 0.15 });
+        const summary = response
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, TAB_SUMMARY_MAX_CHARS);
+
+        tabSummaryByKey.set(next.key, summary);
+      } catch (_) {
+        tabSummaryByKey.set(next.key, '');
+      }
+
+      renderTabsContextJson();
+    }
+
+    tabSummaryQueueRunning = false;
+  }
+
+  function getActiveTabContext() {
+    return tabContextSnapshot.tabs.find((item) => item.tabId === tabContextSnapshot.activeTabId) || null;
+  }
+
+  function hideWhatsappSuggestion() {
+    whatsappSuggestionToken += 1;
+    whatsappSuggestionState = {
+      tabId: -1,
+      chatKey: '',
+      signalKey: '',
+      text: '',
+      loading: false
+    };
+
+    if (whatsappSuggestionCard) {
+      whatsappSuggestionCard.hidden = true;
+    }
+
+    if (whatsappSuggestionMeta) {
+      whatsappSuggestionMeta.textContent = '';
+    }
+
+    if (whatsappSuggestionText) {
+      whatsappSuggestionText.textContent = '';
+    }
+
+    if (whatsappSuggestionRunBtn) {
+      whatsappSuggestionRunBtn.disabled = true;
+    }
+
+    if (whatsappSuggestionRefreshBtn) {
+      whatsappSuggestionRefreshBtn.disabled = true;
+    }
+
+    setStatus(whatsappSuggestionStatus, '');
+  }
+
+  function setWhatsappSuggestionLoading(tabContext) {
+    if (whatsappSuggestionCard) {
+      whatsappSuggestionCard.hidden = false;
+    }
+
+    if (whatsappSuggestionMeta) {
+      whatsappSuggestionMeta.textContent = buildWhatsappMetaLabel(tabContext);
+    }
+
+    if (whatsappSuggestionText) {
+      whatsappSuggestionText.textContent = '';
+    }
+
+    if (whatsappSuggestionRunBtn) {
+      whatsappSuggestionRunBtn.disabled = true;
+    }
+
+    if (whatsappSuggestionRefreshBtn) {
+      whatsappSuggestionRefreshBtn.disabled = true;
+    }
+
+    setStatus(whatsappSuggestionStatus, 'Generando sugerencia...', false, { loading: true });
+  }
+
+  function setWhatsappSuggestionResult(tabContext, suggestion) {
+    const text = String(suggestion || '').trim();
+
+    if (!text) {
+      hideWhatsappSuggestion();
+      return;
+    }
+
+    if (whatsappSuggestionCard) {
+      whatsappSuggestionCard.hidden = false;
+    }
+
+    if (whatsappSuggestionMeta) {
+      whatsappSuggestionMeta.textContent = buildWhatsappMetaLabel(tabContext);
+    }
+
+    if (whatsappSuggestionText) {
+      whatsappSuggestionText.textContent = text;
+    }
+
+    if (whatsappSuggestionRunBtn) {
+      whatsappSuggestionRunBtn.disabled = false;
+    }
+
+    if (whatsappSuggestionRefreshBtn) {
+      whatsappSuggestionRefreshBtn.disabled = false;
+    }
+
+    setStatus(whatsappSuggestionStatus, 'Sugerencia lista.');
+  }
+
+  async function generateWhatsappSuggestion(tabContext, options = {}) {
+    if (!tabContext || !isWhatsappContext(tabContext)) {
+      hideWhatsappSuggestion();
+      return;
+    }
+
+    const chatKey = getWhatsappChatKey(tabContext);
+    const signalKey = buildWhatsappSignalKey(tabContext);
+    const force = Boolean(options.force);
+
+    if (!chatKey || !signalKey) {
+      hideWhatsappSuggestion();
+      return;
+    }
+
+    if (!force && whatsappSuggestionState.signalKey === signalKey && whatsappSuggestionState.text) {
+      setWhatsappSuggestionResult(tabContext, whatsappSuggestionState.text);
+      return;
+    }
+
+    const token = ++whatsappSuggestionToken;
+    whatsappSuggestionState = {
+      tabId: tabContext.tabId,
+      chatKey,
+      signalKey,
+      text: whatsappSuggestionState.text,
+      loading: true
+    };
+
+    setWhatsappSuggestionLoading(tabContext);
+
+    try {
+      const prompt = buildWhatsappReplyPrompt(tabContext);
+      const suggestionRaw = await generateWithLocalModel(prompt, { temperature: 0.35 });
+      const suggestion = suggestionRaw
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 280);
+
+      if (token !== whatsappSuggestionToken) {
+        return;
+      }
+
+      if (!suggestion) {
+        throw new Error('No se genero sugerencia para este chat.');
+      }
+
+      whatsappSuggestionState = {
+        tabId: tabContext.tabId,
+        chatKey,
+        signalKey,
+        text: suggestion,
+        loading: false
+      };
+
+      setWhatsappSuggestionResult(tabContext, suggestion);
+    } catch (error) {
+      if (token !== whatsappSuggestionToken) {
+        return;
+      }
+
+      whatsappSuggestionState = {
+        tabId: tabContext.tabId,
+        chatKey,
+        signalKey,
+        text: '',
+        loading: false
+      };
+
+      if (whatsappSuggestionCard) {
+        whatsappSuggestionCard.hidden = false;
+      }
+
+      if (whatsappSuggestionMeta) {
+        whatsappSuggestionMeta.textContent = buildWhatsappMetaLabel(tabContext);
+      }
+
+      if (whatsappSuggestionText) {
+        whatsappSuggestionText.textContent = '';
+      }
+
+      if (whatsappSuggestionRunBtn) {
+        whatsappSuggestionRunBtn.disabled = true;
+      }
+
+      if (whatsappSuggestionRefreshBtn) {
+        whatsappSuggestionRefreshBtn.disabled = false;
+      }
+
+      const message = error instanceof Error ? error.message : 'No se pudo generar sugerencia.';
+      setStatus(whatsappSuggestionStatus, message, true);
+    }
+  }
+
+  async function executeWhatsappSuggestion() {
+    if (!whatsappSuggestionState.text || whatsappSuggestionState.tabId < 0) {
+      return;
+    }
+
+    if (whatsappSuggestionRunBtn) {
+      whatsappSuggestionRunBtn.disabled = true;
+    }
+
+    if (whatsappSuggestionRefreshBtn) {
+      whatsappSuggestionRefreshBtn.disabled = true;
+    }
+
+    setStatus(whatsappSuggestionStatus, 'Enviando mensaje...', false, { loading: true });
+
+    const response = await tabContextService.runSiteActionInTab(
+      whatsappSuggestionState.tabId,
+      'whatsapp',
+      'sendMessage',
+      { text: whatsappSuggestionState.text }
+    );
+
+    if (!response || response.ok !== true) {
+      const message = response?.error || 'No se pudo enviar mensaje en WhatsApp.';
+      setStatus(whatsappSuggestionStatus, message, true);
+      if (whatsappSuggestionRunBtn) {
+        whatsappSuggestionRunBtn.disabled = false;
+      }
+      if (whatsappSuggestionRefreshBtn) {
+        whatsappSuggestionRefreshBtn.disabled = false;
+      }
+      return;
+    }
+
+    setStatus(whatsappSuggestionStatus, 'Mensaje enviado.');
+    if (whatsappSuggestionRunBtn) {
+      whatsappSuggestionRunBtn.disabled = false;
+    }
+    if (whatsappSuggestionRefreshBtn) {
+      whatsappSuggestionRefreshBtn.disabled = false;
+    }
+
+    window.setTimeout(() => {
+      tabContextService.requestSnapshot();
+    }, 350);
+  }
+
+  function handleTabContextSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') {
+      return;
+    }
+
+    const tabs = Array.isArray(snapshot.tabs) ? snapshot.tabs : [];
+    tabContextSnapshot = {
+      activeTabId: typeof snapshot.activeTabId === 'number' ? snapshot.activeTabId : -1,
+      reason: String(snapshot.reason || 'snapshot'),
+      updatedAt: Number(snapshot.updatedAt) || Date.now(),
+      tabs
+    };
+
+    trimTabSummaryCache();
+
+    const tabsForSummary = tabs.slice(0, MAX_TABS_FOR_AI_SUMMARY);
+    for (const tab of tabsForSummary) {
+      enqueueTabSummary(tab);
+    }
+
+    renderTabsContextJson();
+
+    const activeTab = getActiveTabContext();
+    if (!activeTab || !isWhatsappContext(activeTab)) {
+      hideWhatsappSuggestion();
+      return;
+    }
+
+    generateWhatsappSuggestion(activeTab, { force: false });
   }
 
   function updateImageQualityLabel(value) {
@@ -2161,15 +2551,13 @@ export function initPanelApp() {
       settingsScreenController?.handleLanguageChange();
     });
 
+    settingsThemeModeSelect?.addEventListener('change', () => {
+      void setThemeMode(settingsThemeModeSelect.value, { silent: false });
+    });
+
     for (const tab of toolTabs) {
       tab.addEventListener('click', () => {
         setActiveTool(tab.dataset.toolTarget || 'image');
-      });
-    }
-
-    if (themeToggleBtn) {
-      themeToggleBtn.addEventListener('click', () => {
-        cycleTheme();
       });
     }
 
@@ -2240,6 +2628,19 @@ export function initPanelApp() {
 
     chatSendBtn?.addEventListener('click', () => {
       sendChatMessage();
+    });
+
+    whatsappSuggestionRunBtn?.addEventListener('click', () => {
+      executeWhatsappSuggestion();
+    });
+
+    whatsappSuggestionRefreshBtn?.addEventListener('click', () => {
+      const activeTab = getActiveTabContext();
+      if (!activeTab || !isWhatsappContext(activeTab)) {
+        return;
+      }
+
+      generateWhatsappSuggestion(activeTab, { force: true });
     });
 
     imagePickBtn?.addEventListener('click', () => {
@@ -2360,6 +2761,7 @@ export function initPanelApp() {
     });
 
     window.addEventListener('beforeunload', () => {
+      tabContextService.stop();
       stopRandomEmotionCycle();
       for (const item of imageQueue) {
         releaseQueueItem(item);
@@ -2397,6 +2799,7 @@ export function initPanelApp() {
         onboardingStatus,
         settingsNameInput,
         settingsBirthdayInput,
+        settingsThemeModeSelect,
         settingsLanguageSelect,
         settingsSystemPrompt,
         settingsModelSelect,
@@ -2413,6 +2816,8 @@ export function initPanelApp() {
         savePanelSettings
       },
       setStatus,
+      getThemeMode: () => themeMode,
+      setThemeMode,
       normalizeModelName,
       syncModelSelectors,
       getActiveModel
@@ -2425,6 +2830,10 @@ export function initPanelApp() {
     closeToolMenu();
     updateChatInputSize();
     renderImageQueue();
+    hideWhatsappSuggestion();
+    renderTabsContextJson();
+
+    await tabContextService.start();
 
     await hydrateSettings();
     await hydratePanelSettings();

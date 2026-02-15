@@ -6,9 +6,11 @@
   "permissions": [
     "storage",
     "tabs",
-    "sidePanel"
+    "sidePanel",
+    "scripting"
   ],
   "host_permissions": [
+    "<all_urls>",
     "https://router.huggingface.co/*",
     "http://localhost:11434/*",
     "http://127.0.0.1:11434/*"
@@ -35,6 +37,17 @@
     }
   },
   "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/tab-context/site-handlers/generic-handler.js",
+        "src/tab-context/site-handlers/whatsapp-handler.js",
+        "src/content-tab-context.js"
+      ],
+      "run_at": "document_idle"
+    },
     {
       "matches": [
         "https://*.retool.com/apps/*"
