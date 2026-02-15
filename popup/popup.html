@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GreenStudio Tools</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header class="panel__header">
+        <img class="panel__logo" src="../assets/greenstudio-logo.svg" alt="GreenStudio Tools" />
+        <div>
+          <h1>GreenStudio Tools</h1>
+          <p>Extension modular para Retool</p>
+        </div>
+      </header>
+
+      <section class="panel__tools" id="toolsContainer" aria-live="polite"></section>
+
+      <footer class="panel__footer">
+        <button id="applyNowBtn" class="btn">Aplicar ahora en esta pestana</button>
+        <p id="statusText" class="status" role="status"></p>
+      </footer>
+    </main>
+
+    <script src="../src/tool-config.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

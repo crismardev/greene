@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "GreenStudio Tools",
+  "version": "2.0.0",
+  "description": "Panel lateral de herramientas de GreenStudio con AI y utilidades de imagen.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://router.huggingface.co/*",
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*"
+  ],
+  "icons": {
+    "16": "assets/icon-16.png",
+    "32": "assets/icon-32.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "side_panel": {
+    "default_path": "panel/panel.html"
+  },
+  "action": {
+    "default_title": "GreenStudio Tools",
+    "default_icon": {
+      "16": "assets/icon-16.png",
+      "32": "assets/icon-32.png",
+      "48": "assets/icon-48.png",
+      "128": "assets/icon-128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.retool.com/apps/*"
+      ],
+      "js": [
+        "src/tool-config.js",
+        "src/content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

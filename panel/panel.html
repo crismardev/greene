@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grenne</title>
+  <link rel="stylesheet" href="tailwind.generated.css" />
+  <link rel="stylesheet" href="panel.css" />
+</head>
+
+<body>
+  <main class="app" id="app" data-screen="onboarding">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand__emotion" id="brandEmotion" role="img" aria-label="Greene emotion neutral">
+          <svg id="brandEmotionSvg" viewBox="0 0 67 47" fill="none" aria-hidden="true" focusable="false">
+            <path id="brandEmotionEyeRight" class="brand__emotion-path"
+              d="M41.9912 15.4673C44.7332 12.9205 48.206 11.8652 51.9638 12.0137C55.1073 12.1379 56.532 12.9681 58.4461 14.974C61.1728 17.8314 61.4988 21.7435 60.4406 25.3351C59.3616 28.9976 55.8663 30.2635 52.4625 31.7492C48.7168 33.3841 45.7722 33.4494 42.4898 31.7492C39.2347 30.0631 37.9407 28.3154 38.0021 24.3483C38.0554 20.902 39.4514 17.8263 41.9912 15.4673Z"
+              fill="white" stroke="#3C3C4A" stroke-width="3"></path>
+            <path id="brandEmotionEyeLeft" class="brand__emotion-path"
+              d="M23.0609 15.5138C20.3114 12.9328 16.829 11.8634 13.0609 12.0139C9.90886 12.1397 8.48027 12.9811 6.56091 15.0139C3.82672 17.9096 3.49979 21.8741 4.5609 25.5139C5.6429 29.2253 9.14776 30.5082 12.5609 32.0139C16.3168 33.6707 19.2695 33.7369 22.5609 32.0139C25.8249 30.3052 27.1224 28.534 27.0609 24.5138C27.0074 21.0213 25.6076 17.9044 23.0609 15.5138Z"
+              fill="white" stroke="#3C3C4A" stroke-width="3"></path>
+          </svg>
+        </div>
+        <div>
+          <p class="brand__eyebrow">assistant</p>
+          <h1>Grenne</h1>
+        </div>
+      </div>
+      <div class="topbar__actions">
+        <button id="themeToggleBtn" class="theme-toggle" type="button" aria-label="Cambiar tema" title="Tema: sistema">
+          <span id="themeToggleIcon" class="theme-toggle__icon" aria-hidden="true"></span>
+          <span id="themeToggleLabel">Sistema</span>
+        </button>
+
+        <button id="openSettingsBtn" class="icon-btn icon-btn--ghost" type="button" aria-label="Abrir settings" title="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              d="M12 8.4a3.6 3.6 0 1 1 0 7.2 3.6 3.6 0 0 1 0-7.2zm8 3.6a6.8 6.8 0 0 0-.1-1l2-1.6-1.9-3.2-2.5 1a7.6 7.6 0 0 0-1.8-1l-.4-2.7h-3.8l-.4 2.7a7.3 7.3 0 0 0-1.8 1l-2.5-1L4.9 9.4l2 1.6a6.8 6.8 0 0 0 0 2l-2 1.6 1.9 3.2 2.5-1a7.3 7.3 0 0 0 1.8 1l.4 2.7h3.8l.4-2.7a7.6 7.6 0 0 0 1.8-1l2.5 1 1.9-3.2-2-1.6c.1-.3.1-.7.1-1z"
+              fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
+          </svg>
+        </button>
+        <button id="openToolsBtn" class="btn btn--ghost" type="button">Tools</button>
+        <button id="chatResetBtn" class="icon-btn icon-btn--ghost" type="button" title="Reset history" aria-label="Reset history">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 6h2v9h-2V9zm4 0h2v9h-2V9zM7 9h2v9H7V9z" fill="currentColor"></path>
+            <path d="M6 7h12v13a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7z" fill="none" stroke="currentColor" stroke-width="1.4"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <section class="stage" aria-live="polite">
+      <div class="stage__track" id="stageTrack" style="--screen-count: 4; --screen-index: 0;">
+        <section class="screen screen--onboarding" id="onboardingScreen" aria-label="Onboarding">
+          <article class="onboarding-shell">
+            <div class="onboarding-card">
+              <div class="onboarding-emotion" id="onboardingEmotion" role="img" aria-label="Greene emotion neutral">
+                <svg id="onboardingEmotionSvg" viewBox="0 0 67 47" fill="none" aria-hidden="true" focusable="false">
+                  <path id="onboardingEmotionEyeRight" class="brand__emotion-path"
+                    d="M41.9912 15.4673C44.7332 12.9205 48.206 11.8652 51.9638 12.0137C55.1073 12.1379 56.532 12.9681 58.4461 14.974C61.1728 17.8314 61.4988 21.7435 60.4406 25.3351C59.3616 28.9976 55.8663 30.2635 52.4625 31.7492C48.7168 33.3841 45.7722 33.4494 42.4898 31.7492C39.2347 30.0631 37.9407 28.3154 38.0021 24.3483C38.0554 20.902 39.4514 17.8263 41.9912 15.4673Z"
+                    fill="white" stroke="#3C3C4A" stroke-width="3"></path>
+                  <path id="onboardingEmotionEyeLeft" class="brand__emotion-path"
+                    d="M23.0609 15.5138C20.3114 12.9328 16.829 11.8634 13.0609 12.0139C9.90886 12.1397 8.48027 12.9811 6.56091 15.0139C3.82672 17.9096 3.49979 21.8741 4.5609 25.5139C5.6429 29.2253 9.14776 30.5082 12.5609 32.0139C16.3168 33.6707 19.2695 33.7369 22.5609 32.0139C25.8249 30.3052 27.1224 28.534 27.0609 24.5138C27.0074 21.0213 25.6076 17.9044 23.0609 15.5138Z"
+                    fill="white" stroke="#3C3C4A" stroke-width="3"></path>
+                </svg>
+              </div>
+              <h2>Welcome</h2>
+              <label class="field">
+                <span>Tu nombre</span>
+                <input id="onboardingNameInput" type="text" placeholder="Tu nombre" />
+              </label>
+              <button id="onboardingContinueBtn" class="btn" type="button">Continuar</button>
+              <p id="onboardingStatus" class="status" role="status"></p>
+            </div>
+          </article>
+        </section>
+
+        <section class="screen screen--home" aria-label="Home Chat">
+          <article class="chat-shell">
+            <section class="chat-body" id="chatBody">
+              <div class="chat-messages" id="chatMessages"></div>
+            </section>
+
+            <footer class="chat-composer">
+              <div class="chat-input-row flex flex-col">
+                <label class="sr-only" for="chatInput">Mensaje</label>
+                <textarea autofocus id="chatInput" rows="1" placeholder="Ask anything"></textarea>
+                <div class="flex w-full justify-between items-center gap-12">
+                  <div class="chat-toolbar">
+                    <div class="tool-picker" id="chatToolPicker">
+                      <button id="chatToolBtn" class="tool-picker__trigger" type="button" aria-haspopup="listbox" aria-expanded="false"
+                        aria-label="Seleccionar chat tool">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M4 7h16v2H4V7zm3 4h10v2H7v-2zm-2 4h14v2H5v-2z" fill="currentColor"></path>
+                        </svg>
+                        <span id="chatToolLabel">Chat</span>
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                            stroke-linejoin="round"></path>
+                        </svg>
+                      </button>
+
+                      <div id="chatToolMenu" class="tool-picker__menu" role="listbox" aria-label="Chat tools" hidden>
+                        <button type="button" class="tool-picker__option is-active" role="option" aria-selected="true" data-chat-tool="chat">
+                          Chat
+                        </button>
+                        <button type="button" class="tool-picker__option" role="option" aria-selected="false" data-chat-tool="write_email">
+                          Write an email
+                        </button>
+                      </div>
+                    </div>
+                    <div class="model-picker">
+                      <label class="sr-only" for="chatModelSelect">Modelo</label>
+                      <select id="chatModelSelect" class="model-picker__select" aria-label="Seleccionar modelo"></select>
+                      <button id="refreshModelsBtn" class="icon-btn icon-btn--ghost icon-btn--mini" type="button"
+                        aria-label="Actualizar modelos" title="Actualizar modelos">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M20 6v5h-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                            stroke-linejoin="round"></path>
+                          <path d="M4 18v-5h5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                            stroke-linejoin="round"></path>
+                          <path d="M19 11a7 7 0 0 0-12-3m-2 5a7 7 0 0 0 12 3" fill="none" stroke="currentColor" stroke-width="1.9"
+                            stroke-linecap="round"></path>
+                        </svg>
+                      </button>
+                    </div>
+                    <p id="chatStatus" class="status" role="status"></p>
+                  </div>
+                  <button id="chatSendBtn" class="icon-btn icon-btn--send" type="button" aria-label="Enviar mensaje">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M12 20V6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                      <path d="M6 12l6-6 6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                        stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </footer>
+          </article>
+        </section>
+
+        <section class="screen screen--tools" id="toolsScreen" data-tool="image" style="--tool-index: 0; --tool-count: 2"
+          aria-label="Tools">
+          <article class="tools-shell">
+            <header class="tools-head">
+              <button id="goHomeBtn" class="icon-btn icon-btn--ghost icon-btn--back" type="button" aria-label="Volver al chat" title="Volver">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round"></path>
+                </svg>
+              </button>
+              <h2>Tools</h2>
+            </header>
+
+            <section class="tools-body">
+              <nav class="tool-tabs" aria-label="Tool selector">
+                <button type="button" class="tool-tab is-active" data-tool-target="image">Image WebP</button>
+                <button type="button" class="tool-tab" data-tool-target="retool">Retool</button>
+              </nav>
+
+              <div class="tool-viewport">
+                <div class="tool-track" id="toolTrack">
+                  <section class="tool-pane" data-tool-pane="image">
+                    <article class="tool-card">
+                      <h3>Image to WebP</h3>
+
+                      <div id="imageDropzone" class="image-dropzone" role="button" tabindex="0" aria-label="Agregar imagenes">
+                        <input id="imageInput" class="sr-only" type="file" multiple
+                          accept="image/png,image/jpg,image/jpeg,image/gif,image/bmp" />
+                        <p>Arrastra hasta 10 imagenes aqui o en cualquier parte de la pantalla.</p>
+                        <button id="imagePickBtn" class="btn btn--ghost" type="button">Agregar imagenes</button>
+                      </div>
+
+                      <section class="quality-control" aria-label="Calidad de compresion WebP">
+                        <div class="quality-control__head">
+                          <span class="quality-control__label">Calidad WebP</span>
+                          <strong id="imageQualityValue" class="quality-control__value">0.90</strong>
+                        </div>
+                        <input id="imageQuality" class="quality-slider" type="range" min="0.1" max="1" step="0.05" value="0.9" />
+                      </section>
+
+                      <div class="actions">
+                        <button id="imageClearBtn" class="btn btn--ghost" type="button">Limpiar</button>
+                      </div>
+
+                      <ul id="imageQueueList" class="image-queue" aria-live="polite"></ul>
+
+                      <p id="imageStatus" class="status" role="status"></p>
+                    </article>
+                  </section>
+
+                  <section class="tool-pane" data-tool-pane="retool">
+                    <article class="tool-card">
+                      <h3>Retool Layout Cleanup</h3>
+                      <p class="tool-copy">Esta tool se aplica sobre paginas de Retool (`https://*.retool.com/apps/*`).</p>
+
+                      <label class="switch-line">
+                        <span>Tool activa</span>
+                        <span class="switch">
+                          <input id="retoolToggle" type="checkbox" aria-label="Activar Retool Layout Cleanup" />
+                          <span class="slider"></span>
+                        </span>
+                      </label>
+
+                      <button id="applyRetoolBtn" class="btn" type="button">Aplicar ahora en pestana activa</button>
+                      <p id="retoolStatus" class="status" role="status"></p>
+                    </article>
+                  </section>
+                </div>
+              </div>
+            </section>
+          </article>
+        </section>
+
+        <section class="screen screen--settings" id="settingsScreen" aria-label="Settings">
+          <article class="settings-shell">
+            <header class="tools-head">
+              <button id="closeSettingsBtn" class="icon-btn icon-btn--ghost icon-btn--back" type="button"
+                aria-label="Volver al chat" title="Volver">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round"></path>
+                </svg>
+              </button>
+              <h2>Settings</h2>
+            </header>
+
+            <section class="settings-body">
+              <article class="tool-card settings-card">
+                <label class="field">
+                  <span>Tu nombre</span>
+                  <input id="settingsNameInput" type="text" placeholder="Tu nombre" />
+                </label>
+
+                <label class="field">
+                  <span>System prompt</span>
+                  <textarea id="settingsSystemPrompt" rows="7"></textarea>
+                </label>
+
+                <label class="field">
+                  <span>Modelo default</span>
+                  <div class="field-inline">
+                    <select id="settingsModelSelect"></select>
+                    <button id="settingsRefreshModelsBtn" class="icon-btn icon-btn--ghost icon-btn--mini" type="button"
+                      aria-label="Actualizar modelos" title="Actualizar modelos">
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M20 6v5h-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                          stroke-linejoin="round"></path>
+                        <path d="M4 18v-5h5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                          stroke-linejoin="round"></path>
+                        <path d="M19 11a7 7 0 0 0-12-3m-2 5a7 7 0 0 0 12 3" fill="none" stroke="currentColor" stroke-width="1.9"
+                          stroke-linecap="round"></path>
+                      </svg>
+                    </button>
+                  </div>
+                </label>
+
+                <div class="actions">
+                  <button id="settingsSaveBtn" class="btn" type="button">Guardar</button>
+                </div>
+                <p id="settingsStatus" class="status" role="status"></p>
+              </article>
+            </section>
+          </article>
+        </section>
+      </div>
+    </section>
+
+    <div id="dropOverlay" class="drop-overlay">Suelta archivos para convertir a WebP</div>
+  </main>
+
+  <script src="../src/tool-config.js"></script>
+  <script src="panel.js"></script>
+</body>
+
+</html>

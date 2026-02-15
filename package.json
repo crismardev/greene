@@ -1,0 +1,17 @@
+{
+  "name": "greenstudio-ext",
+  "version": "1.0.0",
+  "description": "Extension de Chrome (Manifest V3) para abrir **GreenStudio Tools** en un **side panel**.",
+  "scripts": {
+    "build:css": "tailwindcss -c tailwind.config.js -i ./panel/tailwind.input.css -o ./panel/tailwind.generated.css --minify",
+    "watch:css": "tailwindcss -c tailwind.config.js -i ./panel/tailwind.input.css -o ./panel/tailwind.generated.css --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "autoprefixer": "^10.4.24",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17"
+  }
+}
