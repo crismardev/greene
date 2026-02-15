@@ -351,6 +351,25 @@
     return '';
   }
 
+  function extractPhoneFromChatChannelId(channelId) {
+    const source = String(channelId || '').trim();
+    if (!source) {
+      return '';
+    }
+
+    const directWid = source.match(/(?:whatsapp:)?([0-9]{7,})@c\.us/i);
+    if (directWid && directWid[1]) {
+      return normalizePhone(directWid[1]);
+    }
+
+    const fallbackWid = source.match(/([0-9]{7,})@/);
+    if (fallbackWid && fallbackWid[1]) {
+      return normalizePhone(fallbackWid[1]);
+    }
+
+    return '';
+  }
+
   function normalizeChatSyncEntry(rawEntry) {
     const entry = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
     const channelId = toSafeText(entry.channelId || '', 220);
@@ -2256,8 +2275,10 @@
     const messages = getConversationMessages({ limit: 80 });
     const inbox = getInboxList({ limit: 40 });
     const chatTitle = getCurrentChatTitle();
-    const chatPhone = getCurrentChatPhone();
-    const channelId = buildChatChannelId({ chatPhone, chatTitle, messages });
+    const rawChatPhone = getCurrentChatPhone();
+    const channelId = buildChatChannelId({ chatPhone: rawChatPhone, chatTitle, messages });
+    const channelPhone = extractPhoneFromChatChannelId(channelId);
+    const chatPhone = rawChatPhone || channelPhone;
     const chatKey = chatPhone || chatTitle || channelId || '';
     const lastMessageId = toSafeText(messages.length ? messages[messages.length - 1]?.id || '' : '', 220);
     const chatTracking = trackObservedChat(chatKey, channelId, lastMessageId);
@@ -2403,13 +2424,13 @@
 
     if (action === 'getCurrentChat') {
       const title = getCurrentChatTitle();
-      const phone = getCurrentChatPhone();
-      const key = phone || title || '';
       const channelId = buildChatChannelId({
-        chatPhone: phone,
+        chatPhone: getCurrentChatPhone(),
         chatTitle: title,
         messages: getConversationMessages({ limit: 6 })
       });
+      const phone = getCurrentChatPhone() || extractPhoneFromChatChannelId(channelId);
+      const key = phone || title || channelId || '';
       return {
         ok: true,
         result: {
@@ -2462,7 +2483,13 @@
     if (action === 'getAutomationPack') {
       const messages = getConversationMessages({ limit: Number(args.messageLimit) || 80 });
       const title = getCurrentChatTitle();
-      const phone = getCurrentChatPhone();
+      const rawPhone = getCurrentChatPhone();
+      const channelId = buildChatChannelId({
+        chatPhone: rawPhone,
+        chatTitle: title,
+        messages
+      });
+      const phone = rawPhone || extractPhoneFromChatChannelId(channelId);
       return {
         ok: true,
         result: {
@@ -2470,12 +2497,8 @@
           currentChat: {
             title,
             phone,
-            key: phone || title || '',
-            channelId: buildChatChannelId({
-              chatPhone: phone,
-              chatTitle: title,
-              messages
-            })
+            key: phone || title || channelId || '',
+            channelId
           },
           messages,
           inbox: getInboxList({ limit: Number(args.inboxLimit) || 40 })

@@ -14,6 +14,7 @@ import { createContextMemoryService } from './services/context-memory-service.js
 import { createPostgresService } from './services/postgres-service.js';
 import { createBrandEmotionController } from './controllers/brand-emotion-controller.js';
 import { createSystemVariablesController } from './controllers/system-variables-controller.js';
+import { createDynamicUiSortShowController } from './controllers/dynamic-ui-sort-show-controller.js';
 import { buildTabSummaryPrompt, toJsonTabRecord } from './services/site-context/generic-site-context.js';
 import {
   buildWhatsappMetaLabel,
@@ -293,13 +294,18 @@ export function initPanelApp() {
   const chatToolLabel = document.getElementById('chatToolLabel');
   const chatToolOptions = Array.from(document.querySelectorAll('[data-chat-tool]'));
   const chatModelSelect = document.getElementById('chatModelSelect');
-  const whatsappSuggestionCard = document.getElementById('whatsappSuggestionCard');
-  const whatsappSuggestionMeta = document.getElementById('whatsappSuggestionMeta');
-  const whatsappSuggestionText = document.getElementById('whatsappSuggestionText');
   const whatsappSuggestionStatus = document.getElementById('whatsappSuggestionStatus');
-  const whatsappSuggestionRunBtn = document.getElementById('whatsappSuggestionRunBtn');
-  const whatsappSuggestionRefreshBtn = document.getElementById('whatsappSuggestionRefreshBtn');
-  const whatsappSuggestionCloseBtn = document.getElementById('whatsappSuggestionCloseBtn');
+  const dynamicSuggestionsArea = document.getElementById('dynamicSuggestionsArea');
+  const dynamicSuggestionsList = document.getElementById('dynamicSuggestionsList');
+  const dynamicRelationsArea = document.getElementById('dynamicRelationsArea');
+  const dynamicRelationsList = document.getElementById('dynamicRelationsList');
+  const dynamicUiToast = document.getElementById('dynamicUiToast');
+  const dynamicRelationsDetailScreen = document.getElementById('dynamicRelationsDetailScreen');
+  const dynamicRelationsDetailBackBtn = document.getElementById('dynamicRelationsDetailBackBtn');
+  const dynamicRelationsDetailTitle = document.getElementById('dynamicRelationsDetailTitle');
+  const dynamicRelationsDetailMeta = document.getElementById('dynamicRelationsDetailMeta');
+  const dynamicRelationsDetailBody = document.getElementById('dynamicRelationsDetailBody');
+  const dynamicRelationsDetailStatus = document.getElementById('dynamicRelationsDetailStatus');
 
   const imageInput = document.getElementById('imageInput');
   const imagePickBtn = document.getElementById('imagePickBtn');
@@ -395,6 +401,7 @@ export function initPanelApp() {
       }
     ]
   });
+  const dynamicUiSortShowController = createDynamicUiSortShowController();
 
   let settings = { ...DEFAULT_SETTINGS };
   let imageQueue = [];
@@ -436,8 +443,41 @@ export function initPanelApp() {
   let whatsappSuggestionToken = 0;
   let whatsappSuggestionDismissedSignalKey = '';
   let whatsappSuggestionExecutionInFlight = false;
+  let whatsappSuggestionUiStatus = {
+    message: '',
+    isError: false,
+    loading: false
+  };
+  let dynamicContextSignals = {
+    phones: [],
+    emails: []
+  };
+  let dynamicRelationsContextState = {
+    signalKey: '',
+    loading: false,
+    cards: [],
+    message: '',
+    isError: false
+  };
+  let dynamicRelationCardIndex = new Map();
+  let dynamicSuggestionIndex = new Map();
+  let dynamicRelationsFetchToken = 0;
+  let dynamicRelationsDetailState = {
+    open: false,
+    loading: false,
+    cardId: '',
+    groups: [],
+    message: '',
+    isError: false
+  };
+  let dynamicContextMetaLogKey = '';
+  let dynamicSuggestionRenderIds = new Set();
+  let dynamicRelationRenderIds = new Set();
+  let dynamicUiToastHideTimer = 0;
+  let dynamicUiToastKey = '';
   let contextIngestionPromise = Promise.resolve();
   let whatsappHistorySyncPromise = Promise.resolve();
+  let whatsappHistoryVectorFingerprintByKey = new Map();
   let initialContextSyncPromise = null;
 
   const prefersDarkMedia =
@@ -821,6 +861,7 @@ export function initPanelApp() {
 
       renderCrmErpDatabaseSettings({ syncInput: true });
       setStatus(settingsCrmErpDbStatus, 'Integracion CRM/ERP desactivada.');
+      void refreshDynamicRelationsContext(getActiveTabContext(), dynamicContextSignals, { force: true });
       return true;
     }
 
@@ -848,6 +889,7 @@ export function initPanelApp() {
 
     renderCrmErpDatabaseSettings({ syncInput: true });
     setStatus(settingsCrmErpDbStatus, 'URL guardada.');
+    void refreshDynamicRelationsContext(getActiveTabContext(), dynamicContextSignals, { force: true });
 
     if (analyzeAfterSave) {
       try {
@@ -903,6 +945,7 @@ export function initPanelApp() {
       if (!silent && statusTarget) {
         setStatus(statusTarget, `Analisis completo: ${snapshot.tableCount} tablas detectadas.`);
       }
+      void refreshDynamicRelationsContext(getActiveTabContext(), dynamicContextSignals, { force: true });
 
       return snapshot;
     } catch (error) {
@@ -1183,6 +1226,8 @@ export function initPanelApp() {
         tabs: Math.max(0, Number(sourceCounts.tabs) || 0),
         history: Math.max(0, Number(sourceCounts.history) || 0),
         chat: Math.max(0, Number(sourceCounts.chat) || 0),
+        whatsappChats: Math.max(0, Number(sourceCounts.whatsappChats) || 0),
+        whatsappMessages: Math.max(0, Number(sourceCounts.whatsappMessages) || 0),
         profile: Math.max(0, Number(sourceCounts.profile) || 0),
         facts: Math.max(0, Number(sourceCounts.facts) || 0)
       }
@@ -2728,6 +2773,14 @@ export function initPanelApp() {
     }
 
     return storageService.readWhatsappChatHistory(tabContext, options);
+  }
+
+  async function readAllWhatsappChatHistories(options = {}) {
+    if (typeof storageService.listWhatsappChatHistories !== 'function') {
+      return [];
+    }
+
+    return storageService.listWhatsappChatHistories(options);
   }
 
   async function readPanelSettings() {
@@ -4453,6 +4506,65 @@ export function initPanelApp() {
     };
   }
 
+  function buildWhatsappHistoryVectorFingerprint(historyPayload) {
+    const payload = historyPayload && typeof historyPayload === 'object' ? historyPayload : {};
+    const key = String(payload.key || payload.channelId || payload.chatKey || payload.phone || payload.title || '').trim();
+    if (!key) {
+      return '';
+    }
+
+    const updatedAt = Math.max(0, Number(payload.updatedAt) || 0);
+    const lastMessageId = String(payload.lastMessageId || '').trim();
+    const messageCount = Array.isArray(payload.messages) ? payload.messages.length : 0;
+    return `${key}|${updatedAt}|${lastMessageId}|${messageCount}`;
+  }
+
+  async function ingestWhatsappHistoryIntoContextMemory(historyPayload, options = {}) {
+    const payload = historyPayload && typeof historyPayload === 'object' ? historyPayload : null;
+    const key = String(payload?.key || payload?.channelId || payload?.chatKey || payload?.phone || payload?.title || '').trim();
+    const hasMessages = Array.isArray(payload?.messages) && payload.messages.length > 0;
+    if (!key || !hasMessages) {
+      return {
+        ingestedChats: 0,
+        ingestedMessages: 0,
+        ids: []
+      };
+    }
+
+    const fingerprint = buildWhatsappHistoryVectorFingerprint(payload);
+    if (!options.force && fingerprint && whatsappHistoryVectorFingerprintByKey.get(key) === fingerprint) {
+      return {
+        ingestedChats: 0,
+        ingestedMessages: 0,
+        ids: []
+      };
+    }
+
+    const result = await contextMemoryService.ingestWhatsappChatHistory(payload, {
+      messageLimit: Math.max(
+        1,
+        Math.min(
+          MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT,
+          Number(options.messageLimit) ||
+            Number(getSystemVariableNumber('whatsapp.maxPersistedMessages', MAX_WHATSAPP_PERSISTED_MESSAGES)) ||
+            MAX_WHATSAPP_PERSISTED_MESSAGES
+        )
+      )
+    });
+
+    if (fingerprint) {
+      whatsappHistoryVectorFingerprintByKey.set(key, fingerprint);
+      if (whatsappHistoryVectorFingerprintByKey.size > 400) {
+        const oldestKey = whatsappHistoryVectorFingerprintByKey.keys().next().value;
+        if (oldestKey) {
+          whatsappHistoryVectorFingerprintByKey.delete(oldestKey);
+        }
+      }
+    }
+
+    return result;
+  }
+
   async function buildWhatsappSuggestionContext(tabContext) {
     if (!tabContext || !isWhatsappContext(tabContext)) {
       return tabContext;
@@ -4464,6 +4576,9 @@ export function initPanelApp() {
     const historyPayload = await readWhatsappChatHistory(tabContext, {
       limit: getSystemVariableNumber('whatsapp.suggestionHistoryLimit', WHATSAPP_SUGGESTION_HISTORY_LIMIT)
     });
+    void ingestWhatsappHistoryIntoContextMemory(historyPayload, {
+      messageLimit: getSystemVariableNumber('whatsapp.maxPersistedMessages', MAX_WHATSAPP_PERSISTED_MESSAGES)
+    }).catch(() => {});
     const mergedContext = mergeWhatsappContextWithHistory(tabContext, historyPayload);
 
     logDebug('whatsapp_history:sync', {
@@ -4510,6 +4625,489 @@ export function initPanelApp() {
     };
   }
 
+  function toSafeDynamicUiText(value, limit = 220) {
+    return String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, Math.max(0, Number(limit) || 0));
+  }
+
+  function normalizePhoneSignal(value) {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (digits.length < 7) {
+      return '';
+    }
+    return digits.slice(0, 20);
+  }
+
+  function extractPhoneFromWhatsappChatId(value) {
+    const source = String(value || '').trim();
+    if (!source) {
+      return '';
+    }
+
+    const directWid = source.match(/(?:whatsapp:)?([0-9]{7,})@c\.us/i);
+    if (directWid && directWid[1]) {
+      return normalizePhoneSignal(directWid[1]);
+    }
+
+    const fallbackWid = source.match(/([0-9]{7,})@/);
+    if (fallbackWid && fallbackWid[1]) {
+      return normalizePhoneSignal(fallbackWid[1]);
+    }
+
+    return '';
+  }
+
+  function normalizeEmailSignal(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token || !/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(token)) {
+      return '';
+    }
+    return token.slice(0, 220);
+  }
+
+  function collectUniqueSignals(values, normalizer, limit = 6) {
+    const output = [];
+    const seen = new Set();
+    for (const item of Array.isArray(values) ? values : []) {
+      const normalized = normalizer(item);
+      if (!normalized || seen.has(normalized)) {
+        continue;
+      }
+      seen.add(normalized);
+      output.push({
+        value: toSafeDynamicUiText(item || normalized, 120),
+        normalized
+      });
+      if (output.length >= Math.max(1, Math.min(20, Number(limit) || 6))) {
+        break;
+      }
+    }
+    return output;
+  }
+
+  function extractPhoneSignalsFromText(text, limit = 8) {
+    const source = String(text || '');
+    if (!source) {
+      return [];
+    }
+    const matches = source.match(/(?:\+?\d[\d\s().-]{6,}\d)/g) || [];
+    return collectUniqueSignals(matches, normalizePhoneSignal, limit);
+  }
+
+  function extractEmailSignalsFromText(text, limit = 8) {
+    const source = String(text || '');
+    if (!source) {
+      return [];
+    }
+    const matches = source.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+    return collectUniqueSignals(matches, normalizeEmailSignal, limit);
+  }
+
+  function collectDynamicSignalsFromTab(tabContext) {
+    const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
+    const details = context.details && typeof context.details === 'object' ? context.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const inbox = Array.isArray(details.inbox) ? details.inbox : [];
+    const messages = Array.isArray(details.messages) ? details.messages : [];
+    const entities = Array.isArray(details.entities) ? details.entities : [];
+
+    const textSources = [
+      String(context.title || ''),
+      String(context.description || ''),
+      String(context.textExcerpt || ''),
+      String(currentChat.channelId || ''),
+      String(currentChat.key || ''),
+      String(currentChat.phone || ''),
+      String(currentChat.title || ''),
+      entities.join(' ')
+    ];
+
+    for (const item of inbox.slice(0, 24)) {
+      textSources.push(String(item?.title || ''));
+      textSources.push(String(item?.phone || ''));
+      textSources.push(String(item?.preview || ''));
+    }
+
+    for (const item of messages.slice(-20)) {
+      textSources.push(String(item?.text || ''));
+      textSources.push(String(item?.transcript || item?.enriched?.transcript || ''));
+      textSources.push(String(item?.ocrText || item?.enriched?.ocrText || ''));
+    }
+
+    const combined = textSources.filter(Boolean).join('\n');
+    const phoneFromWhatsappChannelId = extractPhoneFromWhatsappChatId(currentChat.channelId || currentChat.key || '');
+    const phones = collectUniqueSignals(
+      [
+        phoneFromWhatsappChannelId,
+        String(currentChat.phone || ''),
+        ...extractPhoneSignalsFromText(combined, 12).map((item) => item.normalized)
+      ],
+      normalizePhoneSignal,
+      8
+    );
+    const emails = collectUniqueSignals(
+      extractEmailSignalsFromText(combined, 12).map((item) => item.normalized),
+      normalizeEmailSignal,
+      8
+    );
+
+    return {
+      phones,
+      emails
+    };
+  }
+
+  function quoteSqlIdentifier(value) {
+    const safe = String(value || '').trim();
+    if (!safe) {
+      return '""';
+    }
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
+
+  function tableTitleFromName(tableName) {
+    const tokens = String(tableName || '')
+      .replace(/[_-]+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 6);
+    if (!tokens.length) {
+      return 'Tabla';
+    }
+    return tokens.map((token) => token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()).join(' ');
+  }
+
+  function isPhoneColumnName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(phone|telefono|cel|mobile|movil|whatsapp|telefono|tel_?)/.test(token);
+  }
+
+  function isEmailColumnName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(email|correo|mail)/.test(token);
+  }
+
+  function isLabelColumnName(value) {
+    const token = String(value || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return /(name|nombre|title|subject|contact|cliente|company|empresa|lead|deal|task|item)/.test(token);
+  }
+
+  function buildRelationTableCandidates(snapshot, signalType, limit = 8) {
+    const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
+    const tables = Array.isArray(safeSnapshot?.tables) ? safeSnapshot.tables : [];
+    const output = [];
+
+    for (const table of tables) {
+      const columns = Array.isArray(table?.columns) ? table.columns : [];
+      if (!columns.length) {
+        continue;
+      }
+
+      const matchColumn =
+        signalType === 'phone'
+          ? columns.find((column) => isPhoneColumnName(column?.name))
+          : columns.find((column) => isEmailColumnName(column?.name));
+      if (!matchColumn || !matchColumn.name) {
+        continue;
+      }
+
+      let labelColumn = columns.find((column) => {
+        const name = String(column?.name || '');
+        return name && name !== matchColumn.name && isLabelColumnName(name);
+      });
+      if (!labelColumn) {
+        labelColumn = matchColumn;
+      }
+
+      const estimatedRows = Number(table?.estimatedRows) || 0;
+      const rowScore = estimatedRows > 0 ? Math.max(0, Math.min(18, 18 - Math.log10(estimatedRows + 1) * 4)) : 4;
+      const nameBoost = /(task|deal|lead|contact|customer|client|message|ticket|opportunity|activity)/.test(
+        String(table?.name || '').toLowerCase()
+      )
+        ? 8
+        : 0;
+
+      output.push({
+        table,
+        matchColumn,
+        labelColumn,
+        priorityHint: Math.round(rowScore + nameBoost)
+      });
+    }
+
+    output.sort((left, right) => right.priorityHint - left.priorityHint);
+    return output.slice(0, Math.max(1, Math.min(20, Number(limit) || 8)));
+  }
+
+  async function queryRelationCardForCandidate(connectionUrl, candidate, signalType, normalizedValues, sourceSignals) {
+    const table = candidate?.table && typeof candidate.table === 'object' ? candidate.table : null;
+    const matchColumn = candidate?.matchColumn && typeof candidate.matchColumn === 'object' ? candidate.matchColumn : null;
+    const labelColumn = candidate?.labelColumn && typeof candidate.labelColumn === 'object' ? candidate.labelColumn : null;
+    if (!table || !matchColumn?.name || !labelColumn?.name) {
+      return null;
+    }
+
+    const schemaName = String(table.schema || '').trim();
+    const tableName = String(table.name || '').trim();
+    if (!schemaName || !tableName) {
+      return null;
+    }
+
+    const qualifiedTable = `${quoteSqlIdentifier(schemaName)}.${quoteSqlIdentifier(tableName)}`;
+    const matchExpr = `CAST(${quoteSqlIdentifier(matchColumn.name)} AS text)`;
+    const normalizedExpr =
+      signalType === 'phone' ? `regexp_replace(${matchExpr}, '[^0-9]', '', 'g')` : `LOWER(TRIM(${matchExpr}))`;
+    const labelExprRaw = `CAST(${quoteSqlIdentifier(labelColumn.name)} AS text)`;
+    const labelExpr = `COALESCE(NULLIF(TRIM(${labelExprRaw}), ''), NULLIF(TRIM(${matchExpr}), ''), '(sin etiqueta)')`;
+    const sql = [
+      'SELECT item_label, item_count, SUM(item_count) OVER()::int AS total_count',
+      'FROM (',
+      `  SELECT ${labelExpr} AS item_label, COUNT(*)::int AS item_count`,
+      `  FROM ${qualifiedTable}`,
+      `  WHERE ${normalizedExpr} = ANY($1::text[])`,
+      '  GROUP BY 1',
+      ') grouped',
+      'ORDER BY item_count DESC, item_label ASC',
+      'LIMIT 4;'
+    ].join('\n');
+
+    const response = await postgresService.queryRead(connectionUrl, sql, [normalizedValues], { maxRows: 4 });
+    const rows = Array.isArray(response?.rows) ? response.rows : [];
+    if (!rows.length) {
+      return null;
+    }
+
+    const relationRows = rows
+      .map((row) => {
+        const label = toSafeDynamicUiText(row?.item_label || '', 120) || '(sin etiqueta)';
+        const count = Math.max(0, Number(row?.item_count) || 0);
+        if (!count) {
+          return null;
+        }
+        return { label, count };
+      })
+      .filter(Boolean)
+      .slice(0, 3);
+
+    if (!relationRows.length) {
+      return null;
+    }
+
+    const totalCount =
+      Math.max(0, Number(rows[0]?.total_count) || 0) || relationRows.reduce((sum, row) => sum + row.count, 0);
+    const normalizedToRaw = {};
+    for (const signal of Array.isArray(sourceSignals) ? sourceSignals : []) {
+      if (!signal?.normalized || normalizedToRaw[signal.normalized]) {
+        continue;
+      }
+      normalizedToRaw[signal.normalized] = signal.value || signal.normalized;
+    }
+
+    return {
+      id: `${table.qualifiedName || `${schemaName}.${tableName}`}::${signalType}`,
+      title: tableTitleFromName(tableName),
+      caption: `${signalType === 'phone' ? 'Phone' : 'Email'} matches`,
+      tableName,
+      tableQualifiedName: String(table.qualifiedName || `${schemaName}.${tableName}`),
+      signalType,
+      totalCount,
+      priorityHint: Math.max(0, Number(candidate?.priorityHint) || 0),
+      rows: relationRows,
+      meta: {
+        schema: schemaName,
+        table: tableName,
+        matchColumn: String(matchColumn.name || ''),
+        labelColumn: String(labelColumn.name || ''),
+        signalType,
+        normalizedSignals: normalizedValues.slice(0, 12),
+        normalizedToRaw
+      }
+    };
+  }
+
+  function collapseRelationCardsByTable(cards) {
+    const byTable = new Map();
+    for (const card of Array.isArray(cards) ? cards : []) {
+      const tableKey = String(card?.tableQualifiedName || '').trim();
+      if (!tableKey) {
+        continue;
+      }
+      const known = byTable.get(tableKey);
+      if (!known || (Number(card?.totalCount) || 0) > (Number(known?.totalCount) || 0)) {
+        byTable.set(tableKey, card);
+      }
+    }
+    return Array.from(byTable.values());
+  }
+
+  function buildDynamicRelationsSignalKey(tabContext, signals) {
+    const tabId = Number(tabContext?.tabId) || -1;
+    const snapshot = getCrmErpDatabaseSchemaSnapshot();
+    const schemaStamp = Number(snapshot?.analyzedAt) || 0;
+    const phones = (Array.isArray(signals?.phones) ? signals.phones : []).map((item) => item?.normalized || '').filter(Boolean);
+    const emails = (Array.isArray(signals?.emails) ? signals.emails : []).map((item) => item?.normalized || '').filter(Boolean);
+    return `${tabId}|${schemaStamp}|p:${phones.join(',')}|e:${emails.join(',')}`;
+  }
+
+  async function fetchDynamicRelationCards(tabContext, signals) {
+    const connectionUrl = getCrmErpDatabaseConnectionUrl();
+    const snapshot = getCrmErpDatabaseSchemaSnapshot();
+    if (!connectionUrl || !snapshot) {
+      return [];
+    }
+
+    const phoneSignals = Array.isArray(signals?.phones) ? signals.phones : [];
+    const emailSignals = Array.isArray(signals?.emails) ? signals.emails : [];
+    const tasks = [];
+
+    if (phoneSignals.length) {
+      const phoneCandidates = buildRelationTableCandidates(snapshot, 'phone', 8);
+      const phoneValues = phoneSignals.map((item) => item.normalized).filter(Boolean).slice(0, 8);
+      for (const candidate of phoneCandidates) {
+        tasks.push(queryRelationCardForCandidate(connectionUrl, candidate, 'phone', phoneValues, phoneSignals));
+      }
+    }
+
+    if (emailSignals.length) {
+      const emailCandidates = buildRelationTableCandidates(snapshot, 'email', 8);
+      const emailValues = emailSignals.map((item) => item.normalized).filter(Boolean).slice(0, 8);
+      for (const candidate of emailCandidates) {
+        tasks.push(queryRelationCardForCandidate(connectionUrl, candidate, 'email', emailValues, emailSignals));
+      }
+    }
+
+    if (!tasks.length) {
+      return [];
+    }
+
+    const settled = await Promise.all(tasks.map((task) => task.catch(() => null)));
+    const found = settled.filter(Boolean);
+    return collapseRelationCardsByTable(found);
+  }
+
+  async function refreshDynamicRelationsContext(tabContext, signals, options = {}) {
+    const activeTab = tabContext && typeof tabContext === 'object' ? tabContext : null;
+    const safeSignals = signals && typeof signals === 'object' ? signals : { phones: [], emails: [] };
+    const phoneCount = Array.isArray(safeSignals.phones) ? safeSignals.phones.length : 0;
+    const emailCount = Array.isArray(safeSignals.emails) ? safeSignals.emails.length : 0;
+    const hasAnySignal = phoneCount > 0 || emailCount > 0;
+    const hasDbUrl = Boolean(getCrmErpDatabaseConnectionUrl());
+    const hasSchema = Boolean(getCrmErpDatabaseSchemaSnapshot());
+    const force = options.force === true;
+    const signalKey = buildDynamicRelationsSignalKey(activeTab, safeSignals);
+
+    if (!activeTab || activeTab.tabId < 0) {
+      dynamicRelationsContextState = {
+        signalKey: '',
+        loading: false,
+        cards: [],
+        message: '',
+        isError: false
+      };
+      renderAiDynamicContext();
+      return;
+    }
+
+    if (!hasAnySignal) {
+      dynamicRelationsContextState = {
+        signalKey,
+        loading: false,
+        cards: [],
+        message: 'Sin phone/email detectados en la pestana activa.',
+        isError: false
+      };
+      renderAiDynamicContext();
+      return;
+    }
+
+    if (!hasDbUrl) {
+      dynamicRelationsContextState = {
+        signalKey,
+        loading: false,
+        cards: [],
+        message: 'Configura PostgreSQL en Settings para habilitar relaciones.',
+        isError: false
+      };
+      renderAiDynamicContext();
+      return;
+    }
+
+    if (!hasSchema) {
+      dynamicRelationsContextState = {
+        signalKey,
+        loading: false,
+        cards: [],
+        message: 'Analiza el schema de PostgreSQL para mapear tablas relacionadas.',
+        isError: false
+      };
+      renderAiDynamicContext();
+      return;
+    }
+
+    if (!force && dynamicRelationsContextState.signalKey === signalKey && !dynamicRelationsContextState.loading) {
+      return;
+    }
+
+    const token = ++dynamicRelationsFetchToken;
+    dynamicRelationsContextState = {
+      signalKey,
+      loading: true,
+      cards: dynamicRelationsContextState.cards,
+      message: 'Buscando relaciones en PostgreSQL...',
+      isError: false
+    };
+    renderAiDynamicContext();
+
+    try {
+      const cards = await fetchDynamicRelationCards(activeTab, safeSignals);
+      if (token !== dynamicRelationsFetchToken) {
+        return;
+      }
+      dynamicRelationsContextState = {
+        signalKey,
+        loading: false,
+        cards,
+        message: cards.length
+          ? `${cards.length} tabla${cards.length === 1 ? '' : 's'} con relaciones detectadas.`
+          : 'No se encontraron relaciones para los signals detectados.',
+        isError: false
+      };
+      renderAiDynamicContext();
+    } catch (error) {
+      if (token !== dynamicRelationsFetchToken) {
+        return;
+      }
+      dynamicRelationsContextState = {
+        signalKey,
+        loading: false,
+        cards: [],
+        message: error instanceof Error ? error.message : 'No se pudo consultar relaciones en PostgreSQL.',
+        isError: true
+      };
+      renderAiDynamicContext();
+    }
+  }
+
+  function setWhatsappSuggestionUiStatus(message = '', isError = false, options = {}) {
+    whatsappSuggestionUiStatus = {
+      message: String(message || ''),
+      isError: isError === true,
+      loading: options.loading === true
+    };
+  }
+
   function hideWhatsappSuggestion() {
     whatsappSuggestionToken += 1;
     whatsappSuggestionState = {
@@ -4519,28 +5117,9 @@ export function initPanelApp() {
       text: '',
       loading: false
     };
-
-    if (whatsappSuggestionCard) {
-      whatsappSuggestionCard.hidden = true;
-    }
-
-    if (whatsappSuggestionMeta) {
-      whatsappSuggestionMeta.textContent = '';
-    }
-
-    if (whatsappSuggestionText) {
-      whatsappSuggestionText.textContent = '';
-    }
-
-    if (whatsappSuggestionRunBtn) {
-      whatsappSuggestionRunBtn.disabled = true;
-    }
-
-    if (whatsappSuggestionRefreshBtn) {
-      whatsappSuggestionRefreshBtn.disabled = true;
-    }
-
+    setWhatsappSuggestionUiStatus('', false);
     setStatus(whatsappSuggestionStatus, '');
+    renderAiDynamicContext();
   }
 
   function dismissWhatsappSuggestion() {
@@ -4549,27 +5128,9 @@ export function initPanelApp() {
   }
 
   function setWhatsappSuggestionLoading(tabContext) {
-    if (whatsappSuggestionCard) {
-      whatsappSuggestionCard.hidden = false;
-    }
-
-    if (whatsappSuggestionMeta) {
-      whatsappSuggestionMeta.textContent = buildWhatsappMetaLabel(tabContext);
-    }
-
-    if (whatsappSuggestionText) {
-      whatsappSuggestionText.textContent = '';
-    }
-
-    if (whatsappSuggestionRunBtn) {
-      whatsappSuggestionRunBtn.disabled = true;
-    }
-
-    if (whatsappSuggestionRefreshBtn) {
-      whatsappSuggestionRefreshBtn.disabled = true;
-    }
-
+    setWhatsappSuggestionUiStatus('Generando sugerencia...', false, { loading: true });
     setStatus(whatsappSuggestionStatus, 'Generando sugerencia...', false, { loading: true });
+    renderAiDynamicContext(tabContext);
   }
 
   function setWhatsappSuggestionResult(tabContext, suggestion) {
@@ -4580,27 +5141,660 @@ export function initPanelApp() {
       return;
     }
 
-    if (whatsappSuggestionCard) {
-      whatsappSuggestionCard.hidden = false;
-    }
-
-    if (whatsappSuggestionMeta) {
-      whatsappSuggestionMeta.textContent = buildWhatsappMetaLabel(tabContext);
-    }
-
-    if (whatsappSuggestionText) {
-      whatsappSuggestionText.textContent = text;
-    }
-
-    if (whatsappSuggestionRunBtn) {
-      whatsappSuggestionRunBtn.disabled = false;
-    }
-
-    if (whatsappSuggestionRefreshBtn) {
-      whatsappSuggestionRefreshBtn.disabled = false;
-    }
-
+    setWhatsappSuggestionUiStatus('Sugerencia lista.', false);
     setStatus(whatsappSuggestionStatus, 'Sugerencia lista.');
+    renderAiDynamicContext(tabContext);
+  }
+
+  function buildWhatsappDynamicSuggestion(activeTab) {
+    if (!activeTab || !isWhatsappContext(activeTab)) {
+      return null;
+    }
+
+    const hasText = Boolean(whatsappSuggestionState.text);
+    const hasStatus = Boolean(whatsappSuggestionUiStatus.message);
+    if (!hasText && !whatsappSuggestionState.loading && !hasStatus) {
+      return null;
+    }
+
+    const fallbackDescription = whatsappSuggestionState.loading
+      ? 'Generando sugerencia contextual...'
+      : whatsappSuggestionUiStatus.isError
+        ? 'No se pudo generar la sugerencia para este chat.'
+        : 'Sugerencia lista para ejecutar.';
+
+    return {
+      id: 'ai-whatsapp-reply',
+      source: 'ai_generated',
+      site: 'whatsapp',
+      title: 'Next message',
+      caption: buildWhatsappMetaLabel(activeTab),
+      description: whatsappSuggestionState.text || fallbackDescription,
+      statusText: whatsappSuggestionUiStatus.message,
+      statusError: whatsappSuggestionUiStatus.isError,
+      loading: whatsappSuggestionState.loading || whatsappSuggestionExecutionInFlight,
+      canExecute: Boolean(whatsappSuggestionState.text) && !whatsappSuggestionExecutionInFlight && !whatsappSuggestionState.loading,
+      canRegenerate: !whatsappSuggestionState.loading && !whatsappSuggestionExecutionInFlight,
+      priorityHint: 100,
+      actionType: 'whatsapp_send_suggestion',
+      actionPayload: {
+        tabId: Number(activeTab.tabId) || -1
+      }
+    };
+  }
+
+  function buildPredefinedDynamicSuggestions(activeTab, signals) {
+    const tab = activeTab && typeof activeTab === 'object' ? activeTab : null;
+    if (!tab) {
+      return [];
+    }
+
+    const site = String(tab.site || 'generic').toLowerCase();
+    const phoneCount = Array.isArray(signals?.phones) ? signals.phones.length : 0;
+    const emailCount = Array.isArray(signals?.emails) ? signals.emails.length : 0;
+    const output = [];
+
+    output.push({
+      id: 'predef-chat-context',
+      source: 'predefined',
+      site,
+      title: 'Context to chat',
+      caption: site,
+      description: 'Prepara un prompt con el contexto actual para continuar en el chat.',
+      canExecute: true,
+      canRegenerate: false,
+      priorityHint: 25,
+      actionType: 'prefill_chat_context',
+      actionPayload: {
+        tabId: Number(tab.tabId) || -1
+      }
+    });
+
+    if (isWhatsappContext(tab)) {
+      output.push({
+        id: 'predef-whatsapp-archive-groups',
+        source: 'predefined',
+        site: 'whatsapp',
+        title: 'Archive groups',
+        caption: 'WhatsApp',
+        description: 'Archiva grupos de la inbox (workflow rapido).',
+        canExecute: true,
+        canRegenerate: false,
+        priorityHint: 48,
+        actionType: 'whatsapp_archive_groups',
+        actionPayload: {
+          tabId: Number(tab.tabId) || -1
+        }
+      });
+    }
+
+    if (phoneCount + emailCount > 0) {
+      output.push({
+        id: 'predef-refresh-relations',
+        source: 'predefined',
+        site,
+        title: 'Refresh relations',
+        caption: `${phoneCount} phone / ${emailCount} email`,
+        description: 'Regenera relaciones detectadas por sensors de navegacion.',
+        canExecute: true,
+        canRegenerate: false,
+        priorityHint: 36,
+        actionType: 'refresh_relations',
+        actionPayload: {
+          force: true
+        }
+      });
+    }
+
+    return output;
+  }
+
+  function buildDynamicSuggestions(activeTab, signals) {
+    const suggestions = [...buildPredefinedDynamicSuggestions(activeTab, signals)];
+    const whatsappSuggestion = buildWhatsappDynamicSuggestion(activeTab);
+    if (whatsappSuggestion) {
+      suggestions.push(whatsappSuggestion);
+    }
+    return suggestions;
+  }
+
+  function createDynamicActionButton(options = {}) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = String(options.className || 'icon-btn icon-btn--ghost');
+    button.dataset.suggestionAction = String(options.action || '');
+    button.dataset.suggestionId = String(options.suggestionId || '');
+    button.setAttribute('aria-label', String(options.ariaLabel || 'Accion'));
+    button.title = String(options.title || options.ariaLabel || 'Accion');
+    button.disabled = options.disabled === true;
+    button.innerHTML = String(options.svg || '');
+    return button;
+  }
+
+  function createDynamicEmptyCard(text) {
+    const empty = document.createElement('div');
+    empty.className = 'ai-dynamic-empty';
+    empty.textContent = String(text || 'Sin datos.');
+    return empty;
+  }
+
+  function showDynamicUiToast(message, isError = false, options = {}) {
+    if (!dynamicUiToast) {
+      return;
+    }
+
+    const text = String(message || '').trim();
+    if (!text) {
+      dynamicUiToast.hidden = true;
+      dynamicUiToast.classList.remove('is-visible', 'is-error');
+      dynamicUiToast.textContent = '';
+      return;
+    }
+
+    window.clearTimeout(dynamicUiToastHideTimer);
+    dynamicUiToast.textContent = text;
+    dynamicUiToast.hidden = false;
+    dynamicUiToast.classList.toggle('is-error', isError === true);
+    dynamicUiToast.classList.add('is-visible');
+
+    if (options.sticky === true) {
+      return;
+    }
+
+    const durationMs = Math.max(1200, Math.min(7000, Number(options.durationMs) || 2400));
+    dynamicUiToastHideTimer = window.setTimeout(() => {
+      dynamicUiToast.classList.remove('is-visible');
+      dynamicUiToast.hidden = true;
+    }, durationMs);
+  }
+
+  function renderAiDynamicContext(activeTabOverride = null) {
+    const activeTab = activeTabOverride && typeof activeTabOverride === 'object' ? activeTabOverride : getActiveTabContext();
+    const safeSignals = dynamicContextSignals && typeof dynamicContextSignals === 'object' ? dynamicContextSignals : { phones: [], emails: [] };
+    const phoneCount = Array.isArray(safeSignals.phones) ? safeSignals.phones.length : 0;
+    const emailCount = Array.isArray(safeSignals.emails) ? safeSignals.emails.length : 0;
+    const activeSite = String(activeTab?.site || 'generic').toLowerCase();
+    const rawSuggestions = buildDynamicSuggestions(activeTab, safeSignals);
+    const rawRelations = Array.isArray(dynamicRelationsContextState.cards) ? dynamicRelationsContextState.cards : [];
+    const sorted = dynamicUiSortShowController.dynamicUiSortAndShow({
+      suggestions: rawSuggestions,
+      relations: rawRelations,
+      activeTab,
+      signals: safeSignals
+    });
+    const suggestions = Array.isArray(sorted?.suggestions) ? sorted.suggestions : [];
+    const relations = Array.isArray(sorted?.relations) ? sorted.relations : [];
+    const hasSignals = phoneCount > 0 || emailCount > 0;
+    const showSuggestionsArea = suggestions.length > 0;
+    const showRelationsArea = hasSignals && relations.length > 0;
+    const nextSuggestionIds = new Set(suggestions.map((item) => String(item.id || '').trim()).filter(Boolean));
+    const nextRelationIds = new Set(relations.map((item) => String(item.id || '').trim()).filter(Boolean));
+
+    dynamicSuggestionIndex = new Map(suggestions.map((item) => [item.id, item]));
+    dynamicRelationCardIndex = new Map(relations.map((item) => [item.id, item]));
+    if (dynamicSuggestionsArea) {
+      dynamicSuggestionsArea.hidden = !showSuggestionsArea;
+    }
+    if (dynamicRelationsArea) {
+      dynamicRelationsArea.hidden = !showRelationsArea;
+    }
+
+    const metaLogKey = `${activeSite}|p:${phoneCount}|e:${emailCount}|s:${suggestions.length}|r:${relations.length}`;
+    if (metaLogKey !== dynamicContextMetaLogKey) {
+      dynamicContextMetaLogKey = metaLogKey;
+      console.log(`${LOG_PREFIX} dynamic_context:meta`, {
+        site: activeSite,
+        phoneCount,
+        emailCount,
+        suggestionCount: suggestions.length,
+        relationCount: relations.length,
+        phones: Array.isArray(safeSignals.phones) ? safeSignals.phones : [],
+        emails: Array.isArray(safeSignals.emails) ? safeSignals.emails : []
+      });
+    }
+
+    if (dynamicSuggestionsList) {
+      dynamicSuggestionsList.textContent = '';
+      if (showSuggestionsArea) {
+        for (const suggestion of suggestions) {
+          const card = document.createElement('article');
+          card.className = 'ai-dynamic-card ai-dynamic-card--suggestion';
+          card.dataset.suggestionId = String(suggestion.id || '');
+          const descriptionText = String(suggestion.description || '');
+          card.title = descriptionText;
+          if (!dynamicSuggestionRenderIds.has(card.dataset.suggestionId)) {
+            card.classList.add('is-entering');
+          }
+
+          const head = document.createElement('div');
+          head.className = 'ai-dynamic-card__head';
+
+          const title = document.createElement('p');
+          title.className = 'ai-dynamic-card__title';
+          title.textContent = String(suggestion.title || 'Suggestion');
+          title.title = title.textContent;
+
+          const caption = document.createElement('p');
+          caption.className = 'ai-dynamic-card__caption';
+          caption.textContent = String(suggestion.caption || '');
+          caption.title = caption.textContent;
+
+          head.append(title, caption);
+
+          const bodyRow = document.createElement('div');
+          bodyRow.className = 'ai-dynamic-card__row';
+
+          const description = document.createElement('p');
+          description.className = 'ai-dynamic-card__description';
+          description.textContent = descriptionText;
+          description.title = descriptionText;
+
+          const actions = document.createElement('div');
+          actions.className = 'ai-dynamic-card__actions';
+
+          const runButton = createDynamicActionButton({
+            className: 'icon-btn icon-btn--send',
+            action: 'run',
+            suggestionId: suggestion.id,
+            ariaLabel: 'Ejecutar sugerencia',
+            title: 'Ejecutar sugerencia',
+            disabled: suggestion.canExecute !== true,
+            svg:
+              '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path><path d="M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path></svg>'
+          });
+          actions.appendChild(runButton);
+
+          if (suggestion.canRegenerate) {
+            const regenButton = createDynamicActionButton({
+              className: 'icon-btn icon-btn--ghost',
+              action: 'regen',
+              suggestionId: suggestion.id,
+              ariaLabel: 'Regenerar sugerencia',
+              title: 'Regenerar sugerencia',
+              disabled: suggestion.loading === true,
+              svg:
+                '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4a8 8 0 0 1 5.66 2.34L20 8.68V5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path><path d="M12 20a8 8 0 0 1-5.66-2.34L4 15.32V19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path><path d="M4.34 12a8 8 0 0 1 2.05-4.83M17.61 16.83A8 8 0 0 1 12 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path></svg>'
+            });
+            actions.appendChild(regenButton);
+          }
+
+          bodyRow.append(description, actions);
+          card.append(head, bodyRow);
+          dynamicSuggestionsList.appendChild(card);
+        }
+      }
+    }
+
+    if (dynamicRelationsList) {
+      dynamicRelationsList.textContent = '';
+      if (showRelationsArea) {
+        for (const cardModel of relations) {
+          const card = document.createElement('article');
+          card.className = 'ai-dynamic-card ai-dynamic-card--relation';
+          card.dataset.relationCardId = String(cardModel.id || '');
+          if (!dynamicRelationRenderIds.has(card.dataset.relationCardId)) {
+            card.classList.add('is-entering');
+          }
+          card.tabIndex = 0;
+          card.setAttribute('role', 'button');
+          card.setAttribute('aria-label', `Abrir detalle de ${cardModel.title}`);
+
+          const head = document.createElement('div');
+          head.className = 'ai-dynamic-card__head';
+
+          const title = document.createElement('p');
+          title.className = 'ai-dynamic-card__title';
+          title.textContent = String(cardModel.title || 'Tabla');
+          title.title = title.textContent;
+
+          const caption = document.createElement('p');
+          caption.className = 'ai-dynamic-card__caption';
+          caption.textContent = String(cardModel.totalCount || 0);
+          caption.title = caption.textContent;
+          head.append(title, caption);
+
+          const summary = document.createElement('p');
+          summary.className = 'ai-dynamic-card__description';
+          summary.textContent = String(cardModel.caption || '');
+
+          const list = document.createElement('ul');
+          list.className = 'ai-dynamic-relation-list';
+          for (const row of Array.isArray(cardModel.rows) ? cardModel.rows : []) {
+            const item = document.createElement('li');
+            const label = document.createElement('span');
+            label.textContent = String(row.label || '');
+            const count = document.createElement('strong');
+            count.textContent = String(row.count || 0);
+            item.append(label, count);
+            list.appendChild(item);
+          }
+
+          if (!list.children.length) {
+            const item = document.createElement('li');
+            const label = document.createElement('span');
+            label.textContent = 'Sin items para mostrar';
+            const count = document.createElement('strong');
+            count.textContent = '0';
+            item.append(label, count);
+            list.appendChild(item);
+          }
+
+          card.append(head, summary, list);
+          dynamicRelationsList.appendChild(card);
+        }
+      }
+    }
+    dynamicSuggestionRenderIds = nextSuggestionIds;
+    dynamicRelationRenderIds = nextRelationIds;
+
+    const relationToastMessage = String(dynamicRelationsContextState.message || '').trim();
+    const shouldShowRelationToast = Boolean(relationToastMessage) && hasSignals;
+    const relationToastKey = `${dynamicRelationsContextState.loading ? 'loading' : 'ready'}|${
+      dynamicRelationsContextState.isError === true ? 'error' : 'ok'
+    }|${relationToastMessage}|${showRelationsArea ? 'shown' : 'hidden'}`;
+    if (shouldShowRelationToast && relationToastKey !== dynamicUiToastKey) {
+      dynamicUiToastKey = relationToastKey;
+      showDynamicUiToast(relationToastMessage, dynamicRelationsContextState.isError === true, {
+        durationMs: dynamicRelationsContextState.loading ? 1600 : 2600
+      });
+    } else if (!shouldShowRelationToast) {
+      dynamicUiToastKey = '';
+      showDynamicUiToast('');
+    }
+
+    renderDynamicRelationDetailScreen();
+  }
+
+  function closeDynamicRelationDetailScreen() {
+    dynamicRelationsDetailState = {
+      open: false,
+      loading: false,
+      cardId: '',
+      groups: [],
+      message: '',
+      isError: false
+    };
+    renderDynamicRelationDetailScreen();
+  }
+
+  function renderDynamicRelationDetailScreen() {
+    if (!dynamicRelationsDetailScreen) {
+      return;
+    }
+
+    dynamicRelationsDetailScreen.hidden = dynamicRelationsDetailState.open !== true;
+
+    if (!dynamicRelationsDetailState.open) {
+      return;
+    }
+
+    const card = dynamicRelationCardIndex.get(dynamicRelationsDetailState.cardId) || null;
+    if (!card) {
+      closeDynamicRelationDetailScreen();
+      return;
+    }
+    if (dynamicRelationsDetailTitle) {
+      dynamicRelationsDetailTitle.textContent = String(card?.title || 'Relation detail');
+    }
+    if (dynamicRelationsDetailMeta) {
+      dynamicRelationsDetailMeta.textContent = String(card?.tableQualifiedName || '');
+    }
+    if (dynamicRelationsDetailBody) {
+      dynamicRelationsDetailBody.textContent = '';
+      const groups = Array.isArray(dynamicRelationsDetailState.groups) ? dynamicRelationsDetailState.groups : [];
+      if (!groups.length && !dynamicRelationsDetailState.loading) {
+        dynamicRelationsDetailBody.appendChild(createDynamicEmptyCard('Sin grupos detectados para esta tabla.'));
+      } else {
+        for (const group of groups) {
+          const section = document.createElement('article');
+          section.className = 'dynamic-relations-group';
+          const title = document.createElement('p');
+          title.className = 'dynamic-relations-group__title';
+          title.textContent = String(group.label || group.key || 'Signal');
+
+          const list = document.createElement('ul');
+          list.className = 'ai-dynamic-relation-list';
+          for (const row of Array.isArray(group.items) ? group.items : []) {
+            const item = document.createElement('li');
+            const label = document.createElement('span');
+            label.textContent = String(row.label || '(sin etiqueta)');
+            const count = document.createElement('strong');
+            count.textContent = String(row.count || 0);
+            item.append(label, count);
+            list.appendChild(item);
+          }
+          section.append(title, list);
+          dynamicRelationsDetailBody.appendChild(section);
+        }
+      }
+    }
+
+    setStatus(
+      dynamicRelationsDetailStatus,
+      dynamicRelationsDetailState.message,
+      dynamicRelationsDetailState.isError === true,
+      { loading: dynamicRelationsDetailState.loading === true }
+    );
+  }
+
+  async function fetchDynamicRelationGroups(cardModel) {
+    const card = cardModel && typeof cardModel === 'object' ? cardModel : null;
+    const meta = card?.meta && typeof card.meta === 'object' ? card.meta : {};
+    const schema = String(meta.schema || '').trim();
+    const table = String(meta.table || '').trim();
+    const matchColumn = String(meta.matchColumn || '').trim();
+    const labelColumn = String(meta.labelColumn || '').trim();
+    const signalType = String(meta.signalType || '').trim().toLowerCase();
+    const normalizedSignals = Array.isArray(meta.normalizedSignals) ? meta.normalizedSignals.filter(Boolean).slice(0, 12) : [];
+    if (!schema || !table || !matchColumn || !labelColumn || !normalizedSignals.length) {
+      return [];
+    }
+
+    const connectionUrl = getCrmErpDatabaseConnectionUrl();
+    if (!connectionUrl) {
+      return [];
+    }
+
+    const qualifiedTable = `${quoteSqlIdentifier(schema)}.${quoteSqlIdentifier(table)}`;
+    const matchExpr = `CAST(${quoteSqlIdentifier(matchColumn)} AS text)`;
+    const normalizedExpr =
+      signalType === 'phone' ? `regexp_replace(${matchExpr}, '[^0-9]', '', 'g')` : `LOWER(TRIM(${matchExpr}))`;
+    const labelExprRaw = `CAST(${quoteSqlIdentifier(labelColumn)} AS text)`;
+    const labelExpr = `COALESCE(NULLIF(TRIM(${labelExprRaw}), ''), NULLIF(TRIM(${matchExpr}), ''), '(sin etiqueta)')`;
+    const sql = [
+      `SELECT ${normalizedExpr} AS detected_value, ${labelExpr} AS item_label, COUNT(*)::int AS item_count`,
+      `FROM ${qualifiedTable}`,
+      `WHERE ${normalizedExpr} = ANY($1::text[])`,
+      'GROUP BY 1, 2',
+      'ORDER BY detected_value ASC, item_count DESC, item_label ASC',
+      'LIMIT 240;'
+    ].join('\n');
+
+    const response = await postgresService.queryRead(connectionUrl, sql, [normalizedSignals], { maxRows: 240 });
+    const rows = Array.isArray(response?.rows) ? response.rows : [];
+    if (!rows.length) {
+      return [];
+    }
+
+    const lookup = meta.normalizedToRaw && typeof meta.normalizedToRaw === 'object' ? meta.normalizedToRaw : {};
+    const byGroup = new Map();
+    for (const row of rows) {
+      const rawKey = toSafeDynamicUiText(row?.detected_value || '', 160);
+      if (!rawKey) {
+        continue;
+      }
+      const displayKey = toSafeDynamicUiText(lookup[rawKey] || rawKey, 160) || rawKey;
+      const label = toSafeDynamicUiText(row?.item_label || '(sin etiqueta)', 120) || '(sin etiqueta)';
+      const count = Math.max(0, Number(row?.item_count) || 0);
+      if (!byGroup.has(rawKey)) {
+        byGroup.set(rawKey, {
+          key: rawKey,
+          label: displayKey,
+          items: []
+        });
+      }
+      byGroup.get(rawKey).items.push({ label, count });
+    }
+
+    return Array.from(byGroup.values());
+  }
+
+  async function openDynamicRelationDetailScreen(cardId) {
+    const card = dynamicRelationCardIndex.get(cardId);
+    if (!card) {
+      return;
+    }
+
+    dynamicRelationsDetailState = {
+      open: true,
+      loading: true,
+      cardId,
+      groups: [],
+      message: 'Cargando detalles...',
+      isError: false
+    };
+    renderDynamicRelationDetailScreen();
+
+    try {
+      const groups = await fetchDynamicRelationGroups(card);
+      dynamicRelationsDetailState = {
+        open: true,
+        loading: false,
+        cardId,
+        groups,
+        message: groups.length ? `${groups.length} grupo${groups.length === 1 ? '' : 's'} detectados.` : 'Sin resultados.',
+        isError: false
+      };
+      renderDynamicRelationDetailScreen();
+    } catch (error) {
+      dynamicRelationsDetailState = {
+        open: true,
+        loading: false,
+        cardId,
+        groups: [],
+        message: error instanceof Error ? error.message : 'No se pudo cargar el detalle.',
+        isError: true
+      };
+      renderDynamicRelationDetailScreen();
+    }
+  }
+
+  async function executeDynamicSuggestionById(suggestionId) {
+    const suggestion = dynamicSuggestionIndex.get(String(suggestionId || '').trim());
+    if (!suggestion) {
+      return;
+    }
+
+    const activeTab = getActiveTabContext();
+    switch (suggestion.actionType) {
+      case 'whatsapp_send_suggestion':
+        await executeWhatsappSuggestion();
+        break;
+      case 'prefill_chat_context': {
+        const title = String(activeTab?.title || activeTab?.url || '').trim();
+        const summary = String(getTabSummary(activeTab) || '').trim();
+        const prompt = summary
+          ? `Con este contexto de navegacion, ayudame con los siguientes pasos.\n\nTab: ${title}\nResumen: ${summary}`
+          : `Usa el contexto de la pestana actual (${title || 'sin titulo'}) y ayudame con los siguientes pasos.`;
+        if (chatInput) {
+          chatInput.value = prompt;
+          updateChatInputSize();
+          requestChatAutofocus(6, 20);
+        }
+        logDebug('dynamic_suggestion:prefill_chat_context', {
+          tabId: Number(activeTab?.tabId) || -1,
+          title: toSafeLogText(title, 120)
+        });
+        break;
+      }
+      case 'whatsapp_archive_groups': {
+        const tabId = Number(suggestion?.actionPayload?.tabId) || Number(activeTab?.tabId) || -1;
+        if (tabId < 0) {
+          logWarn('dynamic_suggestion:archive_groups:no_tab', {
+            suggestionId: suggestion.id
+          });
+          return;
+        }
+        logDebug('dynamic_suggestion:archive_groups:start', {
+          tabId
+        });
+        const response = await tabContextService.runSiteActionInTab(tabId, 'whatsapp', 'archiveGroups', {
+          scope: 'groups',
+          limit: 20,
+          dryRun: false
+        });
+        if (!response || response.ok !== true) {
+          logWarn('dynamic_suggestion:archive_groups:error', {
+            tabId,
+            error: response?.error || 'No se pudo archivar grupos.'
+          });
+          return;
+        }
+        logDebug('dynamic_suggestion:archive_groups:done', {
+          tabId,
+          response: response?.result || {}
+        });
+        window.setTimeout(() => {
+          tabContextService.requestSnapshot();
+        }, 260);
+        break;
+      }
+      case 'refresh_relations':
+        await refreshDynamicRelationsContext(activeTab, dynamicContextSignals, { force: true });
+        break;
+      default:
+        break;
+    }
+  }
+
+  async function regenerateDynamicSuggestionById(suggestionId) {
+    const suggestion = dynamicSuggestionIndex.get(String(suggestionId || '').trim());
+    if (!suggestion) {
+      return;
+    }
+    if (suggestion.id === 'ai-whatsapp-reply') {
+      const activeTab = getActiveTabContext();
+      if (!activeTab || !isWhatsappContext(activeTab)) {
+        return;
+      }
+      await generateWhatsappSuggestion(activeTab, { force: true });
+    }
+  }
+
+  async function handleDynamicSuggestionsListClick(event) {
+    const button = event.target.closest('[data-suggestion-action]');
+    if (!button) {
+      return;
+    }
+    const action = String(button.dataset.suggestionAction || '').trim();
+    const suggestionId = String(button.dataset.suggestionId || '').trim();
+    if (!action || !suggestionId) {
+      return;
+    }
+    try {
+      if (action === 'run') {
+        await executeDynamicSuggestionById(suggestionId);
+        return;
+      }
+      if (action === 'regen') {
+        await regenerateDynamicSuggestionById(suggestionId);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo ejecutar la sugerencia.';
+      logWarn('dynamic_suggestion:click_error', {
+        action,
+        suggestionId,
+        error: message
+      });
+    }
+  }
+
+  function handleDynamicRelationsListClick(event) {
+    const card = event.target.closest('[data-relation-card-id]');
+    if (!card) {
+      return;
+    }
+    openDynamicRelationDetailScreen(String(card.dataset.relationCardId || '').trim());
   }
 
   async function generateWhatsappSuggestion(tabContext, options = {}) {
@@ -4771,29 +5965,10 @@ export function initPanelApp() {
         text: '',
         loading: false
       };
-
-      if (whatsappSuggestionCard) {
-        whatsappSuggestionCard.hidden = false;
-      }
-
-      if (whatsappSuggestionMeta) {
-        whatsappSuggestionMeta.textContent = buildWhatsappMetaLabel(suggestionContext);
-      }
-
-      if (whatsappSuggestionText) {
-        whatsappSuggestionText.textContent = '';
-      }
-
-      if (whatsappSuggestionRunBtn) {
-        whatsappSuggestionRunBtn.disabled = true;
-      }
-
-      if (whatsappSuggestionRefreshBtn) {
-        whatsappSuggestionRefreshBtn.disabled = false;
-      }
-
       const message = error instanceof Error ? error.message : 'No se pudo generar sugerencia.';
+      setWhatsappSuggestionUiStatus(message, true);
       setStatus(whatsappSuggestionStatus, message, true);
+      renderAiDynamicContext(suggestionContext);
     }
   }
 
@@ -4807,16 +5982,9 @@ export function initPanelApp() {
     }
 
     whatsappSuggestionExecutionInFlight = true;
-
-    if (whatsappSuggestionRunBtn) {
-      whatsappSuggestionRunBtn.disabled = true;
-    }
-
-    if (whatsappSuggestionRefreshBtn) {
-      whatsappSuggestionRefreshBtn.disabled = true;
-    }
-
+    setWhatsappSuggestionUiStatus('Enviando mensaje...', false, { loading: true });
     setStatus(whatsappSuggestionStatus, 'Enviando mensaje...', false, { loading: true });
+    renderAiDynamicContext();
 
     try {
       const response = await tabContextService.runSiteActionInTab(
@@ -4828,32 +5996,33 @@ export function initPanelApp() {
 
       if (!response || response.ok !== true) {
         const message = response?.error || 'No se pudo enviar mensaje en WhatsApp.';
+        setWhatsappSuggestionUiStatus(message, true);
         setStatus(whatsappSuggestionStatus, message, true);
+        renderAiDynamicContext();
         return;
       }
 
       const confirmed = response?.result?.confirmed !== false;
       const dispatchMethod = String(response?.result?.dispatchMethod || '').trim();
       if (confirmed) {
+        setWhatsappSuggestionUiStatus('Mensaje enviado.', false);
         setStatus(whatsappSuggestionStatus, 'Mensaje enviado.');
       } else {
+        const message = `Mensaje despachado (${dispatchMethod || 'sin confirmacion de metodo'}), esperando confirmacion en chat.`;
+        setWhatsappSuggestionUiStatus(message, false);
         setStatus(
           whatsappSuggestionStatus,
-          `Mensaje despachado (${dispatchMethod || 'sin confirmacion de metodo'}), esperando confirmacion en chat.`
+          message
         );
       }
+      renderAiDynamicContext();
 
       window.setTimeout(() => {
         tabContextService.requestSnapshot();
       }, 350);
     } finally {
       whatsappSuggestionExecutionInFlight = false;
-      if (whatsappSuggestionRunBtn) {
-        whatsappSuggestionRunBtn.disabled = false;
-      }
-      if (whatsappSuggestionRefreshBtn) {
-        whatsappSuggestionRefreshBtn.disabled = false;
-      }
+      renderAiDynamicContext();
     }
   }
 
@@ -4917,6 +6086,12 @@ export function initPanelApp() {
         for (const tab of whatsappTabs) {
           try {
             await syncWhatsappChatContext(tab, {
+              messageLimit
+            });
+            const historyPayload = await readWhatsappChatHistory(tab, {
+              limit: messageLimit
+            });
+            await ingestWhatsappHistoryIntoContextMemory(historyPayload, {
               messageLimit
             });
           } catch (_) {
@@ -5023,6 +6198,8 @@ export function initPanelApp() {
           tabs: 0,
           history: 0,
           chat: 0,
+          whatsappChats: 0,
+          whatsappMessages: 0,
           profile: 0,
           facts: 0
         }
@@ -5054,6 +6231,54 @@ export function initPanelApp() {
         const chatIngestion = await contextMemoryService.ingestChatHistory(chatSeed, {
           limit: getSystemVariableNumber('bootstrap.initialContextSyncChatLimit', INITIAL_CONTEXT_SYNC_CHAT_LIMIT)
         });
+        const whatsappVectorMessageLimit = Math.max(
+          80,
+          Math.min(
+            MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT,
+            Number(getSystemVariableNumber('whatsapp.maxPersistedMessages', MAX_WHATSAPP_PERSISTED_MESSAGES)) ||
+              MAX_WHATSAPP_PERSISTED_MESSAGES
+          )
+        );
+        const whatsappSeedChatLimit = Math.max(
+          8,
+          Math.min(
+            240,
+            Number(getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY)) * 8 || 160
+          )
+        );
+        const whatsappHistorySeed = await readAllWhatsappChatHistories({
+          chatLimit: whatsappSeedChatLimit,
+          messageLimit: whatsappVectorMessageLimit
+        });
+        const whatsappIngestion = await contextMemoryService.ingestWhatsappChatHistory(whatsappHistorySeed, {
+          chatLimit: whatsappSeedChatLimit,
+          messageLimit: whatsappVectorMessageLimit
+        });
+        for (const historyPayload of whatsappHistorySeed) {
+          const key = String(
+            historyPayload?.key ||
+              historyPayload?.channelId ||
+              historyPayload?.chatKey ||
+              historyPayload?.phone ||
+              historyPayload?.title ||
+              ''
+          ).trim();
+          const fingerprint = buildWhatsappHistoryVectorFingerprint(historyPayload);
+          if (!key || !fingerprint) {
+            continue;
+          }
+          whatsappHistoryVectorFingerprintByKey.set(key, fingerprint);
+        }
+        if (whatsappHistoryVectorFingerprintByKey.size > 400) {
+          const overflow = whatsappHistoryVectorFingerprintByKey.size - 400;
+          for (let index = 0; index < overflow; index += 1) {
+            const oldestKey = whatsappHistoryVectorFingerprintByKey.keys().next().value;
+            if (!oldestKey) {
+              break;
+            }
+            whatsappHistoryVectorFingerprintByKey.delete(oldestKey);
+          }
+        }
         const profileIngestedId = await contextMemoryService.ingestUserProfile({
           user_name: panelSettings.displayName || '',
           displayName: panelSettings.displayName || '',
@@ -5064,6 +6289,8 @@ export function initPanelApp() {
           tabs: tabs.length,
           history: mergedHistory.length,
           chat: Math.max(0, Number(chatIngestion?.ingestedMessages) || 0),
+          whatsappChats: Math.max(0, Number(whatsappIngestion?.ingestedChats) || 0),
+          whatsappMessages: Math.max(0, Number(whatsappIngestion?.ingestedMessages) || 0),
           profile: profileIngestedId ? 1 : 0,
           facts: Math.max(0, Number(chatIngestion?.ingestedFacts) || 0)
         };
@@ -5127,12 +6354,16 @@ export function initPanelApp() {
     renderTabsContextJson();
 
     const activeTab = getActiveTabContext();
+    dynamicContextSignals = collectDynamicSignalsFromTab(activeTab);
+    void refreshDynamicRelationsContext(activeTab, dynamicContextSignals, { force: false });
+
     if (!activeTab || !isWhatsappContext(activeTab)) {
       hideWhatsappSuggestion();
       return;
     }
 
     generateWhatsappSuggestion(activeTab, { force: false });
+    renderAiDynamicContext(activeTab);
   }
 
   function updateImageQualityLabel(value) {
@@ -5831,6 +7062,33 @@ export function initPanelApp() {
   }
 
   function wireEvents() {
+    const handleDynamicAreaWheel = (event) => {
+      const container = event.currentTarget;
+      if (!(container instanceof HTMLElement) || event.ctrlKey) {
+        return;
+      }
+
+      const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+      if (maxScrollLeft <= 1) {
+        return;
+      }
+
+      const deltaX = Number(event.deltaX) || 0;
+      const deltaY = Number(event.deltaY) || 0;
+      const delta = Math.abs(deltaY) >= Math.abs(deltaX) ? deltaY : deltaX;
+      if (!Number.isFinite(delta) || delta === 0) {
+        return;
+      }
+
+      const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, container.scrollLeft + delta));
+      if (nextScrollLeft === container.scrollLeft) {
+        return;
+      }
+
+      container.scrollLeft = nextScrollLeft;
+      event.preventDefault();
+    };
+
     wirePinDigitGroup(pinDigitInputs);
     wirePinDigitGroup(pinConfirmDigitInputs);
     syncPinHiddenInputs();
@@ -6093,6 +7351,7 @@ export function initPanelApp() {
         closeToolMenu();
         closeModelConfigModal();
         closePinModal();
+        closeDynamicRelationDetailScreen();
       }
     });
 
@@ -6117,21 +7376,30 @@ export function initPanelApp() {
       sendChatMessage();
     });
 
-    whatsappSuggestionRunBtn?.addEventListener('click', () => {
-      executeWhatsappSuggestion();
+    dynamicSuggestionsList?.addEventListener('click', (event) => {
+      void handleDynamicSuggestionsListClick(event);
     });
+    dynamicSuggestionsList?.addEventListener('wheel', handleDynamicAreaWheel, { passive: false });
 
-    whatsappSuggestionCloseBtn?.addEventListener('click', () => {
-      dismissWhatsappSuggestion();
+    dynamicRelationsList?.addEventListener('click', (event) => {
+      handleDynamicRelationsListClick(event);
     });
+    dynamicRelationsList?.addEventListener('wheel', handleDynamicAreaWheel, { passive: false });
 
-    whatsappSuggestionRefreshBtn?.addEventListener('click', () => {
-      const activeTab = getActiveTabContext();
-      if (!activeTab || !isWhatsappContext(activeTab)) {
+    dynamicRelationsList?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') {
         return;
       }
+      const card = event.target.closest('[data-relation-card-id]');
+      if (!card) {
+        return;
+      }
+      event.preventDefault();
+      openDynamicRelationDetailScreen(String(card.dataset.relationCardId || '').trim());
+    });
 
-      generateWhatsappSuggestion(activeTab, { force: true });
+    dynamicRelationsDetailBackBtn?.addEventListener('click', () => {
+      closeDynamicRelationDetailScreen();
     });
 
     imagePickBtn?.addEventListener('click', () => {

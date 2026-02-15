@@ -71,44 +71,35 @@
               <div class="chat-messages" id="chatMessages"></div>
             </section>
 
-            <section class="site-widgets" id="siteWidgets">
-              <article id="whatsappSuggestionCard" class="tool-card site-widget" hidden>
-                <div class="site-widget__head">
-                  <div class="site-widget__head-main">
-                    <h3>WhatsApp Suggestion</h3>
-                    <p id="whatsappSuggestionMeta" class="tool-copy"></p>
-                  </div>
-                  <button id="whatsappSuggestionCloseBtn" class="icon-btn icon-btn--ghost icon-btn--mini" type="button"
-                    aria-label="Cerrar sugerencia de WhatsApp" title="Cerrar sugerencia">
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M18 6L6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
-                        stroke-linejoin="round"></path>
-                    </svg>
-                  </button>
-                </div>
-                <p id="whatsappSuggestionText" class="site-widget__suggestion"></p>
-                <div class="site-widget__actions">
-                  <button id="whatsappSuggestionRunBtn" class="icon-btn icon-btn--send" type="button"
-                    aria-label="Ejecutar sugerencia" title="Ejecutar sugerencia">
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M19 12H5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
-                      <path d="M11 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
-                        stroke-linejoin="round"></path>
-                    </svg>
-                  </button>
-                  <button id="whatsappSuggestionRefreshBtn" class="icon-btn icon-btn--ghost" type="button"
-                    aria-label="Regenerar sugerencia" title="Regenerar sugerencia">
-                    
-                    <svg xmlns="http://www.w3.org/2000/svg" id="Outline" viewBox="0 0 24 24" width="512" height="512">
-                      <path fill="currentColor" stroke="currentColor"
-                        d="M12,2a10.032,10.032,0,0,1,7.122,3H16a1,1,0,0,0-1,1h0a1,1,0,0,0,1,1h4.143A1.858,1.858,0,0,0,22,5.143V1a1,1,0,0,0-1-1h0a1,1,0,0,0-1,1V3.078A11.981,11.981,0,0,0,.05,10.9a1.007,1.007,0,0,0,1,1.1h0a.982.982,0,0,0,.989-.878A10.014,10.014,0,0,1,12,2Z" />
-                      <path fill="currentColor" stroke="currentColor"
-                        d="M22.951,12a.982.982,0,0,0-.989.878A9.986,9.986,0,0,1,4.878,19H8a1,1,0,0,0,1-1H9a1,1,0,0,0-1-1H3.857A1.856,1.856,0,0,0,2,18.857V23a1,1,0,0,0,1,1H3a1,1,0,0,0,1-1V20.922A11.981,11.981,0,0,0,23.95,13.1a1.007,1.007,0,0,0-1-1.1Z" />
-                    </svg>
-                  </button>
-                </div>
-                <p id="whatsappSuggestionStatus" class="status" role="status"></p>
+            <section class="ai-dynamic-context" id="aiDynamicContext">
+              <article class="tool-card p-0 ai-dynamic-area" id="dynamicSuggestionsArea" hidden>
+                <div id="dynamicSuggestionsList" class="ai-dynamic-scroll" role="list" aria-label="Dynamic suggestions"></div>
               </article>
+
+             
+              <article class="tool-card p-0 ai-dynamic-area" id="dynamicRelationsArea" hidden>
+                <div id="dynamicRelationsList" class="ai-dynamic-scroll" role="list" aria-label="Dynamic relations"></div>
+              </article>
+            </section>
+            <div id="dynamicUiToast" class="dynamic-ui-toast" role="status" aria-live="polite" hidden></div>
+
+            <section id="dynamicRelationsDetailScreen" class="dynamic-relations-detail-screen" hidden
+              aria-label="Detalle de relaciones dinamicas">
+              <header class="dynamic-relations-detail-screen__head">
+                <button id="dynamicRelationsDetailBackBtn" class="icon-btn icon-btn--ghost icon-btn--back" type="button"
+                  aria-label="Volver a relaciones dinamicas" title="Volver">
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                      stroke-linejoin="round"></path>
+                  </svg>
+                </button>
+                <div class="dynamic-relations-detail-screen__head-main">
+                  <h3 id="dynamicRelationsDetailTitle">Relacion</h3>
+                  <p id="dynamicRelationsDetailMeta" class="tool-copy"></p>
+                </div>
+              </header>
+              <div id="dynamicRelationsDetailBody" class="dynamic-relations-detail-screen__body"></div>
+              <p id="dynamicRelationsDetailStatus" class="status" role="status"></p>
             </section>
 
             <footer class="chat-composer">

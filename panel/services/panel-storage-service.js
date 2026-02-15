@@ -795,6 +795,87 @@ export function createPanelStorageService({
     });
   }
 
+  async function listWhatsappChatHistories(options = {}) {
+    const db = await getChatDatabase();
+    const messageLimit = Math.max(1, Math.min(2000, Number(options.messageLimit) || Number(maxWhatsappChatMessages) || 640));
+    const chatLimit = Math.max(1, Math.min(500, Number(options.chatLimit) || 120));
+
+    if (!db || !chatDb.WHATSAPP_STORE || !hasDbStore(db, chatDb.WHATSAPP_STORE)) {
+      return [];
+    }
+
+    return new Promise((resolve) => {
+      let tx;
+      try {
+        tx = db.transaction(chatDb.WHATSAPP_STORE, 'readonly');
+      } catch {
+        resolve([]);
+        return;
+      }
+
+      const store = tx.objectStore(chatDb.WHATSAPP_STORE);
+      const rows = [];
+      let settled = false;
+
+      const finish = (payload) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(payload);
+      };
+
+      let cursorRequest;
+      try {
+        cursorRequest = store.openCursor();
+      } catch {
+        finish([]);
+        return;
+      }
+
+      cursorRequest.onerror = () => {
+        finish([]);
+      };
+
+      cursorRequest.onsuccess = (event) => {
+        const cursor = event?.target?.result;
+        if (!cursor) {
+          return;
+        }
+
+        const record = normalizeWhatsappChatRecord(cursor.value, String(cursor.key || ''));
+        if (record) {
+          rows.push(record);
+        }
+        cursor.continue();
+      };
+
+      tx.oncomplete = () => {
+        const result = rows
+          .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0))
+          .slice(0, chatLimit)
+          .map((record) => ({
+            found: true,
+            key: record.key,
+            channelId: record.channelId || '',
+            chatKey: record.chatKey || '',
+            title: record.title || '',
+            phone: record.phone || '',
+            lastMessageId: record.lastMessageId || '',
+            updatedAt: Math.max(0, Number(record.updatedAt) || 0),
+            messages: orderWhatsappMessages(record, messageLimit)
+          }))
+          .filter((item) => Array.isArray(item.messages) && item.messages.length);
+
+        finish(result);
+      };
+
+      tx.onerror = () => {
+        finish([]);
+      };
+    });
+  }
+
   async function readPanelSettings() {
     const db = await getChatDatabase();
     if (!db || !hasDbStore(db, chatDb.SETTINGS_STORE)) {
@@ -955,6 +1036,7 @@ export function createPanelStorageService({
     saveChatHistory,
     syncWhatsappTabContext,
     readWhatsappChatHistory,
+    listWhatsappChatHistories,
     readPanelSettings,
     savePanelSettings,
     readSecret,

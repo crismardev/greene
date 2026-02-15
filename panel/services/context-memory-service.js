@@ -858,7 +858,7 @@ export function createContextMemoryService() {
     return compact;
   }
 
-  function buildChatHistoryDoc(record, index = 0) {
+function buildChatHistoryDoc(record, index = 0) {
     const item = record && typeof record === 'object' ? record : {};
     const role = item.role === 'assistant' ? 'assistant' : 'user';
     const content = toSafeText(item.content || '', 3200);
@@ -903,10 +903,226 @@ export function createContextMemoryService() {
         importance_score: role === 'user' ? 0.55 : 0.45,
         entities: extractEntities(content, '', 8)
       }
-    };
+  };
+}
+
+function normalizeWhatsappHistoryMessage(record, index = 0) {
+  const item = record && typeof record === 'object' ? record : {};
+  const role = item.role === 'me' || item.role === 'user' ? 'me' : 'contact';
+  const kind = toSafeText(item.kind || '', 24).toLowerCase() || 'text';
+  const id = toSafeText(item.id || `msg-${index + 1}`, 220);
+  if (!id) {
+    return null;
   }
 
-  function buildFactDoc(fact, originId = '', index = 0) {
+  const transcript = toSafeText(item.transcript || item.enriched?.transcript || '', 520);
+  const ocrText = toSafeText(item.ocrText || item.enriched?.ocrText || '', 520);
+  const mediaCaption = toSafeText(item.mediaCaption || item.enriched?.mediaCaption || '', 320);
+  const text = toSafeText(item.text || transcript || ocrText || mediaCaption || '', 920);
+  if (!text) {
+    return null;
+  }
+
+  const firstSeenAt = Math.max(0, Number(item.firstSeenAt || item.createdAt) || 0);
+  const lastSeenAt = Math.max(firstSeenAt, Number(item.lastSeenAt || item.updatedAt) || 0);
+
+  return {
+    id,
+    role,
+    kind,
+    text,
+    timestampLabel: toSafeText(item.timestamp || '', 80),
+    transcript,
+    ocrText,
+    mediaCaption,
+    firstSeenAt,
+    lastSeenAt
+  };
+}
+
+function normalizeWhatsappHistoryPayload(rawPayload, messageLimit = 640) {
+  const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
+  const key = toSafeText(
+    payload.key || payload.channelId || payload.chatKey || payload.phone || payload.title || '',
+    220
+  );
+  if (!key) {
+    return null;
+  }
+
+  const limit = Math.max(1, Math.min(2000, Number(messageLimit) || 640));
+  const messages = (Array.isArray(payload.messages) ? payload.messages : [])
+    .map((item, index) => normalizeWhatsappHistoryMessage(item, index))
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftTs = Math.max(0, Number(left.lastSeenAt || left.firstSeenAt) || 0);
+      const rightTs = Math.max(0, Number(right.lastSeenAt || right.firstSeenAt) || 0);
+      return leftTs - rightTs;
+    })
+    .slice(-limit);
+
+  if (!messages.length) {
+    return null;
+  }
+
+  return {
+    key,
+    channelId: toSafeText(payload.channelId || '', 220),
+    chatKey: toSafeText(payload.chatKey || '', 220),
+    title: toSafeText(payload.title || '', 220),
+    phone: toSafeText(payload.phone || '', 80),
+    lastMessageId: toSafeText(payload.lastMessageId || '', 220),
+    updatedAt: Math.max(0, Number(payload.updatedAt) || 0),
+    messages
+  };
+}
+
+function buildWhatsappHistorySummaryDoc(history) {
+  const safe = history && typeof history === 'object' ? history : {};
+  const chatIdentity = toSafeText(
+    safe.key || safe.channelId || safe.chatKey || safe.phone || safe.title || 'wa_chat',
+    220
+  );
+  const chatTitle = toSafeText(safe.title || '', 220);
+  const chatPhone = toSafeText(safe.phone || '', 80);
+  const channelId = toSafeText(safe.channelId || safe.chatKey || '', 220);
+  const messages = Array.isArray(safe.messages) ? safe.messages : [];
+  const total = messages.length;
+  const lastMessage = total ? messages[total - 1] : null;
+  const lastContact = messages
+    .slice()
+    .reverse()
+    .find((item) => item?.role === 'contact');
+  const contactSamples = messages
+    .filter((item) => item?.role === 'contact')
+    .slice(-4)
+    .map((item) => toSafeText(item.text || '', 180))
+    .filter(Boolean);
+
+  const summary = [
+    'Historial persistido de WhatsApp.',
+    `Chat: ${chatTitle || chatPhone || chatIdentity}`,
+    channelId ? `Canal: ${channelId}` : '',
+    chatPhone ? `Telefono: ${chatPhone}` : '',
+    `Mensajes persistidos: ${total}`,
+    lastContact ? `Ultimo mensaje del contacto: ${toSafeText(lastContact.text, 280)}` : '',
+    lastMessage ? `Ultimo mensaje general: ${toSafeText(lastMessage.text, 220)}` : '',
+    contactSamples.length ? `Muestra de mensajes del contacto: ${contactSamples.join(' | ')}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const timestamp = Math.max(
+    0,
+    Number(safe.updatedAt) || Number(lastMessage?.lastSeenAt || lastMessage?.firstSeenAt) || Date.now()
+  );
+  const entities = normalizeArray(
+    [chatTitle, chatPhone, channelId, safe.key, safe.lastMessageId, ...contactSamples],
+    12
+  );
+
+  return {
+    id: `wa-history-chat:${hashText(chatIdentity)}`,
+    text: summary,
+    source: 'whatsapp',
+    category: 'messaging',
+    topic: 'wa_history_chat',
+    tag: 'wa_history',
+    url: '',
+    site: 'whatsapp',
+    author: chatTitle || chatPhone || 'contact',
+    timestamp,
+    durationMs: 0,
+    importanceScore: 0.82,
+    entities,
+    metadata: {
+      url: '',
+      source: 'whatsapp',
+      category: 'messaging',
+      importance_score: 0.82,
+      entities
+    }
+  };
+}
+
+function buildWhatsappHistoryMessageDoc(history, message, index = 0) {
+  const safeHistory = history && typeof history === 'object' ? history : {};
+  const item = message && typeof message === 'object' ? message : {};
+  const chatIdentity = toSafeText(
+    safeHistory.key || safeHistory.channelId || safeHistory.chatKey || safeHistory.phone || safeHistory.title || '',
+    220
+  );
+  if (!chatIdentity) {
+    return null;
+  }
+
+  const messageId = toSafeText(item.id || '', 220);
+  const text = toSafeText(item.text || '', 920);
+  if (!messageId || !text) {
+    return null;
+  }
+
+  const chatTitle = toSafeText(safeHistory.title || '', 220);
+  const chatPhone = toSafeText(safeHistory.phone || '', 80);
+  const channelId = toSafeText(safeHistory.channelId || safeHistory.chatKey || '', 220);
+  const role = item.role === 'me' ? 'me' : 'contact';
+  const kind = toSafeText(item.kind || 'text', 24).toLowerCase() || 'text';
+  const transcript = toSafeText(item.transcript || '', 520);
+  const ocrText = toSafeText(item.ocrText || '', 520);
+  const mediaCaption = toSafeText(item.mediaCaption || '', 320);
+  const timestamp = Math.max(
+    0,
+    Number(item.lastSeenAt || item.firstSeenAt) || Number(safeHistory.updatedAt) || Date.now()
+  );
+
+  const body = [
+    'Historial de mensaje de WhatsApp.',
+    `Chat: ${chatTitle || chatPhone || chatIdentity}`,
+    channelId ? `Canal: ${channelId}` : '',
+    chatPhone ? `Telefono: ${chatPhone}` : '',
+    `Rol: ${role === 'me' ? 'yo' : 'contacto'}`,
+    `Tipo: ${kind}`,
+    item.timestampLabel ? `Hora UI: ${toSafeText(item.timestampLabel, 80)}` : '',
+    `Contenido: ${text}`,
+    transcript ? `Transcripcion: ${transcript}` : '',
+    ocrText ? `OCR/Descripcion visual: ${ocrText}` : '',
+    mediaCaption ? `Caption: ${mediaCaption}` : '',
+    `Message ID: ${messageId}`
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const entities = normalizeArray(
+    [chatTitle, chatPhone, channelId, messageId, kind, text, transcript, ocrText, mediaCaption],
+    12
+  );
+  const fingerprint = `${chatIdentity}|${messageId}|${index}`;
+  const importanceScore = role === 'contact' ? 0.69 : 0.54;
+
+  return {
+    id: `wa-history-msg:${hashText(fingerprint)}`,
+    text: body,
+    source: 'whatsapp',
+    category: 'messaging',
+    topic: 'wa_history_message',
+    tag: 'wa_history',
+    url: '',
+    site: 'whatsapp',
+    author: role === 'me' ? 'me' : chatTitle || chatPhone || 'contact',
+    timestamp,
+    durationMs: 0,
+    importanceScore,
+    entities,
+    metadata: {
+      url: '',
+      source: 'whatsapp',
+      category: 'messaging',
+      importance_score: importanceScore,
+      entities
+    }
+  };
+}
+
+function buildFactDoc(fact, originId = '', index = 0) {
     const normalized = fact && typeof fact === 'object' ? fact : {};
     const type = toSafeText(normalized.type || 'user_fact', 40).toLowerCase() || 'user_fact';
     const text = toSafeText(normalized.text || '', 360);
@@ -1302,6 +1518,65 @@ export function createContextMemoryService() {
     };
   }
 
+  async function ingestWhatsappChatHistory(payload, options = {}) {
+    const source = Array.isArray(payload) ? payload : payload ? [payload] : [];
+    if (!source.length) {
+      return {
+        ingestedChats: 0,
+        ingestedMessages: 0,
+        ids: []
+      };
+    }
+
+    const chatLimit = Math.max(1, Math.min(320, Number(options.chatLimit) || source.length));
+    const messageLimit = Math.max(1, Math.min(2000, Number(options.messageLimit || options.limit) || 640));
+    const histories = source
+      .map((item) => normalizeWhatsappHistoryPayload(item, messageLimit))
+      .filter(Boolean)
+      .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0))
+      .slice(0, chatLimit);
+    if (!histories.length) {
+      return {
+        ingestedChats: 0,
+        ingestedMessages: 0,
+        ids: []
+      };
+    }
+
+    const ids = [];
+    let ingestedChats = 0;
+    let ingestedMessages = 0;
+
+    for (const history of histories) {
+      const summaryDoc = buildWhatsappHistorySummaryDoc(history);
+      const summaryId = await upsertDocument(summaryDoc);
+      if (summaryId) {
+        ids.push(summaryId);
+        ingestedChats += 1;
+      }
+
+      const messages = Array.isArray(history.messages) ? history.messages.slice(-messageLimit) : [];
+      for (let index = 0; index < messages.length; index += 1) {
+        const messageDoc = buildWhatsappHistoryMessageDoc(history, messages[index], index);
+        if (!messageDoc) {
+          continue;
+        }
+
+        const messageId = await upsertDocument(messageDoc);
+        if (messageId) {
+          ids.push(messageId);
+          ingestedMessages += 1;
+        }
+      }
+    }
+
+    return {
+      ingestedChats,
+      ingestedMessages,
+      ids
+    };
+  }
+
   async function ingestUserProfile(profile = {}) {
     const identity = await syncIdentityProfile(profile);
     const doc = buildUserProfileDoc(identity, profile);
@@ -1459,6 +1734,7 @@ export function createContextMemoryService() {
     ingestTabContext,
     ingestHistoryEntries,
     ingestChatHistory,
+    ingestWhatsappChatHistory,
     ingestUserProfile,
     rememberChatTurn,
     extractInsights,
