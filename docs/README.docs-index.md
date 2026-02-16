@@ -2,6 +2,8 @@
 
 - `docs/README.background-external-tools.md`
 - `docs/README.panel-ai.md`
+- `docs/README.smtp-local-bridge.md`
+- `docs/README.smtp-native-host-packaging.md`
 - `docs/README.whatsapp-automation.md`
 - `docs/README.retool-content.md`
 - `docs/README.storage-security.md`

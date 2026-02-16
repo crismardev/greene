@@ -10,7 +10,8 @@
     "sidePanel",
     "scripting",
     "geolocation",
-    "audioCapture"
+    "audioCapture",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "<all_urls>",

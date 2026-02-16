@@ -75,6 +75,7 @@ export function initPanelApp() {
     settings: 3
   });
   const BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE = 'GREENSTUDIO_LOCATION_CONTEXT_UPDATE';
+  const BACKGROUND_SMTP_SEND_TYPE = 'GREENSTUDIO_SMTP_SEND';
   const DEFAULT_CHAT_SYSTEM_PROMPT = buildDefaultChatSystemPrompt(DEFAULT_ASSISTANT_LANGUAGE);
   const DEFAULT_ASSISTANT_DISPLAY_NAME = 'Grenne';
   const DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT = [
@@ -151,6 +152,8 @@ export function initPanelApp() {
   const MAX_CHAT_HISTORY_MESSAGES = 160;
   const MAX_CHAT_HISTORY_STORAGE_LIMIT = 600;
   const MAX_LOCAL_TOOL_CALLS = 3;
+  const MAX_TOOL_ERROR_LOG_ITEMS = 12;
+  const TOOL_ERROR_LOG_MAX_AGE_MS = 1000 * 60 * 60 * 24;
   const MAX_CHAT_ATTACHMENTS_PER_TURN = 8;
   const MAX_CHAT_ATTACHMENT_TEXT_CHARS = 3200;
   const MAX_IMAGE_FILES = 10;
@@ -267,6 +270,9 @@ export function initPanelApp() {
   function createDefaultIntegrationsConfig() {
     return {
       smtp: {
+        transport: 'http_agent',
+        nativeHostName: 'com.greenstudio.smtp_bridge',
+        agentUrl: 'http://127.0.0.1:4395/smtp/send',
         host: '',
         port: 587,
         secure: 'auto',
@@ -421,13 +427,25 @@ export function initPanelApp() {
   const settingsCrmErpDbSchemaSummary = document.getElementById('settingsCrmErpDbSchemaSummary');
   const settingsIntegrationsSaveBtn = document.getElementById('settingsIntegrationsSaveBtn');
   const settingsIntegrationsStatus = document.getElementById('settingsIntegrationsStatus');
+  const settingsSmtpTransportSelect = document.getElementById('settingsSmtpTransportSelect');
+  const settingsSmtpNativeHostInput = document.getElementById('settingsSmtpNativeHostInput');
+  const settingsSmtpAgentUrlInput = document.getElementById('settingsSmtpAgentUrlInput');
+  const settingsSmtpHostInput = document.getElementById('settingsSmtpHostInput');
+  const settingsSmtpPortInput = document.getElementById('settingsSmtpPortInput');
+  const settingsSmtpSecureSelect = document.getElementById('settingsSmtpSecureSelect');
+  const settingsSmtpUsernameInput = document.getElementById('settingsSmtpUsernameInput');
+  const settingsSmtpPasswordInput = document.getElementById('settingsSmtpPasswordInput');
   const settingsSmtpFromInput = document.getElementById('settingsSmtpFromInput');
+  const settingsSmtpBridgeGuideBtn = document.getElementById('settingsSmtpBridgeGuideBtn');
+  const settingsSmtpBridgePackagingBtn = document.getElementById('settingsSmtpBridgePackagingBtn');
   const settingsMapsApiKeyInput = document.getElementById('settingsMapsApiKeyInput');
   const settingsMapsNearbyTypeSelect = document.getElementById('settingsMapsNearbyTypeSelect');
   const settingsPermissionMicBtn = document.getElementById('settingsPermissionMicBtn');
   const settingsPermissionLocationBtn = document.getElementById('settingsPermissionLocationBtn');
   const settingsMapsNearbyRefreshBtn = document.getElementById('settingsMapsNearbyRefreshBtn');
   const settingsLocationMeta = document.getElementById('settingsLocationMeta');
+  const settingsToolErrorsLog = document.getElementById('settingsToolErrorsLog');
+  const settingsToolErrorsClearBtn = document.getElementById('settingsToolErrorsClearBtn');
   const settingsCustomToolsSchemaInput = document.getElementById('settingsCustomToolsSchemaInput');
   const tabsContextJson = document.getElementById('tabsContextJson');
   const systemVariablesList = document.getElementById('systemVariablesList');
@@ -513,6 +531,7 @@ export function initPanelApp() {
   let isGeneratingChat = false;
   let pendingChatRenderRaf = 0;
   let modelWarmupPromise = null;
+  let localToolErrorLog = [];
   let settingsScreenController = null;
   let settingsScreenState = null;
   let tabContextSnapshot = { activeTabId: -1, tabs: [], history: [], runtimeContext: {}, updatedAt: Date.now(), reason: 'init' };
@@ -1245,6 +1264,11 @@ export function initPanelApp() {
 
     return {
       smtp: {
+        transport: ['http_agent', 'native_host'].includes(String(rawSmtp.transport || '').trim())
+          ? String(rawSmtp.transport || '').trim()
+          : String(defaults.smtp.transport || 'http_agent'),
+        nativeHostName: String(rawSmtp.nativeHostName || defaults.smtp.nativeHostName || '').trim().slice(0, 180),
+        agentUrl: String(rawSmtp.agentUrl || rawSmtp.endpoint || defaults.smtp.agentUrl || '').trim().slice(0, 500),
         host: String(rawSmtp.host || '').trim().slice(0, 200),
         port: Math.max(1, Math.min(65535, Number(rawSmtp.port) || defaults.smtp.port)),
         secure: ['auto', 'true', 'false'].includes(String(rawSmtp.secure || '').trim()) ? String(rawSmtp.secure || '').trim() : 'auto',
@@ -1719,6 +1743,34 @@ export function initPanelApp() {
     const maps = integrations.maps || {};
 
     if (syncInput) {
+      if (settingsSmtpTransportSelect) {
+        settingsSmtpTransportSelect.value = ['http_agent', 'native_host'].includes(String(smtp.transport || ''))
+          ? String(smtp.transport || 'http_agent')
+          : 'http_agent';
+      }
+      if (settingsSmtpNativeHostInput) {
+        settingsSmtpNativeHostInput.value = String(smtp.nativeHostName || '');
+      }
+      if (settingsSmtpAgentUrlInput) {
+        settingsSmtpAgentUrlInput.value = String(smtp.agentUrl || '');
+      }
+      if (settingsSmtpHostInput) {
+        settingsSmtpHostInput.value = String(smtp.host || '');
+      }
+      if (settingsSmtpPortInput) {
+        settingsSmtpPortInput.value = String(smtp.port || 587);
+      }
+      if (settingsSmtpSecureSelect) {
+        settingsSmtpSecureSelect.value = ['auto', 'true', 'false'].includes(String(smtp.secure || ''))
+          ? String(smtp.secure || 'auto')
+          : 'auto';
+      }
+      if (settingsSmtpUsernameInput) {
+        settingsSmtpUsernameInput.value = String(smtp.username || '');
+      }
+      if (settingsSmtpPasswordInput) {
+        settingsSmtpPasswordInput.value = String(smtp.password || '');
+      }
       if (settingsSmtpFromInput) {
         settingsSmtpFromInput.value = String(smtp.from || '');
       }
@@ -1736,6 +1788,7 @@ export function initPanelApp() {
     if (settingsLocationMeta) {
       settingsLocationMeta.textContent = buildLocationMetaText(maps.lastKnownLocation, maps.nearbyPlaces);
     }
+    renderToolErrorsLog();
   }
 
   function collectAppsIntegrationsSettingsFromScreen() {
@@ -1751,6 +1804,14 @@ export function initPanelApp() {
       ...getIntegrationsConfig(),
       smtp: {
         ...getIntegrationsConfig().smtp,
+        transport: String(settingsSmtpTransportSelect?.value || 'http_agent'),
+        nativeHostName: String(settingsSmtpNativeHostInput?.value || ''),
+        agentUrl: String(settingsSmtpAgentUrlInput?.value || ''),
+        host: String(settingsSmtpHostInput?.value || ''),
+        port: Number(settingsSmtpPortInput?.value || 587),
+        secure: String(settingsSmtpSecureSelect?.value || 'auto'),
+        username: String(settingsSmtpUsernameInput?.value || ''),
+        password: String(settingsSmtpPasswordInput?.value || ''),
         from: String(settingsSmtpFromInput?.value || '')
       },
       maps: {
@@ -5522,6 +5583,192 @@ export function initPanelApp() {
     ].join('\n');
   }
 
+  function openExtensionDocInNewTab(relativePath = '') {
+    const safePath = String(relativePath || '').trim().replace(/^\/+/, '');
+    if (!safePath) {
+      return false;
+    }
+
+    const targetUrl =
+      chrome?.runtime && typeof chrome.runtime.getURL === 'function' ? chrome.runtime.getURL(safePath) : safePath;
+    if (!targetUrl) {
+      return false;
+    }
+
+    if (chrome?.tabs && typeof chrome.tabs.create === 'function') {
+      try {
+        chrome.tabs.create({
+          url: targetUrl,
+          active: true
+        });
+        return true;
+      } catch (_) {
+        // Fallback to window.open below.
+      }
+    }
+
+    if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      try {
+        const opened = window.open(targetUrl, '_blank', 'noopener');
+        return Boolean(opened);
+      } catch (_) {
+        return false;
+      }
+    }
+
+    return false;
+  }
+
+  function sanitizeToolErrorArgs(value, depth = 0) {
+    if (depth > 3) {
+      return '[max_depth]';
+    }
+
+    if (Array.isArray(value)) {
+      return value.slice(0, 24).map((item) => sanitizeToolErrorArgs(item, depth + 1));
+    }
+
+    if (!value || typeof value !== 'object') {
+      if (typeof value === 'string') {
+        return value.slice(0, 220);
+      }
+      return value;
+    }
+
+    const redactedKeyPattern = /(password|token|secret|api[_-]?key|authorization|pin|credential)/i;
+    const entries = Object.entries(value);
+    const output = {};
+
+    for (const [rawKey, rawValue] of entries.slice(0, 32)) {
+      const key = String(rawKey || '').slice(0, 80);
+      if (!key) {
+        continue;
+      }
+      output[key] = redactedKeyPattern.test(key) ? '***' : sanitizeToolErrorArgs(rawValue, depth + 1);
+    }
+
+    return output;
+  }
+
+  function pruneToolErrorsLog() {
+    const now = Date.now();
+    const items = Array.isArray(localToolErrorLog) ? localToolErrorLog : [];
+    localToolErrorLog = items
+      .map((item) => {
+        const entry = item && typeof item === 'object' ? item : null;
+        if (!entry) {
+          return null;
+        }
+        const createdAt = Math.max(0, Number(entry.createdAt) || 0);
+        const tool = String(entry.tool || '').trim().slice(0, 120);
+        const error = sanitizeSensitiveMessage(String(entry.error || '').trim()).slice(0, 260);
+        const argsSummary = String(entry.argsSummary || '').trim().slice(0, 320);
+        const count = Math.max(1, Number(entry.count) || 1);
+        if (!tool || !error || !createdAt) {
+          return null;
+        }
+        if (now - createdAt > TOOL_ERROR_LOG_MAX_AGE_MS) {
+          return null;
+        }
+        return {
+          createdAt,
+          tool,
+          error,
+          argsSummary,
+          count
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.createdAt - right.createdAt)
+      .slice(-MAX_TOOL_ERROR_LOG_ITEMS);
+  }
+
+  function renderToolErrorsLog() {
+    if (!settingsToolErrorsLog) {
+      return;
+    }
+
+    pruneToolErrorsLog();
+    if (!localToolErrorLog.length) {
+      settingsToolErrorsLog.textContent = 'Sin errores recientes.';
+      return;
+    }
+
+    const lines = localToolErrorLog
+      .slice(-MAX_TOOL_ERROR_LOG_ITEMS)
+      .reverse()
+      .map((entry, index) => {
+        const stamp = formatDateTime(entry.createdAt) || new Date(entry.createdAt).toISOString();
+        const countLabel = entry.count > 1 ? ` x${entry.count}` : '';
+        const argsPart = entry.argsSummary ? ` | args: ${entry.argsSummary}` : '';
+        return `${index + 1}. [${stamp}] ${entry.tool}${countLabel} -> ${entry.error}${argsPart}`;
+      });
+    settingsToolErrorsLog.textContent = lines.join('\n');
+  }
+
+  function appendToolExecutionErrorLog({ tool = '', args = {}, error = '' } = {}) {
+    const safeTool = String(tool || '').trim().slice(0, 120);
+    const safeError = sanitizeSensitiveMessage(String(error || '').trim()).slice(0, 260);
+    if (!safeTool || !safeError) {
+      return;
+    }
+
+    const safeArgs = sanitizeToolErrorArgs(args && typeof args === 'object' ? args : {});
+    let argsSummary = '';
+    try {
+      argsSummary = JSON.stringify(safeArgs).slice(0, 320);
+    } catch (_) {
+      argsSummary = '';
+    }
+
+    pruneToolErrorsLog();
+    const now = Date.now();
+    const last = localToolErrorLog.length ? localToolErrorLog[localToolErrorLog.length - 1] : null;
+    if (last && last.tool === safeTool && last.error === safeError && now - last.createdAt <= 15000) {
+      last.count = Math.max(1, Number(last.count) || 1) + 1;
+      last.createdAt = now;
+      if (argsSummary) {
+        last.argsSummary = argsSummary;
+      }
+    } else {
+      localToolErrorLog.push({
+        createdAt: now,
+        tool: safeTool,
+        error: safeError,
+        argsSummary,
+        count: 1
+      });
+    }
+
+    pruneToolErrorsLog();
+    renderToolErrorsLog();
+  }
+
+  function clearToolErrorsLog() {
+    localToolErrorLog = [];
+    renderToolErrorsLog();
+  }
+
+  function buildToolErrorsSystemContext(limit = 6) {
+    pruneToolErrorsLog();
+    const recent = localToolErrorLog.slice(-Math.max(1, Math.min(12, Number(limit) || 6)));
+    if (!recent.length) {
+      return 'Errores recientes de tools: sin errores.';
+    }
+
+    const lines = recent
+      .slice()
+      .reverse()
+      .map((entry, index) => {
+        const ageSec = Math.max(0, Math.round((Date.now() - entry.createdAt) / 1000));
+        const ageLabel = ageSec < 60 ? `${ageSec}s` : `${Math.round(ageSec / 60)}m`;
+        const countLabel = entry.count > 1 ? ` x${entry.count}` : '';
+        const argsPart = entry.argsSummary ? ` | args:${entry.argsSummary.slice(0, 160)}` : '';
+        return `${index + 1}. ${entry.tool}${countLabel} [${ageLabel}] -> ${entry.error}${argsPart}`;
+      });
+    return ['Errores recientes de tools (usa esto para evitar repetir fallos):', ...lines].join('\n');
+  }
+
   function buildCustomIntegrationsToolsContext() {
     const customTools = normalizeCustomIntegrationTools(getIntegrationsConfig().customTools);
     if (!customTools.length) {
@@ -5542,7 +5789,10 @@ export function initPanelApp() {
     const hasWhatsappTab = Boolean(getPreferredWhatsappTab());
     const hasCrmErpDbConnection = Boolean(getCrmErpDatabaseConnectionUrl());
     const integrations = getIntegrationsConfig();
-    const canUseLocalMailto = Boolean(chrome?.tabs && typeof chrome.tabs.create === 'function');
+    const smtp = integrations.smtp || {};
+    const hasSmtpConfig = Boolean(
+      String(smtp.host || '').trim() && String(smtp.username || '').trim() && String(smtp.password || '').trim()
+    );
     const hasMapsApiKey = Boolean(String(integrations.maps?.apiKey || '').trim());
     const hasCustomTools = normalizeCustomIntegrationTools(integrations.customTools).length > 0;
     return [
@@ -5580,11 +5830,11 @@ export function initPanelApp() {
             '- db.queryWrite (args: sql, params opcional array, maxRows opcional; solo INSERT/UPDATE/DELETE)'
           ]
         : ['- db.* requiere configurar la URL de PostgreSQL en Settings > CRM/ERP Database.']),
-      ...(canUseLocalMailto
+      ...(hasSmtpConfig
         ? [
-            '- smtp.sendMail (args: to, subject, text|html, cc opcional, bcc opcional, from opcional; abre envio local directo en cliente de correo)'
+            '- smtp.sendMail (args: to, subject, text|html, cc opcional, bcc opcional, from opcional; envia por SMTP configurado)'
           ]
-        : ['- smtp.sendMail no disponible en este navegador.']),
+        : ['- smtp.sendMail requiere SMTP host/username/password en Settings > Apps & Integrations.']),
       ...(hasMapsApiKey
         ? [
             '- maps.getCurrentLocation (sin args; devuelve coordenadas guardadas)',
@@ -5603,8 +5853,10 @@ export function initPanelApp() {
       'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
       'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
       'Para preguntas de CRM/ERP, usa db.refreshSchema si falta contexto y luego db.queryRead/db.queryWrite segun corresponda.',
+      'smtp.sendMail usa bridge interno en background y transporte SMTP configurable (http_agent o native_host).',
       'Para "donde estamos", usa maps.getCurrentLocation y maps.reverseGeocode cuando haya API key.',
       'Para consultas cercanas por rubro o texto (ej. "inmobiliarias cerca"), usa maps.searchPlaces con args.query.',
+      'Antes de repetir una tool que ya fallo, revisa el bloque de errores recientes y corrige args/configuracion.',
       'En db.queryRead agrega LIMIT razonable (<= 100) para evitar respuestas gigantes.',
       'No inventes tools fuera de esta lista.',
       buildActiveTabsSystemContext(),
@@ -5612,6 +5864,7 @@ export function initPanelApp() {
       buildWhatsappToolsSystemContext(),
       buildCrmErpDatabaseToolsContext(),
       buildLocationToolsSystemContext(),
+      buildToolErrorsSystemContext(),
       buildCustomIntegrationsToolsContext()
     ].join('\n');
   }
@@ -5877,102 +6130,84 @@ export function initPanelApp() {
       .trim();
   }
 
-  function buildMailtoUrl({ to, cc, bcc, subject, body }) {
-    const primaryTo = Array.isArray(to) ? to.join(',') : '';
-    const params = new URLSearchParams();
-    const safeSubject = String(subject || '').trim();
-    const safeBody = String(body || '').trim();
-    const safeCc = Array.isArray(cc) ? cc.join(',') : '';
-    const safeBcc = Array.isArray(bcc) ? bcc.join(',') : '';
+  function buildSmtpBridgeRequestSummary(payload = {}) {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const smtp = safePayload.smtp && typeof safePayload.smtp === 'object' ? safePayload.smtp : {};
+    const mail = safePayload.mail && typeof safePayload.mail === 'object' ? safePayload.mail : {};
 
-    if (safeSubject) {
-      params.set('subject', safeSubject);
-    }
-    if (safeBody) {
-      params.set('body', safeBody);
-    }
-    if (safeCc) {
-      params.set('cc', safeCc);
-    }
-    if (safeBcc) {
-      params.set('bcc', safeBcc);
-    }
-
-    const query = params.toString();
-    return query ? `mailto:${primaryTo}?${query}` : `mailto:${primaryTo}`;
+    return {
+      transport: ['http_agent', 'native_host'].includes(String(smtp.transport || '').trim())
+        ? String(smtp.transport || '').trim()
+        : 'http_agent',
+      nativeHostName: String(smtp.nativeHostName || '').trim().slice(0, 160),
+      agentUrl: String(smtp.agentUrl || '').trim().slice(0, 220),
+      host: String(smtp.host || '').trim().slice(0, 120),
+      port: Math.max(1, Number(smtp.port) || 0),
+      secure: String(smtp.secure || '').trim().slice(0, 12),
+      from: String(smtp.from || '').trim().slice(0, 120),
+      toCount: Array.isArray(mail.to) ? mail.to.length : 0,
+      ccCount: Array.isArray(mail.cc) ? mail.cc.length : 0,
+      bccCount: Array.isArray(mail.bcc) ? mail.bcc.length : 0,
+      subject: String(mail.subject || '').trim().slice(0, 140),
+      hasText: Boolean(String(mail.text || '').trim()),
+      hasHtml: Boolean(String(mail.html || '').trim())
+    };
   }
 
-  function tryOpenMailtoWithWindow(mailtoUrl) {
-    if (typeof window === 'undefined') {
-      return false;
+  async function sendSmtpWithBackgroundBridge(payload = {}) {
+    if (!chrome?.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+      throw new Error('Bridge SMTP no disponible: runtime de extension no accesible.');
     }
 
-    try {
-      if (typeof window.open === 'function') {
-        const win = window.open(mailtoUrl, '_blank', 'noopener');
-        if (win) {
-          return true;
-        }
-      }
-    } catch (_) {
-      // Ignore popup blockers and fallback to location.href.
-    }
+    const requestSummary = buildSmtpBridgeRequestSummary(payload);
+    logDebug('smtp_bridge:send', {
+      request: requestSummary
+    });
 
-    try {
-      window.location.href = mailtoUrl;
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  async function openMailtoDraft(mailtoUrl) {
-    const safeUrl = String(mailtoUrl || '').trim();
-    if (!safeUrl.startsWith('mailto:')) {
-      throw new Error('URL mailto invalida.');
-    }
-
-    if (chrome?.tabs && typeof chrome.tabs.create === 'function') {
-      return new Promise((resolve, reject) => {
-        chrome.tabs.create(
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(
           {
-            url: safeUrl,
-            active: true
+            type: BACKGROUND_SMTP_SEND_TYPE,
+            payload: payload && typeof payload === 'object' ? payload : {}
           },
-          (tab) => {
-            if (!chrome.runtime?.lastError && tab) {
-              resolve({
-                opened: true,
-                tabId: Number(tab.id) || -1,
-                windowId: Number(tab.windowId) || -1
+          (response) => {
+            if (chrome.runtime.lastError) {
+              const runtimeMessage = String(chrome.runtime.lastError.message || 'Error comunicando con background SMTP bridge.').trim();
+              logWarn('smtp_bridge:runtime_error', {
+                request: requestSummary,
+                error: runtimeMessage
               });
+              reject(new Error(runtimeMessage));
               return;
             }
 
-            if (tryOpenMailtoWithWindow(safeUrl)) {
-              resolve({
-                opened: true,
-                tabId: -1,
-                windowId: -1
+            const safeResponse = response && typeof response === 'object' ? response : null;
+            if (!safeResponse || safeResponse.ok !== true) {
+              const errorMessage = String(safeResponse?.error || 'Error ejecutando SMTP bridge en background.').trim();
+              logWarn('smtp_bridge:response_error', {
+                request: requestSummary,
+                error: errorMessage
               });
+              reject(new Error(errorMessage));
               return;
             }
 
-            reject(new Error(chrome.runtime?.lastError?.message || 'No se pudo abrir el cliente de correo local.'));
+            logDebug('smtp_bridge:response_ok', {
+              request: requestSummary
+            });
+            resolve(safeResponse.result || { ok: true });
           }
         );
-      });
-    }
-
-    if (tryOpenMailtoWithWindow(safeUrl)) {
-      return {
-        opened: true,
-        tabId: -1,
-        windowId: -1
-      };
-    }
-
-    throw new Error('No se pudo abrir el cliente de correo local.');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Error ejecutando SMTP bridge en background.';
+        logWarn('smtp_bridge:send_exception', {
+          request: requestSummary,
+          error: message
+        });
+        reject(error instanceof Error ? error : new Error('Error ejecutando SMTP bridge en background.'));
+      }
+    });
   }
 
   async function sendMailViaConfiguredSmtp(args = {}) {
@@ -5986,6 +6221,18 @@ export function initPanelApp() {
     const html = String(args.html || '').trim().slice(0, 12000);
     const body = (text || htmlToPlainText(html)).slice(0, 2500);
     const from = String(args.from || smtp.from || '').trim().slice(0, 220);
+    const transport = ['http_agent', 'native_host'].includes(String(smtp.transport || '').trim())
+      ? String(smtp.transport || '').trim()
+      : 'http_agent';
+    const nativeHostName = String(smtp.nativeHostName || '').trim().slice(0, 180);
+    const agentUrl = String(smtp.agentUrl || '').trim().slice(0, 500);
+    const host = String(smtp.host || '').trim();
+    const username = String(smtp.username || '').trim();
+    const password = String(smtp.password || '').trim();
+    const port = Math.max(1, Math.min(65535, Number(smtp.port) || 587));
+    const secure = ['auto', 'true', 'false'].includes(String(smtp.secure || ''))
+      ? String(smtp.secure || 'auto')
+      : 'auto';
 
     if (!to.length) {
       throw new Error('smtp.sendMail requiere args.to.');
@@ -5996,28 +6243,57 @@ export function initPanelApp() {
     if (!body) {
       throw new Error('smtp.sendMail requiere args.text o args.html.');
     }
+    if (!host || !username || !password) {
+      throw new Error('Configura SMTP host, username y password en Settings > Apps & Integrations.');
+    }
 
-    const mailtoUrl = buildMailtoUrl({
-      to,
-      cc,
-      bcc,
-      subject,
-      body
-    });
-    const openResult = await openMailtoDraft(mailtoUrl);
+    if (transport === 'http_agent' && !agentUrl) {
+      throw new Error('Configura SMTP Agent URL en Settings > Apps & Integrations.');
+    }
 
-    return {
-      ok: true,
-      mode: 'local_mailto',
-      opened: openResult.opened === true,
-      to,
-      cc,
-      bcc,
-      from,
-      subject,
-      bodyPreview: body.slice(0, 260),
-      bodyLength: body.length
-    };
+    if (transport === 'native_host' && !nativeHostName) {
+      throw new Error('Configura Native Host Name en Settings > Apps & Integrations.');
+    }
+
+    if (/gmail\.com/i.test(host) && port === 587 && secure === 'true') {
+      logWarn('smtp_bridge:config_warning', {
+        warning: 'Para Gmail en puerto 587 normalmente se usa secure=auto o secure=false (STARTTLS).',
+        host,
+        port,
+        secure
+      });
+    }
+
+    try {
+      return await sendSmtpWithBackgroundBridge({
+        smtp: {
+          transport,
+          nativeHostName,
+          agentUrl,
+          host,
+          port,
+          secure,
+          username,
+          password,
+          from
+        },
+        mail: {
+          to,
+          cc,
+          bcc,
+          subject,
+          text: text || body,
+          html
+        }
+      });
+    } catch (error) {
+      const safeMessage = sanitizeSensitiveMessage(error instanceof Error ? error.message : 'Error de envio SMTP.');
+      const routeMeta =
+        transport === 'native_host'
+          ? `transport=native_host, nativeHostName=${nativeHostName || '[vacio]'}`
+          : `transport=http_agent, agentUrl=${agentUrl || '[vacio]'}`;
+      throw new Error(`${safeMessage} (${routeMeta})`);
+    }
   }
 
   function resolveLocationFromArgs(rawArgs = {}) {
@@ -6488,6 +6764,20 @@ export function initPanelApp() {
           error: message
         });
       }
+    }
+
+    for (let index = 0; index < results.length; index += 1) {
+      const result = results[index] && typeof results[index] === 'object' ? results[index] : null;
+      if (!result || result.ok === true) {
+        continue;
+      }
+
+      const sourceCall = calls[index] && typeof calls[index] === 'object' ? calls[index] : {};
+      appendToolExecutionErrorLog({
+        tool: String(result.tool || sourceCall.tool || '').trim(),
+        args: sourceCall.args && typeof sourceCall.args === 'object' ? sourceCall.args : {},
+        error: String(result.error || 'Error ejecutando tool local.').trim()
+      });
     }
 
     logDebug('executeLocalToolCalls:done', {
@@ -11605,6 +11895,14 @@ export function initPanelApp() {
     });
 
     const integrationInputs = [
+      settingsSmtpTransportSelect,
+      settingsSmtpNativeHostInput,
+      settingsSmtpAgentUrlInput,
+      settingsSmtpHostInput,
+      settingsSmtpPortInput,
+      settingsSmtpSecureSelect,
+      settingsSmtpUsernameInput,
+      settingsSmtpPasswordInput,
       settingsSmtpFromInput,
       settingsMapsApiKeyInput,
       settingsMapsNearbyTypeSelect
@@ -11626,6 +11924,31 @@ export function initPanelApp() {
       scheduleIntegrationsAutosave({
         delayMs: 900
       });
+    });
+
+    settingsToolErrorsClearBtn?.addEventListener('click', () => {
+      clearToolErrorsLog();
+      setStatus(settingsIntegrationsStatus, 'Log de errores limpiado.');
+    });
+
+    settingsSmtpBridgeGuideBtn?.addEventListener('click', () => {
+      const opened = openExtensionDocInNewTab('docs/README.smtp-local-bridge.md');
+      if (!opened) {
+        setStatus(settingsIntegrationsStatus, 'No se pudo abrir la guia local bridge.', true);
+        return;
+      }
+
+      setStatus(settingsIntegrationsStatus, 'Guia local bridge abierta en una nueva pestana.');
+    });
+
+    settingsSmtpBridgePackagingBtn?.addEventListener('click', () => {
+      const opened = openExtensionDocInNewTab('docs/README.smtp-native-host-packaging.md');
+      if (!opened) {
+        setStatus(settingsIntegrationsStatus, 'No se pudo abrir la guia de empaquetado.', true);
+        return;
+      }
+
+      setStatus(settingsIntegrationsStatus, 'Guia de empaquetado abierta en una nueva pestana.');
     });
 
     settingsPermissionLocationBtn?.addEventListener('click', () => {

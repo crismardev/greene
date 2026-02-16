@@ -512,12 +512,55 @@
                 <section class="settings-security">
                   <div class="settings-card__head">
                     <h3>SMTP</h3>
-                    <p class="tool-copy">Envio local directo: `smtp.sendMail` abre un borrador listo en tu cliente de correo (mailto).</p>
+                    <p class="tool-copy">Envio SMTP por bridge interno de la extension (background) con transporte HTTP local o Native Host.</p>
                   </div>
+                  <label class="field">
+                    <span>SMTP Transport</span>
+                    <select id="settingsSmtpTransportSelect">
+                      <option value="http_agent">HTTP Agent (localhost/API)</option>
+                      <option value="native_host">Native Host (proceso local)</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Native Host Name</span>
+                    <input id="settingsSmtpNativeHostInput" type="text" placeholder="com.greenstudio.smtp_bridge" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span>SMTP Agent URL (local)</span>
+                    <input id="settingsSmtpAgentUrlInput" type="url" placeholder="http://127.0.0.1:4395/smtp/send" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span>SMTP Host</span>
+                    <input id="settingsSmtpHostInput" type="text" placeholder="smtp.example.com" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span>SMTP Port</span>
+                    <input id="settingsSmtpPortInput" type="number" min="1" max="65535" placeholder="587" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span>SMTP Secure</span>
+                    <select id="settingsSmtpSecureSelect">
+                      <option value="auto">Auto</option>
+                      <option value="true">TLS/SSL</option>
+                      <option value="false">STARTTLS/Plain</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>SMTP Username</span>
+                    <input id="settingsSmtpUsernameInput" type="text" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span>SMTP Password</span>
+                    <input id="settingsSmtpPasswordInput" type="password" autocomplete="off" />
+                  </label>
                   <label class="field">
                     <span>Default From</span>
                     <input id="settingsSmtpFromInput" type="email" placeholder="no-reply@empresa.com" autocomplete="off" />
                   </label>
+                  <div class="actions actions--tight">
+                    <button id="settingsSmtpBridgeGuideBtn" class="btn btn--ghost" type="button">Guia local bridge</button>
+                    <button id="settingsSmtpBridgePackagingBtn" class="btn btn--ghost" type="button">Guia empaquetado</button>
+                  </div>
                 </section>
 
                 <section class="settings-security">
@@ -545,6 +588,17 @@
                     <button id="settingsMapsNearbyRefreshBtn" class="btn btn--ghost" type="button">Actualizar lugares cercanos</button>
                   </div>
                   <p id="settingsLocationMeta" class="tool-copy">Ubicacion: no disponible.</p>
+                </section>
+
+                <section class="settings-security">
+                  <div class="settings-card__head">
+                    <h3>Tool Errors</h3>
+                    <p class="tool-copy">Ultimos errores de ejecucion de tools (log corto).</p>
+                  </div>
+                  <pre id="settingsToolErrorsLog" class="tabs-context-json">Sin errores recientes.</pre>
+                  <div class="actions actions--tight">
+                    <button id="settingsToolErrorsClearBtn" class="btn btn--ghost" type="button">Limpiar errores</button>
+                  </div>
                 </section>
 
                 <section class="settings-security">
