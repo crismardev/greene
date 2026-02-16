@@ -170,6 +170,85 @@ export function buildWhatsappSignalKey(tabContext) {
   ].join('::');
 }
 
+function toPromptKeyToken(value, limit = 220) {
+  const token = toSafeText(value || '', limit)
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return token;
+}
+
+function buildPromptScopedKey(scope, value, limit = 220) {
+  const token = toPromptKeyToken(value, limit);
+  if (!token) {
+    return '';
+  }
+
+  return `${scope}:${token}`;
+}
+
+export function getWhatsappConversationType(tabContext) {
+  const details = tabContext && typeof tabContext.details === 'object' ? tabContext.details : {};
+  const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+  const channelId = toSafeText(currentChat.channelId || '', 220).toLowerCase();
+  const phone = toSafeText(currentChat.phone || '', 80);
+  const title = toSafeText(currentChat.title || '', 140).toLowerCase();
+
+  if (channelId.includes('@g.us') || channelId.includes('group')) {
+    return 'group';
+  }
+
+  if (channelId.includes('@c.us') || phone) {
+    return 'direct';
+  }
+
+  if (/\bgrupo\b|\bgroup\b/.test(title)) {
+    return 'group';
+  }
+
+  return 'unknown';
+}
+
+export function resolveWhatsappPromptTarget(tabContext) {
+  const details = tabContext && typeof tabContext.details === 'object' ? tabContext.details : {};
+  const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+  const channelId = toSafeText(currentChat.channelId || '', 220);
+  const chatKey = toSafeText(getWhatsappChatKey(tabContext), 220);
+  const phone = toSafeText(currentChat.phone || '', 80);
+  const title = toSafeText(currentChat.title || '', 160);
+  const type = getWhatsappConversationType(tabContext);
+  const candidates = [
+    buildPromptScopedKey('channel', channelId, 220),
+    buildPromptScopedKey('phone', phone, 80),
+    buildPromptScopedKey('chat', chatKey, 220),
+    buildPromptScopedKey('title', title, 160)
+  ];
+  const promptKeys = [];
+  const seen = new Set();
+
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) {
+      continue;
+    }
+
+    seen.add(candidate);
+    promptKeys.push(candidate);
+  }
+
+  return {
+    promptKey: promptKeys[0] || '',
+    promptKeys,
+    label: buildWhatsappMetaLabel(tabContext),
+    type,
+    isGroup: type === 'group',
+    channelId,
+    chatKey,
+    title,
+    phone
+  };
+}
+
 function describeMyResponseStyle(messages) {
   const mine = (Array.isArray(messages) ? messages : []).filter((item) => item?.role === 'me').slice(-6);
   if (!mine.length) {
@@ -224,9 +303,14 @@ export function buildWhatsappReplyPrompt(tabContext, options = {}) {
   const messages = messagesList.map((item) => formatMessageForPrompt(item)).join('\n');
   const styleHint = describeMyResponseStyle(messagesList);
   const basePrompt = String(options.basePrompt || DEFAULT_WHATSAPP_REPLY_PROMPT_BASE).trim() || DEFAULT_WHATSAPP_REPLY_PROMPT_BASE;
+  const chatPrompt = toSafeText(options.chatPrompt || '', 1800);
+  const lines = [basePrompt];
 
-  return [
-    basePrompt,
+  if (chatPrompt) {
+    lines.push('', 'Personalizacion especifica para este chat:', chatPrompt);
+  }
+
+  lines.push(
     '',
     `Mi numero: ${myNumber || 'N/A'}`,
     `Chat: ${chatLabel}`,
@@ -235,5 +319,7 @@ export function buildWhatsappReplyPrompt(tabContext, options = {}) {
     messages || 'Sin mensajes recientes.',
     '',
     'Respuesta sugerida:'
-  ].join('\n');
+  );
+
+  return lines.join('\n');
 }

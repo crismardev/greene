@@ -1,6 +1,7 @@
 import {
   buildDefaultChatSystemPrompt,
-  DEFAULT_ASSISTANT_LANGUAGE
+  DEFAULT_ASSISTANT_LANGUAGE,
+  normalizeAssistantLanguage
 } from './services/prompt-service.js';
 import { marked } from '../node_modules/marked/lib/marked.esm.js';
 import { setStatus } from './services/status-service.js';
@@ -23,7 +24,8 @@ import {
   buildWhatsappSignalKey,
   getWhatsappChatKey,
   hasWhatsappConversationHistory,
-  isWhatsappContext
+  isWhatsappContext,
+  resolveWhatsappPromptTarget
 } from './services/site-context/whatsapp-site-context.js';
 
 export function initPanelApp() {
@@ -47,6 +49,15 @@ export function initPanelApp() {
     CRM_ERP_DATABASE: 'crm_erp_database',
     TABS: 'tabs',
     SYSTEM_VARIABLES: 'system_variables'
+  });
+  const SETTINGS_PAGE_TITLES = Object.freeze({
+    [SETTINGS_PAGES.HOME]: 'Settings',
+    [SETTINGS_PAGES.USER]: 'User',
+    [SETTINGS_PAGES.ASSISTANT]: 'Assistant',
+    [SETTINGS_PAGES.AI_MODELS]: 'AI Models',
+    [SETTINGS_PAGES.CRM_ERP_DATABASE]: 'CRM/ERP Database',
+    [SETTINGS_PAGES.TABS]: 'Tabs',
+    [SETTINGS_PAGES.SYSTEM_VARIABLES]: 'System Variables'
   });
   const PIN_MODAL_MODES = Object.freeze({
     SETUP: 'setup',
@@ -139,6 +150,8 @@ export function initPanelApp() {
   const MAX_WHATSAPP_PERSISTED_MESSAGES = 640;
   const MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT = 2000;
   const WHATSAPP_SUGGESTION_HISTORY_LIMIT = 120;
+  const MAX_WHATSAPP_PROMPT_ENTRIES = 320;
+  const MAX_WHATSAPP_PROMPT_CHARS = 1800;
 
   const DEFAULT_OLLAMA_MODEL = 'gpt-oss:20b';
   const DEFAULT_PRIMARY_MODEL_ID = 'model-local-ollama';
@@ -254,7 +267,8 @@ export function initPanelApp() {
     securityConfig: null,
     crmErpDatabaseUrl: '',
     crmErpDatabaseSchemaSnapshot: null,
-    crmErpDatabaseMeProfile: null
+    crmErpDatabaseMeProfile: null,
+    whatsappConversationPrompts: {}
   });
 
   const ALLOWED_IMAGE_TYPES = new Set([
@@ -273,7 +287,7 @@ export function initPanelApp() {
   const openSettingsBtn = document.getElementById('openSettingsBtn');
   const goHomeBtn = document.getElementById('goHomeBtn');
   const closeSettingsBtn = document.getElementById('closeSettingsBtn');
-  const settingsSectionBackBtn = document.getElementById('settingsSectionBackBtn');
+  const settingsTitle = document.getElementById('settingsTitle');
   const settingsShell = document.getElementById('settingsShell');
   const settingsPages = Array.from(document.querySelectorAll('.settings-page'));
   const settingsNavItems = Array.from(document.querySelectorAll('[data-settings-target]'));
@@ -334,10 +348,13 @@ export function initPanelApp() {
   const settingsThemeModeSelect = document.getElementById('settingsThemeModeSelect');
   const settingsLanguageSelect = document.getElementById('settingsLanguageSelect');
   const settingsSystemPrompt = document.getElementById('settingsSystemPrompt');
-  const settingsUserSaveBtn = document.getElementById('settingsUserSaveBtn');
   const settingsUserStatus = document.getElementById('settingsUserStatus');
-  const settingsAssistantSaveBtn = document.getElementById('settingsAssistantSaveBtn');
   const settingsAssistantStatus = document.getElementById('settingsAssistantStatus');
+  const settingsWhatsappPromptChatLabel = document.getElementById('settingsWhatsappPromptChatLabel');
+  const settingsWhatsappPromptChatKey = document.getElementById('settingsWhatsappPromptChatKey');
+  const settingsWhatsappPromptInput = document.getElementById('settingsWhatsappPromptInput');
+  const settingsWhatsappPromptClearBtn = document.getElementById('settingsWhatsappPromptClearBtn');
+  const settingsWhatsappPromptStatus = document.getElementById('settingsWhatsappPromptStatus');
   const aiPrimaryModelSelect = document.getElementById('aiPrimaryModelSelect');
   const settingsAddModelBtn = document.getElementById('settingsAddModelBtn');
   const settingsRefreshLocalModelsBtn = document.getElementById('settingsRefreshLocalModelsBtn');
@@ -352,19 +369,16 @@ export function initPanelApp() {
   const settingsUnlockPinBtn = document.getElementById('settingsUnlockPinBtn');
   const settingsLockPinBtn = document.getElementById('settingsLockPinBtn');
   const settingsCrmErpDbUrlInput = document.getElementById('settingsCrmErpDbUrlInput');
-  const settingsCrmErpDbSaveBtn = document.getElementById('settingsCrmErpDbSaveBtn');
   const settingsCrmErpDbAnalyzeBtn = document.getElementById('settingsCrmErpDbAnalyzeBtn');
   const settingsCrmErpDbStatus = document.getElementById('settingsCrmErpDbStatus');
   const settingsCrmErpMeTableSelect = document.getElementById('settingsCrmErpMeTableSelect');
   const settingsCrmErpMeIdColumnSelect = document.getElementById('settingsCrmErpMeIdColumnSelect');
   const settingsCrmErpMeUserIdInput = document.getElementById('settingsCrmErpMeUserIdInput');
-  const settingsCrmErpMeSaveBtn = document.getElementById('settingsCrmErpMeSaveBtn');
   const settingsCrmErpMeClearBtn = document.getElementById('settingsCrmErpMeClearBtn');
   const settingsCrmErpMeStatus = document.getElementById('settingsCrmErpMeStatus');
   const settingsCrmErpDbSchemaSummary = document.getElementById('settingsCrmErpDbSchemaSummary');
   const tabsContextJson = document.getElementById('tabsContextJson');
   const systemVariablesList = document.getElementById('systemVariablesList');
-  const systemVariablesSaveBtn = document.getElementById('systemVariablesSaveBtn');
   const systemVariablesResetBtn = document.getElementById('systemVariablesResetBtn');
   const systemVariablesStatus = document.getElementById('systemVariablesStatus');
   const modelConfigModal = document.getElementById('modelConfigModal');
@@ -457,6 +471,7 @@ export function initPanelApp() {
     tabId: -1,
     chatKey: '',
     signalKey: '',
+    promptSignature: '',
     text: '',
     loading: false
   };
@@ -468,6 +483,19 @@ export function initPanelApp() {
     isError: false,
     loading: false
   };
+  let whatsappPromptEditorTarget = null;
+  let whatsappPromptAutosaveTimer = 0;
+  let whatsappPromptAutosaveToken = 0;
+  let userSettingsAutosaveTimer = 0;
+  let userSettingsAutosaveToken = 0;
+  let assistantSettingsAutosaveTimer = 0;
+  let assistantSettingsAutosaveToken = 0;
+  let crmDbSettingsAutosaveTimer = 0;
+  let crmDbSettingsAutosaveToken = 0;
+  let crmMeSettingsAutosaveTimer = 0;
+  let crmMeSettingsAutosaveToken = 0;
+  let systemVariablesAutosaveTimer = 0;
+  let systemVariablesAutosaveToken = 0;
   let dynamicContextSignals = {
     phones: [],
     emails: []
@@ -624,6 +652,239 @@ export function initPanelApp() {
 
   function getWhatsappSuggestionBasePrompt() {
     return getSystemVariablePrompt('prompts.whatsappSuggestionBase', DEFAULT_WHATSAPP_REPLY_PROMPT_BASE);
+  }
+
+  function createEmptyWhatsappPromptTarget() {
+    return {
+      promptKey: '',
+      promptKeys: [],
+      label: '',
+      type: 'unknown',
+      isGroup: false,
+      channelId: '',
+      chatKey: '',
+      title: '',
+      phone: ''
+    };
+  }
+
+  function normalizeWhatsappPromptStoreKey(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .slice(0, 260);
+  }
+
+  function normalizeWhatsappPromptTarget(rawTarget) {
+    const source = rawTarget && typeof rawTarget === 'object' ? rawTarget : {};
+    const rawPromptKeys = Array.isArray(source.promptKeys) ? source.promptKeys : [];
+    const promptKeys = [];
+    const seen = new Set();
+
+    for (const candidate of [source.promptKey, ...rawPromptKeys]) {
+      const key = normalizeWhatsappPromptStoreKey(candidate);
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      promptKeys.push(key);
+    }
+
+    const primaryKey = promptKeys[0] || '';
+    const rawType = String(source.type || '').trim().toLowerCase();
+    const type = rawType === 'group' || rawType === 'direct' ? rawType : 'unknown';
+
+    return {
+      promptKey: primaryKey,
+      promptKeys,
+      label: String(source.label || '').trim().slice(0, 180),
+      type,
+      isGroup: type === 'group' || source.isGroup === true,
+      channelId: String(source.channelId || '').trim().slice(0, 220),
+      chatKey: String(source.chatKey || '').trim().slice(0, 220),
+      title: String(source.title || '').trim().slice(0, 180),
+      phone: String(source.phone || '').trim().slice(0, 80)
+    };
+  }
+
+  function resolveWhatsappPromptTargetForContext(tabContext) {
+    if (!tabContext || !isWhatsappContext(tabContext)) {
+      return createEmptyWhatsappPromptTarget();
+    }
+
+    return normalizeWhatsappPromptTarget(resolveWhatsappPromptTarget(tabContext));
+  }
+
+  function normalizeWhatsappConversationPromptEntry(rawEntry, fallbackKey = '') {
+    const entry = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
+    const key = normalizeWhatsappPromptStoreKey(entry.key || fallbackKey || '');
+    const prompt = String(entry.prompt || '')
+      .trim()
+      .slice(0, MAX_WHATSAPP_PROMPT_CHARS);
+
+    if (!key || !prompt) {
+      return null;
+    }
+
+    const rawType = String(entry.type || '').trim().toLowerCase();
+    const type = rawType === 'group' || rawType === 'direct' ? rawType : 'unknown';
+
+    return {
+      key,
+      prompt,
+      label: String(entry.label || '').trim().slice(0, 180),
+      type,
+      isGroup: type === 'group' || entry.isGroup === true,
+      channelId: String(entry.channelId || '').trim().slice(0, 220),
+      chatKey: String(entry.chatKey || '').trim().slice(0, 220),
+      title: String(entry.title || '').trim().slice(0, 180),
+      phone: String(entry.phone || '').trim().slice(0, 80),
+      updatedAt: Math.max(0, Number(entry.updatedAt) || Date.now())
+    };
+  }
+
+  function normalizeWhatsappConversationPrompts(rawPrompts) {
+    const rows = [];
+
+    if (Array.isArray(rawPrompts)) {
+      for (const item of rawPrompts) {
+        rows.push(normalizeWhatsappConversationPromptEntry(item, item?.key || ''));
+      }
+    } else if (rawPrompts && typeof rawPrompts === 'object') {
+      for (const [key, value] of Object.entries(rawPrompts)) {
+        rows.push(normalizeWhatsappConversationPromptEntry(value, key));
+      }
+    }
+
+    const normalizedRows = rows
+      .filter(Boolean)
+      .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0))
+      .slice(0, MAX_WHATSAPP_PROMPT_ENTRIES);
+
+    const normalized = {};
+    for (const item of normalizedRows) {
+      normalized[item.key] = item;
+    }
+    return normalized;
+  }
+
+  function getWhatsappConversationPromptsMap() {
+    return normalizeWhatsappConversationPrompts(panelSettings.whatsappConversationPrompts);
+  }
+
+  function findWhatsappConversationPromptEntryByTarget(target) {
+    const safeTarget = normalizeWhatsappPromptTarget(target);
+    if (!safeTarget.promptKey) {
+      return {
+        target: safeTarget,
+        entry: null,
+        key: ''
+      };
+    }
+
+    const prompts = getWhatsappConversationPromptsMap();
+    for (const key of safeTarget.promptKeys) {
+      const entry = prompts[key];
+      if (!entry || !entry.prompt) {
+        continue;
+      }
+
+      return {
+        target: safeTarget,
+        entry,
+        key
+      };
+    }
+
+    const targetMatchTokens = new Set(
+      [
+        safeTarget.channelId,
+        safeTarget.phone,
+        safeTarget.chatKey,
+        safeTarget.title
+      ]
+        .map((value) => normalizeWhatsappPromptStoreKey(value))
+        .filter(Boolean)
+    );
+
+    if (targetMatchTokens.size > 0) {
+      for (const [entryKey, entry] of Object.entries(prompts)) {
+        const safeEntry = entry && typeof entry === 'object' ? entry : {};
+        const prompt = String(safeEntry.prompt || '').trim();
+        if (!prompt) {
+          continue;
+        }
+        const entryTokens = [
+          safeEntry.channelId,
+          safeEntry.phone,
+          safeEntry.chatKey,
+          safeEntry.title
+        ]
+          .map((value) => normalizeWhatsappPromptStoreKey(value))
+          .filter(Boolean);
+
+        if (!entryTokens.some((token) => targetMatchTokens.has(token))) {
+          continue;
+        }
+
+        return {
+          target: safeTarget,
+          entry: safeEntry,
+          key: String(entryKey || '').trim()
+        };
+      }
+    }
+
+    return {
+      target: safeTarget,
+      entry: null,
+      key: ''
+    };
+  }
+
+  function resolveWhatsappConversationPromptForSuggestion(tabContext) {
+    const lookup = findWhatsappConversationPromptEntryByTarget(resolveWhatsappPromptTargetForContext(tabContext));
+    return String(lookup.entry?.prompt || '')
+      .trim()
+      .slice(0, MAX_WHATSAPP_PROMPT_CHARS);
+  }
+
+  function buildWhatsappSuggestionPromptSignature(basePrompt, chatPrompt) {
+    const safeBasePrompt = String(basePrompt || '').trim().slice(0, 3200);
+    const safeChatPrompt = String(chatPrompt || '').trim().slice(0, 3200);
+    return `${safeBasePrompt.length}:${safeBasePrompt}::${safeChatPrompt.length}:${safeChatPrompt}`;
+  }
+
+  function toWhatsappPromptTargetKeySet(target) {
+    const safeTarget = normalizeWhatsappPromptTarget(target);
+    const keys = safeTarget.promptKeys.length ? safeTarget.promptKeys : [safeTarget.promptKey];
+    return new Set(keys.map((item) => normalizeWhatsappPromptStoreKey(item)).filter(Boolean));
+  }
+
+  function isWhatsappPromptTargetActiveInTab(target, tabContext) {
+    if (!tabContext || !isWhatsappContext(tabContext)) {
+      return false;
+    }
+
+    const targetKeys = toWhatsappPromptTargetKeySet(target);
+    if (!targetKeys.size) {
+      return false;
+    }
+
+    const activeTarget = resolveWhatsappPromptTargetForContext(tabContext);
+    const activeKeys = toWhatsappPromptTargetKeySet(activeTarget);
+    if (!activeKeys.size) {
+      return false;
+    }
+
+    for (const key of targetKeys) {
+      if (activeKeys.has(key)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   function sanitizeSensitiveMessage(message) {
@@ -1097,9 +1358,6 @@ export function initPanelApp() {
     if (settingsCrmErpMeUserIdInput) {
       settingsCrmErpMeUserIdInput.disabled = disabled;
     }
-    if (settingsCrmErpMeSaveBtn) {
-      settingsCrmErpMeSaveBtn.disabled = disabled;
-    }
     if (settingsCrmErpMeClearBtn) {
       settingsCrmErpMeClearBtn.disabled = !hasDb;
     }
@@ -1129,6 +1387,275 @@ export function initPanelApp() {
     renderCrmErpMeProfileSettings({
       syncInput: options.syncProfileInput !== false
     });
+  }
+
+  function getWhatsappPromptTargetLabel(target) {
+    const safeTarget = normalizeWhatsappPromptTarget(target);
+    if (!safeTarget.promptKey) {
+      return 'Chat objetivo: ninguno seleccionado.';
+    }
+
+    const typeLabel = safeTarget.isGroup ? 'Grupo' : safeTarget.type === 'direct' ? 'Chat' : 'Chat';
+    const label = safeTarget.label || safeTarget.title || safeTarget.phone || safeTarget.chatKey || safeTarget.promptKey;
+    return `${typeLabel}: ${label}`;
+  }
+
+  function isAssistantSettingsPageVisible() {
+    const currentScreen = String(app?.dataset?.screen || '').trim();
+    if (currentScreen !== 'settings') {
+      return false;
+    }
+
+    const currentSettingsPage = normalizeSettingsPage(settingsShell?.dataset?.settingsPage || SETTINGS_PAGES.HOME);
+    return currentSettingsPage === SETTINGS_PAGES.ASSISTANT;
+  }
+
+  function clearWhatsappPromptAutosaveTimer() {
+    if (whatsappPromptAutosaveTimer) {
+      window.clearTimeout(whatsappPromptAutosaveTimer);
+      whatsappPromptAutosaveTimer = 0;
+    }
+  }
+
+  function setWhatsappPromptEditorTarget(target, options = {}) {
+    const safeTarget = normalizeWhatsappPromptTarget(target);
+    const hasTarget = Boolean(safeTarget.promptKey);
+    whatsappPromptEditorTarget = hasTarget ? safeTarget : null;
+
+    const lookup = hasTarget ? findWhatsappConversationPromptEntryByTarget(safeTarget) : null;
+    const savedPrompt = String(lookup?.entry?.prompt || '')
+      .trim()
+      .slice(0, MAX_WHATSAPP_PROMPT_CHARS);
+    const shouldKeepInput = options.keepInput === true;
+
+    if (settingsWhatsappPromptChatLabel) {
+      settingsWhatsappPromptChatLabel.textContent = getWhatsappPromptTargetLabel(safeTarget);
+    }
+
+    if (settingsWhatsappPromptChatKey) {
+      settingsWhatsappPromptChatKey.textContent = hasTarget ? `Key: ${safeTarget.promptKey}` : 'Key: -';
+    }
+
+    if (settingsWhatsappPromptInput) {
+      if (!shouldKeepInput) {
+        settingsWhatsappPromptInput.value = savedPrompt;
+      }
+      settingsWhatsappPromptInput.disabled = !hasTarget;
+    }
+
+    if (settingsWhatsappPromptClearBtn) {
+      settingsWhatsappPromptClearBtn.disabled = !hasTarget;
+    }
+
+    if (options.clearStatus !== false) {
+      setStatus(settingsWhatsappPromptStatus, '');
+    }
+  }
+
+  function hydrateWhatsappPromptEditorFromActiveChat(options = {}) {
+    const previousTarget = normalizeWhatsappPromptTarget(whatsappPromptEditorTarget);
+    const previousKey = previousTarget.promptKey;
+    const whatsappTab = getPreferredWhatsappTab();
+    const target = resolveWhatsappPromptTargetForContext(whatsappTab);
+    const currentKey = target.promptKey;
+    const sameTarget = Boolean(previousKey && currentKey && previousKey === currentKey);
+    const keepCurrentTarget = options.keepCurrentTarget === true && sameTarget;
+    const nextTarget = keepCurrentTarget ? previousTarget : target;
+
+    const keepInput = options.keepInput === true || sameTarget;
+    setWhatsappPromptEditorTarget(nextTarget, {
+      keepInput,
+      clearStatus: options.clearStatus
+    });
+
+    if (!currentKey && options.silentNoTarget !== true) {
+      setStatus(settingsWhatsappPromptStatus, 'Abre un chat de WhatsApp para editar su prompt.', true);
+    }
+
+    if (options.announceChange === true && previousKey && currentKey && previousKey !== currentKey) {
+      const label = String(target.label || target.title || target.phone || target.chatKey || currentKey)
+        .trim()
+        .slice(0, 160);
+      setStatus(settingsWhatsappPromptStatus, `Chat activo detectado: ${label}.`);
+    }
+
+    return target;
+  }
+
+  async function persistWhatsappPromptForTarget(target, promptText, options = {}) {
+    const safeTarget = normalizeWhatsappPromptTarget(target);
+    const safePrompt = String(promptText || '')
+      .trim()
+      .slice(0, MAX_WHATSAPP_PROMPT_CHARS);
+
+    if (!safeTarget.promptKey) {
+      return {
+        ok: false,
+        error: 'missing_chat_target',
+        action: 'none'
+      };
+    }
+    const nextPrompts = getWhatsappConversationPromptsMap();
+    const targetKeys = safeTarget.promptKeys.length ? safeTarget.promptKeys : [safeTarget.promptKey];
+    for (const key of targetKeys) {
+      delete nextPrompts[normalizeWhatsappPromptStoreKey(key)];
+    }
+
+    let action = 'cleared';
+    if (safePrompt) {
+      nextPrompts[safeTarget.promptKey] = {
+        key: safeTarget.promptKey,
+        prompt: safePrompt,
+        label: String(safeTarget.label || '').trim().slice(0, 180),
+        type: safeTarget.type,
+        isGroup: safeTarget.isGroup === true,
+        channelId: String(safeTarget.channelId || '').trim().slice(0, 220),
+        chatKey: String(safeTarget.chatKey || '').trim().slice(0, 220),
+        title: String(safeTarget.title || '').trim().slice(0, 180),
+        phone: String(safeTarget.phone || '').trim().slice(0, 80),
+        updatedAt: Date.now()
+      };
+      action = 'saved';
+    }
+
+    const ok = await savePanelSettings({
+      whatsappConversationPrompts: nextPrompts
+    });
+    if (!ok) {
+      return {
+        ok: false,
+        error: 'save_failed',
+        action
+      };
+    }
+
+    const editorKey = normalizeWhatsappPromptStoreKey(whatsappPromptEditorTarget?.promptKey || '');
+    if (editorKey && editorKey === safeTarget.promptKey) {
+      setWhatsappPromptEditorTarget(safeTarget, {
+        keepInput: true,
+        clearStatus: false
+      });
+
+      if (options.syncInputValue === true && settingsWhatsappPromptInput) {
+        settingsWhatsappPromptInput.value = safePrompt;
+      }
+    }
+
+    if (options.updateChatStatus === true) {
+      if (action === 'saved') {
+        setStatus(chatStatus, 'Prompt WhatsApp por chat actualizado.');
+      } else {
+        setStatus(chatStatus, 'Prompt WhatsApp del chat limpiado.');
+      }
+    }
+
+    if (options.refreshSuggestion !== false) {
+      const activeWhatsappTab = getPreferredWhatsappTab();
+      if (isWhatsappPromptTargetActiveInTab(safeTarget, activeWhatsappTab)) {
+        void generateWhatsappSuggestion(activeWhatsappTab, { force: true });
+      }
+    }
+
+    return {
+      ok: true,
+      action,
+      prompt: safePrompt,
+      target: safeTarget
+    };
+  }
+
+  function scheduleWhatsappPromptAutosave(options = {}) {
+    const target =
+      whatsappPromptEditorTarget && whatsappPromptEditorTarget.promptKey
+        ? normalizeWhatsappPromptTarget(whatsappPromptEditorTarget)
+        : resolveWhatsappPromptTargetForContext(getPreferredWhatsappTab());
+
+    if (!target.promptKey) {
+      setStatus(settingsWhatsappPromptStatus, 'No hay chat activo de WhatsApp para guardar prompt.', true);
+      return;
+    }
+
+    if (!settingsWhatsappPromptInput) {
+      return;
+    }
+
+    const draftPrompt = String(settingsWhatsappPromptInput.value || '').slice(0, MAX_WHATSAPP_PROMPT_CHARS);
+    if (draftPrompt !== settingsWhatsappPromptInput.value) {
+      settingsWhatsappPromptInput.value = draftPrompt;
+    }
+
+    const targetLabel = String(target.label || target.title || target.phone || target.chatKey || target.promptKey)
+      .trim()
+      .slice(0, 100);
+
+    clearWhatsappPromptAutosaveTimer();
+    const token = ++whatsappPromptAutosaveToken;
+    setStatus(settingsWhatsappPromptStatus, `Guardado en vivo pendiente (${targetLabel || 'chat activo'})...`);
+
+    whatsappPromptAutosaveTimer = window.setTimeout(async () => {
+      whatsappPromptAutosaveTimer = 0;
+      setStatus(settingsWhatsappPromptStatus, 'Guardando prompt...', false, { loading: true });
+
+      const result = await persistWhatsappPromptForTarget(target, draftPrompt, {
+        syncInputValue: true,
+        updateChatStatus: false
+      });
+
+      if (token !== whatsappPromptAutosaveToken) {
+        return;
+      }
+
+      if (!result.ok) {
+        setStatus(settingsWhatsappPromptStatus, 'No se pudo guardar el prompt del chat.', true);
+        return;
+      }
+
+      if (result.action === 'saved') {
+        setStatus(settingsWhatsappPromptStatus, `Prompt guardado automaticamente (${targetLabel || 'chat activo'}).`);
+      } else {
+        setStatus(settingsWhatsappPromptStatus, `Prompt eliminado automaticamente (${targetLabel || 'chat activo'}).`);
+      }
+    }, Math.max(120, Number(options.delayMs) || 420));
+  }
+
+  async function clearWhatsappPromptForSelectedChat() {
+    clearWhatsappPromptAutosaveTimer();
+    whatsappPromptAutosaveToken += 1;
+
+    const target =
+      whatsappPromptEditorTarget && whatsappPromptEditorTarget.promptKey
+        ? normalizeWhatsappPromptTarget(whatsappPromptEditorTarget)
+        : hydrateWhatsappPromptEditorFromActiveChat({
+            keepCurrentTarget: false,
+            clearStatus: false,
+            silentNoTarget: true
+          });
+
+    if (!target.promptKey) {
+      setStatus(settingsWhatsappPromptStatus, 'No hay chat activo de WhatsApp para limpiar prompt.', true);
+      return false;
+    }
+
+    const result = await persistWhatsappPromptForTarget(target, '', {
+      syncInputValue: true,
+      updateChatStatus: false
+    });
+    if (!result.ok) {
+      setStatus(settingsWhatsappPromptStatus, 'No se pudo limpiar el prompt del chat.', true);
+      return false;
+    }
+
+    if (settingsWhatsappPromptInput) {
+      settingsWhatsappPromptInput.value = '';
+    }
+
+    setWhatsappPromptEditorTarget(target, {
+      keepInput: true,
+      clearStatus: false
+    });
+    setStatus(settingsWhatsappPromptStatus, 'Prompt del chat eliminado.');
+    setStatus(chatStatus, 'Prompt WhatsApp del chat limpiado.');
+    return true;
   }
 
   async function saveCrmErpMeProfileFromScreen() {
@@ -1942,7 +2469,7 @@ export function initPanelApp() {
 
     stageResizeObserver = new ResizeObserver(() => {
       const current = app && app.dataset ? app.dataset.screen : '';
-      setScreen(current || 'onboarding');
+      realignStageToScreen(current || 'onboarding');
     });
 
     stageResizeObserver.observe(viewport);
@@ -1979,6 +2506,11 @@ export function initPanelApp() {
     renderAiModelsSettings();
     renderCrmErpDatabaseSettings({ syncInput: true });
     renderSystemVariables();
+    hydrateWhatsappPromptEditorFromActiveChat({
+      keepCurrentTarget: false,
+      clearStatus: true,
+      silentNoTarget: true
+    });
     setStatus(systemVariablesStatus, '');
     setScreen('settings');
   }
@@ -2045,12 +2577,37 @@ export function initPanelApp() {
       next.crmErpDatabaseMeProfile,
       next.crmErpDatabaseSchemaSnapshot
     );
+    next.whatsappConversationPrompts = normalizeWhatsappConversationPrompts(next.whatsappConversationPrompts);
     return next;
   }
 
   function normalizeSettingsPage(value) {
     const page = String(value || '').trim();
     return Object.values(SETTINGS_PAGES).includes(page) ? page : SETTINGS_PAGES.HOME;
+  }
+
+  function getSettingsPageTitle(page) {
+    const safePage = normalizeSettingsPage(page);
+    return SETTINGS_PAGE_TITLES[safePage] || SETTINGS_PAGE_TITLES[SETTINGS_PAGES.HOME];
+  }
+
+  function getCurrentSettingsPage() {
+    return normalizeSettingsPage(settingsShell?.dataset?.settingsPage || SETTINGS_PAGES.HOME);
+  }
+
+  function syncSettingsHeaderState(page) {
+    const safePage = normalizeSettingsPage(page);
+    const isHomePage = safePage === SETTINGS_PAGES.HOME;
+    const title = isHomePage ? SETTINGS_PAGE_TITLES[SETTINGS_PAGES.HOME] : `Settings / ${getSettingsPageTitle(safePage)}`;
+
+    if (settingsTitle) {
+      settingsTitle.textContent = title;
+    }
+
+    if (closeSettingsBtn) {
+      closeSettingsBtn.setAttribute('aria-label', isHomePage ? 'Volver al chat' : 'Volver a Settings');
+      closeSettingsBtn.setAttribute('title', isHomePage ? 'Volver al chat' : 'Volver a Settings');
+    }
   }
 
   function setSettingsPage(nextPage) {
@@ -2062,10 +2619,7 @@ export function initPanelApp() {
     for (const pageNode of settingsPages) {
       pageNode.classList.toggle('is-active', pageNode.dataset.settingsPage === safePage);
     }
-
-    if (settingsSectionBackBtn) {
-      settingsSectionBackBtn.hidden = safePage === SETTINGS_PAGES.HOME;
-    }
+    syncSettingsHeaderState(safePage);
 
     if (safePage === SETTINGS_PAGES.AI_MODELS) {
       renderAiModelsSettings();
@@ -2080,6 +2634,14 @@ export function initPanelApp() {
 
     if (safePage === SETTINGS_PAGES.SYSTEM_VARIABLES) {
       renderSystemVariables();
+    }
+
+    if (safePage === SETTINGS_PAGES.ASSISTANT) {
+      hydrateWhatsappPromptEditorFromActiveChat({
+        keepCurrentTarget: true,
+        clearStatus: false,
+        silentNoTarget: true
+      });
     }
   }
 
@@ -3211,6 +3773,7 @@ export function initPanelApp() {
       panelSettings.crmErpDatabaseMeProfile,
       panelSettings.crmErpDatabaseSchemaSnapshot
     );
+    panelSettings.whatsappConversationPrompts = normalizeWhatsappConversationPrompts(panelSettings.whatsappConversationPrompts);
 
     if (settingsScreenState) {
       settingsScreenState.panelSettings = {
@@ -3219,7 +3782,8 @@ export function initPanelApp() {
         systemVariables: { ...panelSettings.systemVariables },
         crmErpDatabaseUrl: panelSettings.crmErpDatabaseUrl,
         crmErpDatabaseSchemaSnapshot: panelSettings.crmErpDatabaseSchemaSnapshot,
-        crmErpDatabaseMeProfile: panelSettings.crmErpDatabaseMeProfile
+        crmErpDatabaseMeProfile: panelSettings.crmErpDatabaseMeProfile,
+        whatsappConversationPrompts: { ...panelSettings.whatsappConversationPrompts }
       };
     }
     return storageService.savePanelSettings(panelSettings);
@@ -4702,29 +5266,44 @@ export function initPanelApp() {
     };
   }
 
-  async function saveSystemVariablesFromScreen() {
+  async function saveSystemVariablesFromScreen(options = {}) {
+    const autosave = options.autosave === true;
     const parsed = collectSystemVariableFormValues();
     if (!parsed.ok) {
       setStatus(systemVariablesStatus, parsed.error || 'No se pudieron validar las variables.', true);
-      parsed.field?.focus();
-      return;
+      if (!autosave) {
+        parsed.field?.focus();
+      }
+      return false;
     }
 
     const nextSettings = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+    const previousWhatsappBasePrompt = getWhatsappSuggestionBasePrompt();
     const ok = await savePanelSettings(nextSettings);
     if (!ok) {
       setStatus(systemVariablesStatus, 'No se pudieron guardar las system variables.', true);
-      return;
+      return false;
+    }
+    const nextWhatsappBasePrompt = getWhatsappSuggestionBasePrompt();
+    if (nextWhatsappBasePrompt !== previousWhatsappBasePrompt) {
+      refreshWhatsappSuggestionForActiveTab({ force: false });
+    }
+
+    if (autosave) {
+      setStatus(systemVariablesStatus, 'System variables guardadas.');
+      return true;
     }
 
     settingsScreenController?.applyPanelSettingsToUi();
     renderSystemVariables();
     setStatus(systemVariablesStatus, 'System variables guardadas.');
     setStatus(chatStatus, 'System variables actualizadas.');
+    return true;
   }
 
   async function resetSystemVariablesToDefaults() {
     const defaultPrompt = buildDefaultChatSystemPrompt(panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE);
+    const previousWhatsappBasePrompt = getWhatsappSuggestionBasePrompt();
     const ok = await savePanelSettings({
       systemPrompt: defaultPrompt,
       systemVariables: normalizeSystemVariables(SYSTEM_VARIABLE_DEFAULTS)
@@ -4733,6 +5312,10 @@ export function initPanelApp() {
     if (!ok) {
       setStatus(systemVariablesStatus, 'No se pudieron restaurar defaults.', true);
       return;
+    }
+    const nextWhatsappBasePrompt = getWhatsappSuggestionBasePrompt();
+    if (nextWhatsappBasePrompt !== previousWhatsappBasePrompt) {
+      refreshWhatsappSuggestionForActiveTab({ force: false });
     }
 
     settingsScreenController?.applyPanelSettingsToUi();
@@ -4931,6 +5514,17 @@ export function initPanelApp() {
 
   function getActiveTabContext() {
     return tabContextSnapshot.tabs.find((item) => item.tabId === tabContextSnapshot.activeTabId) || null;
+  }
+
+  function refreshWhatsappSuggestionForActiveTab(options = {}) {
+    const activeTab = getActiveTabContext();
+    if (!activeTab || !isWhatsappContext(activeTab)) {
+      return;
+    }
+
+    void generateWhatsappSuggestion(activeTab, {
+      force: options.force === true
+    });
   }
 
   function mergeWhatsappContextWithHistory(tabContext, historyPayload) {
@@ -6540,6 +7134,7 @@ export function initPanelApp() {
       tabId: -1,
       chatKey: '',
       signalKey: '',
+      promptSignature: '',
       text: '',
       loading: false
     };
@@ -6723,6 +7318,33 @@ export function initPanelApp() {
     list.appendChild(item);
   }
 
+  function summarizeRelationRow(row) {
+    const label = toSafeDynamicUiText(row?.label || '', 84) || '(sin etiqueta)';
+    const value = toSafeDynamicUiText(row?.value || '', 84);
+    const count = Math.max(0, Number(row?.count) || 0);
+
+    if (value) {
+      return `${label}: ${value}`;
+    }
+
+    return `${label}: ${count}`;
+  }
+
+  function buildRelationSimpleColumns(cardModel) {
+    const card = cardModel && typeof cardModel === 'object' ? cardModel : {};
+    const title = toSafeDynamicUiText(card.title || 'Relacion', 92) || 'Relacion';
+    const caption = toSafeDynamicUiText(
+      card.caption || `${Math.max(0, Number(card.totalCount) || 0)} resultado${Math.max(0, Number(card.totalCount) || 0) === 1 ? '' : 's'}`,
+      96
+    );
+    const rows = Array.isArray(card.rows) ? card.rows : [];
+    const rowSummary = rows.map((row) => summarizeRelationRow(row)).filter(Boolean).slice(0, 2).join(' · ');
+    const description = toSafeDynamicUiText(card.description || '', 120);
+    const detail = rowSummary || description || 'Sin detalle';
+
+    return [title, caption || '-', detail];
+  }
+
   function showDynamicUiToast(message, isError = false, options = {}) {
     if (!dynamicUiToast) {
       return;
@@ -6826,16 +7448,13 @@ export function initPanelApp() {
 
           head.append(title, caption);
 
-          const bodyRow = document.createElement('div');
-          bodyRow.className = 'ai-dynamic-card__row';
-
           const description = document.createElement('p');
-          description.className = 'ai-dynamic-card__description';
+          description.className = 'ai-dynamic-card__description ai-dynamic-card__description--suggestion-full';
           description.textContent = descriptionText;
           description.title = descriptionText;
 
           const actions = document.createElement('div');
-          actions.className = 'ai-dynamic-card__actions';
+          actions.className = 'ai-dynamic-card__actions ai-dynamic-card__actions--suggestion-row';
 
           const runButton = createDynamicActionButton({
             className: 'icon-btn icon-btn--send',
@@ -6863,8 +7482,7 @@ export function initPanelApp() {
             actions.appendChild(regenButton);
           }
 
-          bodyRow.append(description, actions);
-          card.append(head, bodyRow);
+          card.append(head, description, actions);
           dynamicSuggestionsList.appendChild(card);
         }
       }
@@ -6883,32 +7501,20 @@ export function initPanelApp() {
           card.tabIndex = 0;
           card.setAttribute('role', 'button');
           card.setAttribute('aria-label', `Abrir detalle de ${cardModel.title}`);
+          const columns = buildRelationSimpleColumns(cardModel);
+          const simpleRow = document.createElement('div');
+          simpleRow.className = 'ai-dynamic-relation-simple-row';
+          const columnKinds = ['title', 'meta', 'detail'];
 
-          const head = document.createElement('div');
-          head.className = 'ai-dynamic-card__head';
-
-          const title = document.createElement('p');
-          title.className = 'ai-dynamic-card__title';
-          title.textContent = String(cardModel.title || 'Tabla');
-          title.title = title.textContent;
-
-          const caption = document.createElement('p');
-          caption.className = 'ai-dynamic-card__caption';
-          caption.textContent = String(cardModel.caption || `${cardModel.totalCount || 0}`);
-          caption.title = caption.textContent;
-          head.append(title, caption);
-
-          const list = document.createElement('ul');
-          list.className = 'ai-dynamic-relation-list';
-          for (const row of Array.isArray(cardModel.rows) ? cardModel.rows : []) {
-            appendRelationListItem(list, row);
+          for (let index = 0; index < 3; index += 1) {
+            const column = document.createElement('p');
+            column.className = `ai-dynamic-relation-simple-col ai-dynamic-relation-simple-col--${columnKinds[index]}`;
+            column.textContent = String(columns[index] || '');
+            column.title = column.textContent;
+            simpleRow.appendChild(column);
           }
 
-          if (!list.children.length) {
-            appendRelationListItem(list, { label: 'Sin items para mostrar', value: '0' });
-          }
-
-          card.append(head, list);
+          card.append(simpleRow);
           dynamicRelationsList.appendChild(card);
         }
       }
@@ -7317,12 +7923,16 @@ export function initPanelApp() {
     const chatKey = getWhatsappChatKey(suggestionContext);
     const signalKey = buildWhatsappSignalKey(suggestionContext);
     const contextSummary = summarizeWhatsappSuggestionContext(suggestionContext);
+    const basePrompt = getWhatsappSuggestionBasePrompt();
+    const chatPrompt = resolveWhatsappConversationPromptForSuggestion(suggestionContext);
+    const promptSignature = buildWhatsappSuggestionPromptSignature(basePrompt, chatPrompt);
 
     logDebug('whatsapp_suggestion:start', {
       ...contextSummary,
       force,
       signalKey: toSafeLogText(signalKey, 220),
-      dismissedSignalKey: toSafeLogText(whatsappSuggestionDismissedSignalKey, 220)
+      dismissedSignalKey: toSafeLogText(whatsappSuggestionDismissedSignalKey, 220),
+      hasChatPrompt: Boolean(chatPrompt)
     });
 
     if (!signalKey || signalKey === '::') {
@@ -7353,11 +7963,17 @@ export function initPanelApp() {
       return;
     }
 
-    if (!force && whatsappSuggestionState.signalKey === signalKey && whatsappSuggestionState.text) {
+    if (
+      !force &&
+      whatsappSuggestionState.signalKey === signalKey &&
+      whatsappSuggestionState.promptSignature === promptSignature &&
+      whatsappSuggestionState.text
+    ) {
       logDebug('whatsapp_suggestion:reuse_cached', {
         tabId: contextSummary.tabId,
         chatKey: contextSummary.chatKey,
         signalKey: toSafeLogText(signalKey, 220),
+        promptSignatureChars: promptSignature.length,
         suggestionChars: whatsappSuggestionState.text.length
       });
       setWhatsappSuggestionResult(suggestionContext, whatsappSuggestionState.text);
@@ -7370,6 +7986,7 @@ export function initPanelApp() {
       tabId: tabContext.tabId,
       chatKey,
       signalKey,
+      promptSignature,
       text: whatsappSuggestionState.text,
       loading: true
     };
@@ -7379,7 +7996,8 @@ export function initPanelApp() {
 
     try {
       const prompt = buildWhatsappReplyPrompt(suggestionContext, {
-        basePrompt: getWhatsappSuggestionBasePrompt()
+        basePrompt,
+        chatPrompt
       });
       const profileForSuggestion = resolveModelProfileForInference();
       if (!profileForSuggestion) {
@@ -7390,7 +8008,11 @@ export function initPanelApp() {
         tabId: contextSummary.tabId,
         chatKey: contextSummary.chatKey,
         signalKey: toSafeLogText(signalKey, 220),
+        promptSignatureChars: promptSignature.length,
+        basePromptChars: basePrompt.length,
         promptChars: prompt.length,
+        hasChatPrompt: Boolean(chatPrompt),
+        chatPromptChars: chatPrompt.length,
         promptPreview: toSafeLogText(prompt, 280),
         profile: {
           id: toSafeLogText(profileForSuggestion.id || '', 80),
@@ -7437,6 +8059,7 @@ export function initPanelApp() {
         tabId: tabContext.tabId,
         chatKey,
         signalKey,
+        promptSignature,
         text: suggestion,
         loading: false
       };
@@ -7459,6 +8082,7 @@ export function initPanelApp() {
         tabId: tabContext.tabId,
         chatKey,
         signalKey,
+        promptSignature,
         text: '',
         loading: false
       };
@@ -7853,6 +8477,15 @@ export function initPanelApp() {
     const activeTab = getActiveTabContext();
     dynamicContextSignals = collectDynamicSignalsFromTab(activeTab);
     void refreshDynamicRelationsContext(activeTab, dynamicContextSignals, { force: false });
+
+    if (isAssistantSettingsPageVisible()) {
+      hydrateWhatsappPromptEditorFromActiveChat({
+        keepCurrentTarget: true,
+        clearStatus: false,
+        silentNoTarget: true,
+        announceChange: true
+      });
+    }
 
     if (!activeTab || !isWhatsappContext(activeTab)) {
       hideWhatsappSuggestion();
@@ -8535,6 +9168,244 @@ export function initPanelApp() {
     panelSettings = { ...settingsScreenController.getPanelSettings() };
   }
 
+  function clearUserSettingsAutosaveTimer() {
+    if (userSettingsAutosaveTimer) {
+      window.clearTimeout(userSettingsAutosaveTimer);
+      userSettingsAutosaveTimer = 0;
+    }
+  }
+
+  function clearAssistantSettingsAutosaveTimer() {
+    if (assistantSettingsAutosaveTimer) {
+      window.clearTimeout(assistantSettingsAutosaveTimer);
+      assistantSettingsAutosaveTimer = 0;
+    }
+  }
+
+  function clearCrmDbSettingsAutosaveTimer() {
+    if (crmDbSettingsAutosaveTimer) {
+      window.clearTimeout(crmDbSettingsAutosaveTimer);
+      crmDbSettingsAutosaveTimer = 0;
+    }
+  }
+
+  function clearCrmMeSettingsAutosaveTimer() {
+    if (crmMeSettingsAutosaveTimer) {
+      window.clearTimeout(crmMeSettingsAutosaveTimer);
+      crmMeSettingsAutosaveTimer = 0;
+    }
+  }
+
+  function clearSystemVariablesAutosaveTimer() {
+    if (systemVariablesAutosaveTimer) {
+      window.clearTimeout(systemVariablesAutosaveTimer);
+      systemVariablesAutosaveTimer = 0;
+    }
+  }
+
+  function clearAllSettingsAutosaveTimers() {
+    clearUserSettingsAutosaveTimer();
+    clearAssistantSettingsAutosaveTimer();
+    clearCrmDbSettingsAutosaveTimer();
+    clearCrmMeSettingsAutosaveTimer();
+    clearSystemVariablesAutosaveTimer();
+  }
+
+  function scheduleUserSettingsAutosave(options = {}) {
+    if (!settingsScreenController) {
+      return;
+    }
+
+    clearUserSettingsAutosaveTimer();
+    const token = ++userSettingsAutosaveToken;
+    setStatus(settingsUserStatus, 'Guardado en vivo pendiente...');
+
+    userSettingsAutosaveTimer = window.setTimeout(async () => {
+      userSettingsAutosaveTimer = 0;
+
+      if (token !== userSettingsAutosaveToken) {
+        return;
+      }
+
+      const nextName = String(settingsNameInput?.value || '').trim();
+      const nextBirthday = String(settingsBirthdayInput?.value || '').trim();
+      const current = settingsScreenController.getPanelSettings() || {};
+      const currentName = String(current.displayName || '').trim();
+      const currentBirthday = String(current.birthday || '').trim();
+
+      if (!nextName) {
+        setStatus(settingsUserStatus, 'El nombre no puede estar vacio.', true);
+        return;
+      }
+
+      if (nextName === currentName && nextBirthday === currentBirthday) {
+        setStatus(settingsUserStatus, 'Sin cambios pendientes.');
+        return;
+      }
+
+      setStatus(settingsUserStatus, 'Guardando datos...', false, { loading: true });
+      await saveUserSettingsScreen();
+    }, Math.max(120, Number(options.delayMs) || 420));
+  }
+
+  function scheduleAssistantSettingsAutosave(options = {}) {
+    if (!settingsScreenController) {
+      return;
+    }
+
+    clearAssistantSettingsAutosaveTimer();
+    const token = ++assistantSettingsAutosaveToken;
+    setStatus(settingsAssistantStatus, 'Guardado en vivo pendiente...');
+
+    assistantSettingsAutosaveTimer = window.setTimeout(async () => {
+      assistantSettingsAutosaveTimer = 0;
+
+      if (token !== assistantSettingsAutosaveToken) {
+        return;
+      }
+
+      const nextLanguage = normalizeAssistantLanguage(settingsLanguageSelect?.value || DEFAULT_ASSISTANT_LANGUAGE);
+      const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
+      const current = settingsScreenController.getPanelSettings() || {};
+      const currentLanguage = normalizeAssistantLanguage(current.language || DEFAULT_ASSISTANT_LANGUAGE);
+      const currentPrompt = String(current.systemPrompt || '').trim();
+
+      if (!nextPrompt) {
+        setStatus(settingsAssistantStatus, 'El system prompt no puede estar vacio.', true);
+        return;
+      }
+
+      if (nextLanguage === currentLanguage && nextPrompt === currentPrompt) {
+        setStatus(settingsAssistantStatus, 'Sin cambios pendientes.');
+        return;
+      }
+
+      setStatus(settingsAssistantStatus, 'Guardando assistant...', false, { loading: true });
+      await saveAssistantSettingsScreen();
+    }, Math.max(120, Number(options.delayMs) || 420));
+  }
+
+  function scheduleCrmDbSettingsAutosave(options = {}) {
+    clearCrmDbSettingsAutosaveTimer();
+    const token = ++crmDbSettingsAutosaveToken;
+    setStatus(settingsCrmErpDbStatus, 'Guardado en vivo pendiente...');
+
+    crmDbSettingsAutosaveTimer = window.setTimeout(async () => {
+      crmDbSettingsAutosaveTimer = 0;
+
+      if (token !== crmDbSettingsAutosaveToken) {
+        return;
+      }
+
+      const inputValue = String(settingsCrmErpDbUrlInput?.value || '').trim();
+      const currentUrl = getCrmErpDatabaseConnectionUrl();
+
+      if (!inputValue && !currentUrl) {
+        setStatus(settingsCrmErpDbStatus, 'Sin cambios pendientes.');
+        return;
+      }
+
+      if (inputValue) {
+        const normalized = postgresService.normalizeConnectionUrl(inputValue);
+        if (!normalized) {
+          setStatus(
+            settingsCrmErpDbStatus,
+            'URL PostgreSQL pendiente o invalida. Se guarda automaticamente cuando sea valida.',
+            true
+          );
+          return;
+        }
+
+        if (normalized === currentUrl) {
+          setStatus(settingsCrmErpDbStatus, 'Sin cambios pendientes.');
+          return;
+        }
+      }
+
+      setStatus(settingsCrmErpDbStatus, 'Guardando URL...', false, { loading: true });
+      await saveCrmErpDatabaseSettingsFromScreen({ analyzeAfterSave: false });
+    }, Math.max(180, Number(options.delayMs) || 700));
+  }
+
+  function scheduleCrmMeProfileAutosave(options = {}) {
+    clearCrmMeSettingsAutosaveTimer();
+    const token = ++crmMeSettingsAutosaveToken;
+    setStatus(settingsCrmErpMeStatus, 'Guardado en vivo pendiente...');
+
+    crmMeSettingsAutosaveTimer = window.setTimeout(async () => {
+      crmMeSettingsAutosaveTimer = 0;
+
+      if (token !== crmMeSettingsAutosaveToken) {
+        return;
+      }
+
+      const connectionUrl = getCrmErpDatabaseConnectionUrl();
+      const snapshot = getCrmErpDatabaseSchemaSnapshot();
+      if (!connectionUrl || !snapshot) {
+        setStatus(settingsCrmErpMeStatus, 'Configura URL y analiza esquema para guardar perfil DB.', true);
+        return;
+      }
+
+      const tableQualifiedName = String(settingsCrmErpMeTableSelect?.value || '').trim();
+      const idColumn = String(settingsCrmErpMeIdColumnSelect?.value || '').trim();
+      const userId = String(settingsCrmErpMeUserIdInput?.value || '').trim();
+      if (!tableQualifiedName || !idColumn || !userId) {
+        setStatus(settingsCrmErpMeStatus, 'Completa tabla, columna ID y user ID para guardar en vivo.');
+        return;
+      }
+
+      const current = getCrmErpDatabaseMeProfile();
+      const currentTable = String(current?.tableQualifiedName || '').trim();
+      const currentIdColumn = String(current?.idColumn || '').trim();
+      const currentUserId = String(current?.userId || '').trim();
+      if (tableQualifiedName === currentTable && idColumn === currentIdColumn && userId === currentUserId) {
+        setStatus(settingsCrmErpMeStatus, 'Sin cambios pendientes.');
+        return;
+      }
+
+      setStatus(settingsCrmErpMeStatus, 'Guardando perfil DB...', false, { loading: true });
+      await saveCrmErpMeProfileFromScreen();
+    }, Math.max(180, Number(options.delayMs) || 620));
+  }
+
+  function scheduleSystemVariablesAutosave(options = {}) {
+    clearSystemVariablesAutosaveTimer();
+    const token = ++systemVariablesAutosaveToken;
+    setStatus(systemVariablesStatus, 'Guardado en vivo pendiente...');
+
+    systemVariablesAutosaveTimer = window.setTimeout(async () => {
+      systemVariablesAutosaveTimer = 0;
+
+      if (token !== systemVariablesAutosaveToken) {
+        return;
+      }
+
+      const parsed = collectSystemVariableFormValues();
+      if (!parsed.ok) {
+        const isActiveField = Boolean(parsed.field && document.activeElement === parsed.field);
+        if (isActiveField) {
+          setStatus(systemVariablesStatus, 'Pendiente: completa/formatea el valor para guardar.');
+        } else {
+          setStatus(systemVariablesStatus, parsed.error || 'No se pudieron validar las variables.', true);
+        }
+        return;
+      }
+
+      const nextSettings = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+      const currentPrompt = String(panelSettings.systemPrompt || '').trim();
+      const nextPrompt = String(nextSettings.systemPrompt || '').trim();
+      const currentVars = JSON.stringify(normalizeSystemVariables(panelSettings.systemVariables));
+      const nextVars = JSON.stringify(normalizeSystemVariables(nextSettings.systemVariables));
+      if (currentPrompt === nextPrompt && currentVars === nextVars) {
+        setStatus(systemVariablesStatus, 'Sin cambios pendientes.');
+        return;
+      }
+
+      setStatus(systemVariablesStatus, 'Guardando system variables...', false, { loading: true });
+      await saveSystemVariablesFromScreen({ autosave: true });
+    }, Math.max(180, Number(options.delayMs) || 620));
+  }
+
   async function hydrateChatHistory() {
     chatHistory = await readChatHistory();
     const maxHistoryMessages = getSystemVariableNumber('chat.maxHistoryMessages', MAX_CHAT_HISTORY_MESSAGES);
@@ -8625,6 +9496,10 @@ export function initPanelApp() {
 
     closeSettingsBtn?.addEventListener('click', () => {
       blinkBrandEmotion({ force: true, preserveRandom: true });
+      if (getCurrentSettingsPage() !== SETTINGS_PAGES.HOME) {
+        setSettingsPage(SETTINGS_PAGES.HOME);
+        return;
+      }
       goToPrimaryScreen();
     });
 
@@ -8646,35 +9521,61 @@ export function initPanelApp() {
       handleOnboardingContinue();
     });
 
-    settingsSectionBackBtn?.addEventListener('click', () => {
-      setSettingsPage(SETTINGS_PAGES.HOME);
-    });
-
     for (const item of settingsNavItems) {
       item.addEventListener('click', () => {
         setSettingsPage(item.dataset.settingsTarget || SETTINGS_PAGES.HOME);
       });
     }
 
-    settingsUserSaveBtn?.addEventListener('click', () => {
-      saveUserSettingsScreen();
+    settingsNameInput?.addEventListener('input', () => {
+      scheduleUserSettingsAutosave({
+        delayMs: 420
+      });
     });
 
-    settingsAssistantSaveBtn?.addEventListener('click', () => {
-      saveAssistantSettingsScreen();
+    settingsBirthdayInput?.addEventListener('change', () => {
+      scheduleUserSettingsAutosave({
+        delayMs: 320
+      });
     });
 
-    settingsCrmErpDbSaveBtn?.addEventListener('click', () => {
-      void saveCrmErpDatabaseSettingsFromScreen({ analyzeAfterSave: false });
+    settingsBirthdayInput?.addEventListener('input', () => {
+      scheduleUserSettingsAutosave({
+        delayMs: 420
+      });
+    });
+
+    settingsNameInput?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
+      event.preventDefault();
+      scheduleUserSettingsAutosave({
+        delayMs: 120
+      });
+    });
+
+    settingsWhatsappPromptClearBtn?.addEventListener('click', () => {
+      void clearWhatsappPromptForSelectedChat();
+    });
+
+    settingsWhatsappPromptInput?.addEventListener('input', () => {
+      scheduleWhatsappPromptAutosave({
+        delayMs: 420
+      });
     });
 
     settingsCrmErpDbAnalyzeBtn?.addEventListener('click', () => {
+      clearCrmDbSettingsAutosaveTimer();
+      crmDbSettingsAutosaveToken += 1;
       void saveCrmErpDatabaseSettingsFromScreen({ analyzeAfterSave: true });
     });
 
     settingsCrmErpDbUrlInput?.addEventListener('input', () => {
-      setStatus(settingsCrmErpDbStatus, '');
-      setStatus(settingsCrmErpMeStatus, '');
+      scheduleCrmDbSettingsAutosave({
+        delayMs: 760
+      });
     });
 
     settingsCrmErpDbUrlInput?.addEventListener('keydown', (event) => {
@@ -8683,6 +9584,8 @@ export function initPanelApp() {
       }
 
       event.preventDefault();
+      clearCrmDbSettingsAutosaveTimer();
+      crmDbSettingsAutosaveToken += 1;
       void saveCrmErpDatabaseSettingsFromScreen({ analyzeAfterSave: false });
     });
 
@@ -8691,15 +9594,21 @@ export function initPanelApp() {
         tableQualifiedName: settingsCrmErpMeTableSelect.value,
         selectedIdColumn: ''
       });
-      setStatus(settingsCrmErpMeStatus, '');
+      scheduleCrmMeProfileAutosave({
+        delayMs: 420
+      });
     });
 
     settingsCrmErpMeIdColumnSelect?.addEventListener('change', () => {
-      setStatus(settingsCrmErpMeStatus, '');
+      scheduleCrmMeProfileAutosave({
+        delayMs: 420
+      });
     });
 
     settingsCrmErpMeUserIdInput?.addEventListener('input', () => {
-      setStatus(settingsCrmErpMeStatus, '');
+      scheduleCrmMeProfileAutosave({
+        delayMs: 520
+      });
     });
 
     settingsCrmErpMeUserIdInput?.addEventListener('keydown', (event) => {
@@ -8708,27 +9617,33 @@ export function initPanelApp() {
       }
 
       event.preventDefault();
-      void saveCrmErpMeProfileFromScreen();
-    });
-
-    settingsCrmErpMeSaveBtn?.addEventListener('click', () => {
+      clearCrmMeSettingsAutosaveTimer();
+      crmMeSettingsAutosaveToken += 1;
       void saveCrmErpMeProfileFromScreen();
     });
 
     settingsCrmErpMeClearBtn?.addEventListener('click', () => {
+      clearCrmMeSettingsAutosaveTimer();
+      crmMeSettingsAutosaveToken += 1;
       void clearCrmErpMeProfileFromScreen();
     });
 
-    systemVariablesSaveBtn?.addEventListener('click', () => {
-      saveSystemVariablesFromScreen();
-    });
-
     systemVariablesResetBtn?.addEventListener('click', () => {
+      clearSystemVariablesAutosaveTimer();
+      systemVariablesAutosaveToken += 1;
       resetSystemVariablesToDefaults();
     });
 
     systemVariablesList?.addEventListener('input', () => {
-      setStatus(systemVariablesStatus, '');
+      scheduleSystemVariablesAutosave({
+        delayMs: 680
+      });
+    });
+
+    systemVariablesList?.addEventListener('change', () => {
+      scheduleSystemVariablesAutosave({
+        delayMs: 280
+      });
     });
 
     chatModelSelect?.addEventListener('change', () => {
@@ -8846,6 +9761,15 @@ export function initPanelApp() {
 
     settingsLanguageSelect?.addEventListener('change', () => {
       settingsScreenController?.handleLanguageChange();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 200
+      });
+    });
+
+    settingsSystemPrompt?.addEventListener('input', () => {
+      scheduleAssistantSettingsAutosave({
+        delayMs: 460
+      });
     });
 
     settingsThemeModeSelect?.addEventListener('change', () => {
@@ -9074,6 +9998,8 @@ export function initPanelApp() {
     });
 
     window.addEventListener('beforeunload', () => {
+      clearWhatsappPromptAutosaveTimer();
+      clearAllSettingsAutosaveTimers();
       tabContextService.stop();
       void contextMemoryService.shutdown();
       brandEmotionController.destroy();
@@ -9093,11 +10019,13 @@ export function initPanelApp() {
 
     window.addEventListener('focus', () => {
       requestChatAutofocus(8, 70);
+      scheduleStageStabilization(app?.dataset?.screen || '');
     });
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
         requestChatAutofocus(8, 70);
+        scheduleStageStabilization(app?.dataset?.screen || '');
       }
     });
   }

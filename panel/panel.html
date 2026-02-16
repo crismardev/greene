@@ -146,10 +146,6 @@
                 </div>
               </div>
               
-              <div class="flex justify-between px-3 text-gray-300">
-                <p id="chatStatus" class="status" role="status"></p>
-                <small>v1.0.0</small>
-              </div>
 
             </footer>
           </article>
@@ -238,14 +234,7 @@
                     stroke-linejoin="round"></path>
                 </svg>
               </button>
-              <h2>Settings</h2>
-              <button id="settingsSectionBackBtn" class="icon-btn icon-btn--ghost icon-btn--back" type="button"
-                aria-label="Volver al home de settings" title="Volver a settings home" hidden>
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round"></path>
-                </svg>
-              </button>
+              <h2 id="settingsTitle">Settings</h2>
             </header>
 
             <section class="settings-body">
@@ -323,9 +312,6 @@
                   </select>
                 </label>
 
-                <div class="actions">
-                  <button id="settingsUserSaveBtn" class="btn" type="button">Guardar</button>
-                </div>
                 <p id="settingsUserStatus" class="status" role="status"></p>
               </article>
 
@@ -349,10 +335,32 @@
                   <textarea id="settingsSystemPrompt" rows="7"></textarea>
                 </label>
 
-                <div class="actions">
-                  <button id="settingsAssistantSaveBtn" class="btn" type="button">Guardar</button>
-                </div>
                 <p id="settingsAssistantStatus" class="status" role="status"></p>
+
+                <section class="settings-security">
+                  <div class="settings-card__head">
+                    <h3>WhatsApp prompt por chat</h3>
+                    <p class="tool-copy">
+                      Guarda instrucciones por conversacion (chat o grupo). Se agregan al prompt al generar sugerencias.
+                    </p>
+                  </div>
+
+                  <p id="settingsWhatsappPromptChatLabel" class="tool-copy">Chat objetivo: ninguno seleccionado.</p>
+                  <p id="settingsWhatsappPromptChatKey" class="tool-copy">Key: -</p>
+
+                  <label class="field">
+                    <span>Prompt personalizado de este chat</span>
+                    <textarea id="settingsWhatsappPromptInput" rows="5"
+                      placeholder="Ej. Con este cliente responde formal, evita promesas y cierra con proximo paso claro."></textarea>
+                  </label>
+
+                  <div class="actions actions--tight">
+                    <p class="tool-copy">Se guarda automaticamente al escribir y cambia segun el chat activo.</p>
+                    <button id="settingsWhatsappPromptClearBtn" class="btn btn--ghost" type="button">Limpiar prompt chat</button>
+                  </div>
+
+                  <p id="settingsWhatsappPromptStatus" class="status" role="status"></p>
+                </section>
               </article>
 
               <article class="tool-card settings-card settings-page" data-settings-page="ai_models">
@@ -418,7 +426,6 @@
                 </label>
 
                 <div class="actions actions--tight">
-                  <button id="settingsCrmErpDbSaveBtn" class="btn btn--ghost" type="button">Guardar URL</button>
                   <button id="settingsCrmErpDbAnalyzeBtn" class="btn" type="button">Analizar esquema</button>
                 </div>
 
@@ -446,7 +453,6 @@
                   </label>
 
                   <div class="actions actions--tight">
-                    <button id="settingsCrmErpMeSaveBtn" class="btn btn--ghost" type="button">Guardar perfil DB</button>
                     <button id="settingsCrmErpMeClearBtn" class="btn btn--ghost" type="button">Limpiar</button>
                   </div>
 
@@ -471,7 +477,6 @@
                   <p class="tool-copy">Variables editables agrupadas por area, incluyendo prompts.</p>
                 </div>
                 <div class="actions actions--tight">
-                  <button id="systemVariablesSaveBtn" class="btn" type="button">Guardar cambios</button>
                   <button id="systemVariablesResetBtn" class="btn btn--ghost" type="button">Restaurar defaults</button>
                 </div>
                 <p id="systemVariablesStatus" class="status" role="status"></p>
