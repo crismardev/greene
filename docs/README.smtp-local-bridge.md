@@ -13,7 +13,7 @@ Esta extension envia `smtp.sendMail` mediante el `background` (`GREENE_SMTP_SEND
 - La extension usa `chrome.runtime.sendNativeMessage()` hacia un host nativo.
 - Debes instalar un proceso local y registrar su manifest de Native Messaging.
 - Si no esta instalado, veras `Native host '<name>' no encontrado...`.
-- Soporte inicial del instalador integrado: solo macOS.
+- Soporte del instalador integrado: macOS (`.sh`) y Windows (`.ps1`).
 
 ## Donde configurar en la extension
 
@@ -22,8 +22,17 @@ En `Settings > Apps & Integrations > SMTP`:
 - `Native Host Name`: nombre registrado del host nativo (si usas `native_host`).
 - `SMTP Agent URL`: URL del servicio HTTP (si usas `http_agent`).
 - `SMTP Host`, `Port`, `Secure`, `Username`, `Password`, `Default From`.
-- `Descargar complemento (macOS)`: descarga instalador local generado por la extension.
+- `Descargar complemento`: descarga instalador local generado por la extension para el SO detectado.
 - `Ping complemento`: valida conexion con Native Host y habilita/deshabilita tools dependientes.
+
+## Instalador integrado (quickstart)
+
+- macOS: descarga `greene-native-host-macos.sh` y ejecutalo en Terminal (`bash greene-native-host-macos.sh`).
+- Windows: descarga `greene-native-host-windows.ps1` y ejecutalo en PowerShell:
+  - `powershell -ExecutionPolicy Bypass -File .\greene-native-host-windows.ps1`
+- En Windows, el script registra el host en:
+  - `HKCU\Software\Google\Chrome\NativeMessagingHosts\<host_name>`
+  - `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\<host_name>`
 
 ## Notas para Gmail SMTP
 
@@ -53,7 +62,7 @@ En `Settings > Apps & Integrations > SMTP`:
 - Permiso `nativeMessaging` en `manifest.json`.
 - Archivo manifest del host con:
   - `name`
-  - `path` (absoluto en macOS/Linux)
+  - `path` (absoluto; en Windows la ubicacion se publica via Registry)
   - `type: "stdio"`
   - `allowed_origins` con el `chrome-extension://<ID>/` de esta extension.
 - El host debe hablar protocolo Native Messaging por `stdin/stdout`.

@@ -1,24 +1,28 @@
-# --- Dependencias de Desarrollo ---
+# --- Dependencias de desarrollo ---
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# --- Archivos de Build y Empaquetado ---
+# --- Build / empaquetado extension ---
 dist/
+dist-*/
 build/
+releases/
 *.zip
+*.tgz
+*.tar.gz
 *.crx
 *.pem
 
-# --- Modelos de IA y Datos Locales (Transformers.js / WebLLM) ---
-# Evita subir los pesos de los modelos que se descargan en local
+# --- Modelos de IA y datos locales (Transformers.js / WebLLM) ---
+# Evita subir pesos de modelos descargados en local
 /models/
 /cache/
 onnx_cache/
 
-# --- Configuración y Secretos ---
+# --- Configuracion y secretos ---
 .env
 .env.local
 .env.development.local
@@ -26,19 +30,26 @@ onnx_cache/
 .env.production.local
 config/secrets.json
 
-# --- Almacenamiento Local de la Extensión (IndexedDB/Orama) ---
-# Si usas algún script de seeding o backup local de la DB
+# --- Almacenamiento local de la extension (IndexedDB/Orama) ---
+# Si usas scripts de seeding o backup local de la DB
 /data/*.db
 /data/*.json
 storage_dump/
 
-# --- IDEs y Herramientas de Sistema ---
+# --- Temporales ---
+tmp/
+.tmp/
+.cache/
+.sass-cache/
+.eslintcache
+
+# --- IDEs y sistema ---
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 *.log
 
-# --- Pruebas (Coverage) ---
+# --- Pruebas (coverage) ---
 coverage/
 .nyc_output/

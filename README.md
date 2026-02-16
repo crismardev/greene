@@ -63,6 +63,30 @@ Ejecuta:
 
 El script instala dependencias y compila CSS. Luego debes completar manualmente la carga en `chrome://extensions` (por restricciones del navegador).
 
+
+## Build de dist y produccion
+
+Comandos principales:
+
+```bash
+# Limpia dist/
+npm run clean:dist
+
+# Compila CSS + genera dist/ listo para cargar en Chrome
+npm run build:dist
+
+# Alias de produccion (equivale a build:dist)
+npm run build:prod
+
+# Build completo y zip para release en releases/
+npm run package:dist
+```
+
+Notas:
+- `dist/` queda como carpeta final para `Load unpacked`.
+- `package:dist` genera `releases/greene-v<version>.zip` usando la version de `manifest.json`.
+- El build copia solo los recursos runtime necesarios, incluyendo dependencias de `node_modules` usadas por la extension.
+
 ## Flujo minimo recomendado de primer arranque
 
 1. Abrir Settings > AI Models.

@@ -21,6 +21,7 @@ import { createDynamicRelationsService } from './services/dynamic-relations-serv
 import { extractToolCallsFromText } from './services/local-tool-call-parser-service.js';
 import {
   buildMacNativeHostInstallerScript,
+  buildWindowsNativeHostInstallerScript,
   htmlToPlainText,
   normalizeEmailList,
   sanitizeNativeHostNameToken,
@@ -88,6 +89,7 @@ export function initPanelApp() {
   const BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE = 'GREENE_LOCATION_CONTEXT_UPDATE';
   const BACKGROUND_SMTP_SEND_TYPE = 'GREENE_SMTP_SEND';
   const BACKGROUND_NATIVE_HOST_PING_TYPE = 'GREENE_NATIVE_HOST_PING';
+  const NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL = 'macOS y Windows';
   const DEFAULT_CHAT_SYSTEM_PROMPT = buildDefaultChatSystemPrompt(DEFAULT_ASSISTANT_LANGUAGE);
   const DEFAULT_ASSISTANT_DISPLAY_NAME = 'Greene';
   const DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT = [
@@ -6208,7 +6210,7 @@ export function initPanelApp() {
       return {
         id: 'windows',
         label: 'Windows',
-        supported: false
+        supported: true
       };
     }
 
@@ -6267,7 +6269,7 @@ export function initPanelApp() {
       if (!platform.supported) {
         return {
           enabled: false,
-          reason: `native_host solo soportado en macOS (actual: ${platform.label}).`,
+          reason: `native_host solo soportado en ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL} (actual: ${platform.label}).`,
           transport: smtp.transport
         };
       }
@@ -6298,12 +6300,36 @@ export function initPanelApp() {
     const hostName = String(smtp.nativeHostName || 'com.greene.smtp_bridge').trim();
     const supportLabel = platform.supported ? 'soportado' : 'no_soportado';
 
+    if (platform.id === 'windows') {
+      return [
+        `SO detectado: ${platform.label} (${supportLabel})`,
+        'Instalacion corta:',
+        '1) Descargar complemento Windows (.ps1).',
+        '2) Ejecutar script en PowerShell.',
+        '3) Regresar y usar Ping complemento.',
+        `Host: ${hostName}`,
+        `Ext: ${extensionId}`
+      ].join('\n');
+    }
+
+    if (platform.id === 'macos') {
+      return [
+        `SO detectado: ${platform.label} (${supportLabel})`,
+        'Instalacion corta:',
+        '1) Descargar complemento macOS (.sh).',
+        '2) Ejecutar script en Terminal.',
+        '3) Regresar y usar Ping complemento.',
+        `Host: ${hostName}`,
+        `Ext: ${extensionId}`
+      ].join('\n');
+    }
+
     return [
       `SO detectado: ${platform.label} (${supportLabel})`,
       'Instalacion corta:',
-      '1) Descargar complemento macOS.',
-      '2) Ejecutar script en Terminal.',
-      '3) Regresar y usar Ping complemento.',
+      `1) Usa un equipo ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL}.`,
+      '2) Descarga el instalador correspondiente (.sh o .ps1).',
+      '3) Ejecuta el script y luego usa Ping complemento.',
       `Host: ${hostName}`,
       `Ext: ${extensionId}`
     ].join('\n');
@@ -6404,9 +6430,15 @@ export function initPanelApp() {
 
         if (settingsNativeHostDownloadBtn) {
           settingsNativeHostDownloadBtn.disabled = !platform.supported;
+          settingsNativeHostDownloadBtn.textContent =
+            platform.id === 'windows'
+              ? 'Descargar complemento (Windows .ps1)'
+              : platform.id === 'macos'
+                ? 'Descargar complemento (macOS .sh)'
+                : 'Descargar complemento';
           settingsNativeHostDownloadBtn.title = platform.supported
             ? ''
-            : 'Complemento local descargable solo para macOS por ahora.';
+            : `Complemento local descargable solo para ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL} por ahora.`;
         }
 
         if (settingsNativeHostPingBtn) {
@@ -6424,7 +6456,7 @@ export function initPanelApp() {
         if (!platform.supported) {
           setStatus(
             settingsNativeHostStatus,
-            'Este sistema operativo no esta soportado para Local Connector. Soporte actual: macOS.',
+            `Este sistema operativo no esta soportado para Local Connector. Soporte actual: ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL}.`,
             true
           );
           return;
@@ -6805,20 +6837,39 @@ export function initPanelApp() {
     };
   }
 
-  function downloadMacNativeHostInstaller() {
+  function downloadNativeHostInstaller() {
     const platform = detectHostPlatform();
     if (!platform.supported) {
-      throw new Error('Complemento local descargable solo para macOS por ahora.');
+      throw new Error(`Complemento local descargable solo para ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL} por ahora.`);
     }
 
     const draftSmtp = getSmtpDraftConfigFromScreen();
     const hostName = sanitizeNativeHostNameToken(draftSmtp.nativeHostName || 'com.greene.smtp_bridge');
     const extensionId = String(chrome?.runtime?.id || '').trim();
+
+    if (platform.id === 'windows') {
+      const script = buildWindowsNativeHostInstallerScript({
+        extensionId,
+        hostName
+      });
+      const filename = 'greene-native-host-windows.ps1';
+      triggerTextFileDownload(filename, script, 'text/x-powershell');
+      return {
+        filename,
+        platformLabel: platform.label
+      };
+    }
+
     const script = buildMacNativeHostInstallerScript({
       extensionId,
       hostName
     });
-    triggerTextFileDownload('greene-native-host-macos.sh', script, 'application/x-sh');
+    const filename = 'greene-native-host-macos.sh';
+    triggerTextFileDownload(filename, script, 'application/x-sh');
+    return {
+      filename,
+      platformLabel: platform.label
+    };
   }
 
   async function sendNativeHostPingWithBackground(hostName = '') {
@@ -6870,7 +6921,7 @@ export function initPanelApp() {
         ok: false,
         hostName: '',
         checkedAt: Date.now(),
-        message: 'native_host no soportado en este sistema operativo.',
+        message: `native_host no soportado en este sistema operativo. Soporte actual: ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL}.`,
         version: '',
         capabilities: []
       };
@@ -7074,7 +7125,7 @@ export function initPanelApp() {
     if (transport === 'native_host') {
       const platform = detectHostPlatform();
       if (!platform.supported) {
-        throw new Error(`native_host no soportado en ${platform.label}. Soporte actual: macOS.`);
+        throw new Error(`native_host no soportado en ${platform.label}. Soporte actual: ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL}.`);
       }
     }
 
@@ -11654,8 +11705,8 @@ export function initPanelApp() {
 
     settingsNativeHostDownloadBtn?.addEventListener('click', () => {
       try {
-        downloadMacNativeHostInstaller();
-        setStatus(settingsIntegrationsStatus, 'Descarga iniciada: greene-native-host-macos.sh');
+        const download = downloadNativeHostInstaller();
+        setStatus(settingsIntegrationsStatus, `Descarga iniciada (${download.platformLabel}): ${download.filename}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'No se pudo descargar complemento local.';
         setStatus(settingsIntegrationsStatus, message, true);

@@ -5,6 +5,10 @@
   "scripts": {
     "build:css": "tailwindcss -c tailwind.config.js -i ./panel/tailwind.input.css -o ./panel/tailwind.generated.css --minify",
     "watch:css": "tailwindcss -c tailwind.config.js -i ./panel/tailwind.input.css -o ./panel/tailwind.generated.css --watch",
+    "clean:dist": "node ./scripts/clean-dist.mjs",
+    "build:dist": "npm run clean:dist && npm run build:css && node ./scripts/build-dist.mjs",
+    "build:prod": "npm run build:dist",
+    "package:dist": "npm run build:dist && node ./scripts/package-dist.mjs",
     "install:mac": "bash ./scripts/install-mac.sh"
   },
   "keywords": [],
