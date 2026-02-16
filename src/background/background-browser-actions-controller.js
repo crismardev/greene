@@ -622,7 +622,7 @@
     };
   }
 
-  self.GreenStudioBackgroundBrowserActions = Object.freeze({
+  self.GreeneBackgroundBrowserActions = Object.freeze({
     createBackgroundBrowserActionsController
   });
 })();

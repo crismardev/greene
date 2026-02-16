@@ -38,7 +38,7 @@
       ).slice(0, 6)
     );
     const DEFAULT_SMTP_NATIVE_HOST_NAME =
-      String(cfg.defaultSmtpNativeHostName || '').trim() || 'com.greenstudio.smtp_bridge';
+      String(cfg.defaultSmtpNativeHostName || '').trim() || 'com.greene.smtp_bridge';
 
 function normalizeSmtpTransport(value) {
   const token = String(value || '')
@@ -204,7 +204,7 @@ async function runNativeHostPing(rawPayload = {}) {
 
   const nativeResponse = await sendNativeMessageToHost(nativeHostName, {
     type: 'PING',
-    source: 'greenstudio-ext/background',
+    source: 'greene/background',
     requestedAt: Date.now()
   });
 
@@ -366,7 +366,7 @@ async function sendSmtpViaNativeHost(normalizedPayload) {
   });
 
   const nativeResponse = await sendNativeMessageToHost(nativeHostName, {
-    type: 'GREENSTUDIO_SMTP_SEND',
+    type: 'GREENE_SMTP_SEND',
     smtp: {
       host: payload.smtp.host,
       port: payload.smtp.port,
@@ -447,7 +447,7 @@ async function runSmtpBridgeSend(rawPayload = {}) {
     };
   }
 
-  self.GreenStudioBackgroundSmtpBridge = {
+  self.GreeneBackgroundSmtpBridge = {
     createBackgroundSmtpBridgeService
   };
 })();

@@ -1,14 +1,15 @@
 {
-  "name": "greenstudio-ext",
+  "name": "greene",
   "version": "1.0.0",
-  "description": "Extension de Chrome (Manifest V3) para abrir **GreenStudio Tools** en un **side panel**.",
+  "description": "Extension de Chrome (Manifest V3) para abrir **Greene** en un **side panel**.",
   "scripts": {
     "build:css": "tailwindcss -c tailwind.config.js -i ./panel/tailwind.input.css -o ./panel/tailwind.generated.css --minify",
-    "watch:css": "tailwindcss -c tailwind.config.js -i ./panel/tailwind.input.css -o ./panel/tailwind.generated.css --watch"
+    "watch:css": "tailwindcss -c tailwind.config.js -i ./panel/tailwind.input.css -o ./panel/tailwind.generated.css --watch",
+    "install:mac": "bash ./scripts/install-mac.sh"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "SEE LICENSE IN LICENSE.md",
   "devDependencies": {
     "autoprefixer": "^10.4.24",
     "postcss": "^8.5.6",

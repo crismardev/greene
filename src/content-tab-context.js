@@ -2,12 +2,12 @@
   'use strict';
 
   const MESSAGE_TYPES = Object.freeze({
-    GET_TAB_CONTEXT: 'GREENSTUDIO_GET_TAB_CONTEXT',
-    TAB_CONTEXT_PUSH: 'GREENSTUDIO_TAB_CONTEXT_PUSH',
-    SITE_ACTION: 'GREENSTUDIO_SITE_ACTION'
+    GET_TAB_CONTEXT: 'GREENE_GET_TAB_CONTEXT',
+    TAB_CONTEXT_PUSH: 'GREENE_TAB_CONTEXT_PUSH',
+    SITE_ACTION: 'GREENE_SITE_ACTION'
   });
 
-  const REGISTRY_KEY = 'GreenStudioSiteHandlers';
+  const REGISTRY_KEY = 'GreeneSiteHandlers';
 
   function getHandlers() {
     const handlers = Array.isArray(window[REGISTRY_KEY]) ? window[REGISTRY_KEY].slice() : [];

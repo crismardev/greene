@@ -8,22 +8,22 @@ Este documento cubre la capa de orquestacion en `src/background.js`.
 - Calcular telemetria temporal por tab (dwell/active time).
 - Mantener cache reciente de historial (`chrome.history`).
 - Enrutar acciones internas:
-  - `GREENSTUDIO_BROWSER_ACTION`
-  - `GREENSTUDIO_SITE_ACTION_IN_TAB`
-- Publicar snapshots a listeners (`GREENSTUDIO_TAB_CONTEXT_UPDATED`).
+  - `GREENE_BROWSER_ACTION`
+  - `GREENE_SITE_ACTION_IN_TAB`
+- Publicar snapshots a listeners (`GREENE_TAB_CONTEXT_UPDATED`).
 - Enrutar tools externas via `chrome.runtime.onMessageExternal`.
 
 ## Bus interno (panel/content <-> background)
 
 Mensajes principales:
 
-- `GREENSTUDIO_GET_TAB_CONTEXT`
-- `GREENSTUDIO_TAB_CONTEXT_PUSH`
-- `GREENSTUDIO_GET_TAB_CONTEXT_SNAPSHOT`
-- `GREENSTUDIO_TAB_CONTEXT_UPDATED`
-- `GREENSTUDIO_SITE_ACTION_IN_TAB`
-- `GREENSTUDIO_SITE_ACTION`
-- `GREENSTUDIO_BROWSER_ACTION`
+- `GREENE_GET_TAB_CONTEXT`
+- `GREENE_TAB_CONTEXT_PUSH`
+- `GREENE_GET_TAB_CONTEXT_SNAPSHOT`
+- `GREENE_TAB_CONTEXT_UPDATED`
+- `GREENE_SITE_ACTION_IN_TAB`
+- `GREENE_SITE_ACTION`
+- `GREENE_BROWSER_ACTION`
 
 ## Browser actions disponibles
 

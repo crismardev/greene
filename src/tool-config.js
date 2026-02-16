@@ -47,11 +47,11 @@
     [PREFERENCE_KEYS.UI_THEME_MODE]: 'system'
   });
 
-  window.GreenStudioToolsConfig = Object.freeze({
+  window.GreeneToolsConfig = Object.freeze({
     TOOL_KEYS,
     PREFERENCE_KEYS,
     TOOL_DEFINITIONS,
     DEFAULT_SETTINGS,
-    APPLY_MESSAGE_TYPE: 'GREENSTUDIO_TOOLS_APPLY'
+    APPLY_MESSAGE_TYPE: 'GREENE_TOOLS_APPLY'
   });
 })();

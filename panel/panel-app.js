@@ -40,12 +40,12 @@ import {
 export function initPanelApp() {
   'use strict';
 
-  const cfg = window.GreenStudioToolsConfig;
+  const cfg = window.GreeneToolsConfig;
   if (!cfg) {
     return;
   }
 
-  const LOG_PREFIX = '[greenstudio-ext/panel]';
+  const LOG_PREFIX = '[greene/panel]';
 
   const { TOOL_KEYS, PREFERENCE_KEYS, DEFAULT_SETTINGS, APPLY_MESSAGE_TYPE } = cfg;
 
@@ -77,7 +77,7 @@ export function initPanelApp() {
     UNLOCK: 'unlock'
   });
   const SECRET_KEY_PREFIX = 'ai-key::';
-  const PIN_UNLOCK_SESSION_STORAGE_KEY = 'greenstudio_pin_unlock_session_v1';
+  const PIN_UNLOCK_SESSION_STORAGE_KEY = 'greene_pin_unlock_session_v1';
   const PIN_UNLOCK_SESSION_TTL_MS = 1000 * 60 * 60 * 8;
   const SCREEN_INDEX = Object.freeze({
     onboarding: 0,
@@ -85,11 +85,11 @@ export function initPanelApp() {
     tools: 2,
     settings: 3
   });
-  const BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE = 'GREENSTUDIO_LOCATION_CONTEXT_UPDATE';
-  const BACKGROUND_SMTP_SEND_TYPE = 'GREENSTUDIO_SMTP_SEND';
-  const BACKGROUND_NATIVE_HOST_PING_TYPE = 'GREENSTUDIO_NATIVE_HOST_PING';
+  const BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE = 'GREENE_LOCATION_CONTEXT_UPDATE';
+  const BACKGROUND_SMTP_SEND_TYPE = 'GREENE_SMTP_SEND';
+  const BACKGROUND_NATIVE_HOST_PING_TYPE = 'GREENE_NATIVE_HOST_PING';
   const DEFAULT_CHAT_SYSTEM_PROMPT = buildDefaultChatSystemPrompt(DEFAULT_ASSISTANT_LANGUAGE);
-  const DEFAULT_ASSISTANT_DISPLAY_NAME = 'Grenne';
+  const DEFAULT_ASSISTANT_DISPLAY_NAME = 'Greene';
   const DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT = [
     'Eres un asistente para redactar emails claros y accionables.',
     'Siempre responde con un correo listo para enviar en formato:',
@@ -201,7 +201,7 @@ export function initPanelApp() {
   ]);
 
   const CHAT_DB = Object.freeze({
-    NAME: 'greenstudio-chat-db',
+    NAME: 'greene-chat-db',
     VERSION: 5,
     CHAT_STORE: 'chat_state',
     CHAT_KEY: 'home_history',
@@ -210,7 +210,7 @@ export function initPanelApp() {
     WHATSAPP_STORE: 'whatsapp_chat_state',
     SECRET_STORE: 'panel_secrets'
   });
-  const INITIAL_CONTEXT_SYNC_STORAGE_KEY = 'greenstudio_initial_context_sync_v1';
+  const INITIAL_CONTEXT_SYNC_STORAGE_KEY = 'greene_initial_context_sync_v1';
   const INITIAL_CONTEXT_SYNC_VERSION = 1;
   const INITIAL_CONTEXT_SYNC_STALE_MS = 1000 * 60 * 12;
   const INITIAL_CONTEXT_SYNC_HISTORY_LIMIT = 320;
@@ -289,7 +289,7 @@ export function initPanelApp() {
     return {
       smtp: {
         transport: 'http_agent',
-        nativeHostName: 'com.greenstudio.smtp_bridge',
+        nativeHostName: 'com.greene.smtp_bridge',
         agentUrl: 'http://127.0.0.1:4395/smtp/send',
         host: '',
         port: 587,
@@ -6295,7 +6295,7 @@ export function initPanelApp() {
     const platform = detectHostPlatform();
     const smtp = getSmtpDraftConfigFromScreen();
     const extensionId = String(chrome?.runtime?.id || '').trim() || '[extension_id]';
-    const hostName = String(smtp.nativeHostName || 'com.greenstudio.smtp_bridge').trim();
+    const hostName = String(smtp.nativeHostName || 'com.greene.smtp_bridge').trim();
     const supportLabel = platform.supported ? 'soportado' : 'no_soportado';
 
     return [
@@ -6812,13 +6812,13 @@ export function initPanelApp() {
     }
 
     const draftSmtp = getSmtpDraftConfigFromScreen();
-    const hostName = sanitizeNativeHostNameToken(draftSmtp.nativeHostName || 'com.greenstudio.smtp_bridge');
+    const hostName = sanitizeNativeHostNameToken(draftSmtp.nativeHostName || 'com.greene.smtp_bridge');
     const extensionId = String(chrome?.runtime?.id || '').trim();
     const script = buildMacNativeHostInstallerScript({
       extensionId,
       hostName
     });
-    triggerTextFileDownload('greenstudio-native-host-macos.sh', script, 'application/x-sh');
+    triggerTextFileDownload('greene-native-host-macos.sh', script, 'application/x-sh');
   }
 
   async function sendNativeHostPingWithBackground(hostName = '') {
@@ -11655,7 +11655,7 @@ export function initPanelApp() {
     settingsNativeHostDownloadBtn?.addEventListener('click', () => {
       try {
         downloadMacNativeHostInstaller();
-        setStatus(settingsIntegrationsStatus, 'Descarga iniciada: greenstudio-native-host-macos.sh');
+        setStatus(settingsIntegrationsStatus, 'Descarga iniciada: greene-native-host-macos.sh');
       } catch (error) {
         const message = error instanceof Error ? error.message : 'No se pudo descargar complemento local.';
         setStatus(settingsIntegrationsStatus, message, true);

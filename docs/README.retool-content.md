@@ -57,7 +57,7 @@ Opcionalmente, el bridge responde con evento:
   - cambios de DOM (MutationObserver),
   - hooks de insercion (`appendChild`, `insertBefore`, etc.),
   - intervalos periodicos.
-- Escucha mensaje `GREENSTUDIO_TOOLS_APPLY` para aplicar manualmente.
+- Escucha mensaje `GREENE_TOOLS_APPLY` para aplicar manualmente.
 
 ## Activacion
 

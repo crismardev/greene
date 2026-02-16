@@ -1,4 +1,4 @@
-const PIN_VERIFIER_TEXT = 'greenstudio-pin-verifier-v1';
+const PIN_VERIFIER_TEXT = 'greene-pin-verifier-v1';
 const DEFAULT_ITERATIONS = 210000;
 
 function toBase64(bytes) {

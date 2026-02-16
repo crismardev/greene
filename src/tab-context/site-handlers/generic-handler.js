@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const REGISTRY_KEY = 'GreenStudioSiteHandlers';
+  const REGISTRY_KEY = 'GreeneSiteHandlers';
 
   function getRegistry() {
     if (!window[REGISTRY_KEY]) {

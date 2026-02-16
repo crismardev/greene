@@ -2,11 +2,11 @@
   'use strict';
 
   // Browser-side automation pack aligned with common operations from whatsapp-web.js / Baileys.
-  const REGISTRY_KEY = 'GreenStudioSiteHandlers';
-  const LOG_PREFIX = '[greenstudio-ext/whatsapp-handler]';
+  const REGISTRY_KEY = 'GreeneSiteHandlers';
+  const LOG_PREFIX = '[greene/whatsapp-handler]';
   const ENABLE_SCRAPE_DEBUG_LOGS = true;
   const CONTEXT_LOG_MIN_INTERVAL_MS = 1800;
-  const CHAT_SYNC_STORAGE_KEY = 'greenstudio_whatsapp_sync_state_v1';
+  const CHAT_SYNC_STORAGE_KEY = 'greene_whatsapp_sync_state_v1';
   const CHAT_SYNC_VERSION = 1;
   const CHAT_SYNC_MAX_CHATS = 120;
   const CHAT_SYNC_MAX_MESSAGE_IDS = 180;

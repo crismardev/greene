@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const LOG_PREFIX = '[greenstudio-ext/retool-bridge]';
+  const LOG_PREFIX = '[greene/retool-bridge]';
   const BRIDGE_MESSAGE_TYPE = 'RETOOL_TO_EXTENSION';
   const BRIDGE_RESPONSE_TYPE = 'EXTENSION_TO_RETOOL';
 

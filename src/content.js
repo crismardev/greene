@@ -1,12 +1,12 @@
 (() => {
   'use strict';
 
-  const cfg = window.GreenStudioToolsConfig || {};
+  const cfg = window.GreeneToolsConfig || {};
   const TOOL_KEY = (cfg.TOOL_KEYS && cfg.TOOL_KEYS.RETOOL_LAYOUT_CLEANUP) || 'tool_retool_layout_cleanup';
-  const APPLY_MESSAGE_TYPE = cfg.APPLY_MESSAGE_TYPE || 'GREENSTUDIO_TOOLS_APPLY';
+  const APPLY_MESSAGE_TYPE = cfg.APPLY_MESSAGE_TYPE || 'GREENE_TOOLS_APPLY';
   const DEFAULT_SETTINGS = cfg.DEFAULT_SETTINGS || { [TOOL_KEY]: true };
 
-  const LOG_PREFIX = '[greenstudio-ext]';
+  const LOG_PREFIX = '[greene]';
 
   const HEADER_SELECTORS = [
     'div[role="banner"][aria-label="Retool Header"]',
@@ -134,7 +134,7 @@
     for (const [proto, methodName] of methods) {
       const original = proto[methodName];
       if (typeof original !== 'function') continue;
-      if (original.__greenstudioPatched) continue;
+      if (original.__greenePatched) continue;
 
       const wrapped = function (...args) {
         const result = original.apply(this, args);
@@ -142,7 +142,7 @@
         return result;
       };
 
-      Object.defineProperty(wrapped, '__greenstudioPatched', {
+      Object.defineProperty(wrapped, '__greenePatched', {
         value: true,
         configurable: false,
         enumerable: false,

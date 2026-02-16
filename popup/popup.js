@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const cfg = window.GreenStudioToolsConfig;
+  const cfg = window.GreeneToolsConfig;
   if (!cfg) return;
   const container = document.getElementById('toolsContainer');
   const statusText = document.getElementById('statusText');
@@ -102,7 +102,7 @@
 
       chrome.tabs.sendMessage(tab.id, { type: cfg.APPLY_MESSAGE_TYPE }, () => {
         if (chrome.runtime.lastError) {
-          setStatus('Esta pestana no soporta GreenStudio Tools.');
+          setStatus('Esta pestana no soporta Greene.');
           return;
         }
         setStatus('Herramientas aplicadas en la pestana activa.');

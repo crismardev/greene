@@ -1,141 +1,113 @@
-# greenstudio-ext
+# Greene
 
-Extension de Chrome (Manifest V3) para productividad con side panel, AI multi-provider, automatizacion de WhatsApp Web, tools de navegador y utilidades de imagen.
+## Mensaje del desarrollador
 
-## Lo principal
+**Esta extension no esta preparada para Chrome Web Store.**
+Esta disenada para operar con privilegios elevados y fue generada con AI con el objetivo de implementar AI en una capa normalmente inaccesible.
+
+> Polyform Noncommercial Source Available
+>
+> Copyright (c) 2026 Cristhian.
+>
+> Se permite la inspección del código fuente para auditoría de seguridad. Queda estrictamente prohibida la ejecución, copia, modificación o distribución de este software para cualquier propósito sin una clave de licencia válida adquirida en [Tu Sitio Web]. Este software no es "Open Source" bajo la definición de la OSI, es Source-Available de pago.
+
+## Que es
+
+Extension de Chrome (Manifest V3) con side panel para productividad asistida por AI, con automatizacion de WhatsApp Web, herramientas de navegador, integracion DB y utilidades de imagen.
+
+## Capacidades principales
 
 - Side panel con chat AI y contexto vivo de tabs/historial.
-- Orquestacion local de tools: `browser.*`, `whatsapp.*`, `db.*`.
-- Integracion con WhatsApp Web (leer inbox, abrir chat, enviar mensaje, archivado).
-- Integracion con PostgreSQL (lectura/escritura segura para CRM/ERP).
+- Orquestacion local de tools: `browser.*`, `whatsapp.*`, `db.*`, `smtp.*`, `maps.*`.
+- Integracion WhatsApp Web: leer inbox, abrir chat, enviar mensajes, archivar.
+- Integracion PostgreSQL con guard rails de lectura/escritura.
 - Conversor de imagenes a WebP.
-- Retool Layout Cleanup para `https://*.retool.com/apps/*`.
-- API externa via `chrome.runtime.onMessageExternal` (incluye `OPEN_WHATSAPP`).
+- API externa via `chrome.runtime.onMessageExternal` para flujos integrados.
 
-## Arquitectura rapida
+## Requisitos
 
-- `manifest.json`: permisos, side panel, content scripts y `externally_connectable`.
-- `src/background.js`: estado global de tabs/contexto/historial + router de acciones internas y externas.
-- `src/background/background-browser-actions-controller.js`: implementacion de `browser.*`.
-- `src/content-tab-context.js`: colecta contexto por tab y ejecuta `SITE_ACTION`.
-- `src/tab-context/site-handlers/whatsapp-handler.js`: automation pack de WhatsApp.
-- `panel/panel-app.js`: app principal del side panel.
-- `panel/services/*`: AI providers, storage, memoria vectorial, db postgres, estado UI.
-- `src/content.js`: tool de limpieza para Retool.
+- macOS o Linux (script `.sh` disponible para macOS por ahora).
+- Node.js + npm.
+- Google Chrome (Developer Mode habilitado para carga unpacked).
+- Ollama local opcional para modelo base (`http://localhost:11434`).
 
-## Tools externas (`onMessageExternal`)
+## Instalacion (tutorial)
 
-El service worker escucha payloads externos con `type` y `args`.
+### Opcion A: Manual
 
-Tipos soportados:
-
-- `OPEN_WHATSAPP`
-- `OPEN_URL`
-- `LIST_TABS`
-- `FOCUS_TAB`
-- `CLOSE_TAB`
-- `GET_RECENT_HISTORY`
-- `CLOSE_NON_PRODUCTIVITY_TABS`
-- `WHATSAPP_GET_INBOX`
-- `WHATSAPP_OPEN_CHAT`
-- `WHATSAPP_SEND_MESSAGE`
-- `WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE`
-- `HELP`
-
-Ejemplo minimo (`OPEN_WHATSAPP`):
-
-```js
-chrome.runtime.sendMessage('<EXTENSION_ID>', {
-  type: 'OPEN_WHATSAPP',
-  phone: '+5215512345678',
-  text: 'Hola desde GreenStudio',
-  reuseExistingTab: true,
-  active: true
-}, (response) => {
-  console.log(response);
-});
-```
-
-Respuesta esperada (shape):
-
-```json
-{
-  "ok": true,
-  "success": true,
-  "type": "OPEN_WHATSAPP",
-  "result": {
-    "reused": true,
-    "url": "https://web.whatsapp.com/send?phone=...&text=...",
-    "tab": { "id": 123, "active": true, "url": "..." }
-  }
-}
-```
-
-Nota: para invocaciones desde paginas web, el `manifest` ya incluye `externally_connectable.matches` para `localhost`, `127.0.0.1` y `*.retool.com`.
-
-## Retool sandbox bridge (recomendado en Retool)
-
-Para apps de Retool en sandbox, usa `postMessage` hacia el content script puente:
-
-```js
-const payload = {
-  type: 'OPEN_WHATSAPP',
-  phone: table1.selectedRow.phone,
-  text: 'Hola desde Retool'
-};
-
-window.parent.postMessage(
-  {
-    type: 'RETOOL_TO_EXTENSION',
-    payload
-  },
-  '*'
-);
-```
-
-El puente vive en `src/retool-bridge-content.js` y reenvia el payload al background con `chrome.runtime.sendMessage(...)`.
-
-## Instalacion
-
-1. Abre `chrome://extensions`.
-2. Activa `Developer mode`.
-3. Click en `Load unpacked`.
-4. Selecciona esta carpeta (`greenstudio-ext`).
-
-## Desarrollo
-
-Instalar deps:
+1. Clona el repositorio.
+2. Instala dependencias:
 
 ```bash
 npm install
 ```
 
-Compilar CSS de panel:
+3. Compila CSS del panel:
 
 ```bash
 npm run build:css
 ```
 
-Watch CSS:
+4. Abre `chrome://extensions`.
+5. Activa `Developer mode`.
+6. Click en `Load unpacked`.
+7. Selecciona la carpeta raiz del proyecto.
+
+### Opcion B: Script `.sh` (macOS por ahora)
+
+Ejecuta:
 
 ```bash
-npm run watch:css
+./scripts/install-mac.sh
 ```
 
-## Documentacion por area
+El script instala dependencias y compila CSS. Luego debes completar manualmente la carga en `chrome://extensions` (por restricciones del navegador).
+
+## Flujo minimo recomendado de primer arranque
+
+1. Abrir Settings > AI Models.
+2. Definir modelo principal:
+- local (Ollama), o
+- remoto (con API key).
+3. Si usaras providers remotos, configurar PIN para proteger secretos locales.
+4. Validar tools en entorno controlado.
+
+## Estructura tecnica (resumen)
+
+- `manifest.json`: permisos, side panel, content scripts, externos.
+- `src/background.js`: estado global y enrutamiento de acciones.
+- `src/background/background-browser-actions-controller.js`: `browser.*`.
+- `src/tab-context/site-handlers/whatsapp-handler.js`: automation WhatsApp.
+- `panel/panel-app.js`: UI principal del side panel.
+- `panel/services/*`: providers AI, storage, memoria, DB, seguridad.
+
+## Seguridad y cumplimiento operativo
+
+- Proyecto pensado para entorno controlado, no para distribucion publica masiva en Web Store.
+- Revisar politicas en `SECURITY.md`.
+- Ver modelo de contribucion y restricciones en `CONTRIBUTING.md`.
+- Revisar almacenamiento y cifrado en `docs/README.storage-security.md`.
+
+## Documentacion
 
 - `docs/README.background-external-tools.md`
 - `docs/README.panel-ai.md`
 - `docs/README.whatsapp-automation.md`
-- `docs/README.retool-content.md`
+- `docs/README.smtp-local-bridge.md`
+- `docs/README.smtp-native-host-packaging.md`
 - `docs/README.storage-security.md`
 - `docs/README.docs-index.md`
 
 ## Estado de calidad
 
-- No hay suite de tests automatizados en este repo.
-- Se recomienda validar manualmente en Chrome:
-  - mensajes externos (`OPEN_WHATSAPP` y `HELP`),
-  - tools de WhatsApp con sesion activa,
-  - flujo de AI local/remoto,
-  - consultas DB en modo lectura y escritura controlada.
+- No hay suite de tests automatizados end-to-end en este repo.
+- Se requiere validacion manual de:
+  - tools `whatsapp.*`
+  - tools `db.*`
+  - flujo de modelos AI (local/remoto)
+  - mensajes externos (`onMessageExternal`)
+
+## Licencia
+
+Este proyecto usa una modalidad **Source-Available de pago**.
+Ver `LICENSE.md`.

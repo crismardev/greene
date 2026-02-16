@@ -1,4 +1,4 @@
-export const DEFAULT_SMTP_NATIVE_HOST_NAME = 'com.greenstudio.smtp_bridge';
+export const DEFAULT_SMTP_NATIVE_HOST_NAME = 'com.greene.smtp_bridge';
 
 export function normalizeEmailList(rawValue, limit = 20) {
   const source = Array.isArray(rawValue) ? rawValue : String(rawValue || '').split(/[;,]/);
@@ -88,7 +88,7 @@ export function buildMacNativeHostInstallerScript({ extensionId = '', hostName =
     '  exit 1',
     'fi',
     '',
-    'BASE_DIR="$HOME/.greenstudio/native-host/$HOST_NAME"',
+    'BASE_DIR="$HOME/.greene/native-host/$HOST_NAME"',
     'MANIFEST_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"',
     'HOST_PY="$BASE_DIR/host.py"',
     'LAUNCHER="$BASE_DIR/host.sh"',
@@ -260,7 +260,7 @@ export function buildMacNativeHostInstallerScript({ extensionId = '', hostName =
     "    msg_type = str(message.get('type') or '').strip().upper()",
     "    if msg_type == 'PING':",
     '        return handle_ping(message)',
-    "    if msg_type == 'GREENSTUDIO_SMTP_SEND':",
+    "    if msg_type == 'GREENE_SMTP_SEND':",
     '        return handle_smtp_send(message)',
     "    return {'ok': False, 'error': f'Tipo no soportado: {msg_type}'}",
     '',
@@ -293,7 +293,7 @@ export function buildMacNativeHostInstallerScript({ extensionId = '', hostName =
     'cat > "$MANIFEST_FILE" <<JSONEOF',
     '{',
     `  "name": "${safeHostName}",`,
-    '  "description": "GreenStudio Native SMTP Host",',
+    '  "description": "Greene Native SMTP Host",',
     '  "path": "$LAUNCHER",',
     '  "type": "stdio",',
     `  "allowed_origins": ["chrome-extension://${safeExtensionId}/"]`,

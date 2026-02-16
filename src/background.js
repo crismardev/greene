@@ -5,16 +5,16 @@
   importScripts('background/background-smtp-bridge-service.js');
 
   const MESSAGE_TYPES = Object.freeze({
-    GET_TAB_CONTEXT: 'GREENSTUDIO_GET_TAB_CONTEXT',
-    TAB_CONTEXT_PUSH: 'GREENSTUDIO_TAB_CONTEXT_PUSH',
-    GET_TAB_CONTEXT_SNAPSHOT: 'GREENSTUDIO_GET_TAB_CONTEXT_SNAPSHOT',
-    TAB_CONTEXT_UPDATED: 'GREENSTUDIO_TAB_CONTEXT_UPDATED',
-    SITE_ACTION_IN_TAB: 'GREENSTUDIO_SITE_ACTION_IN_TAB',
-    SITE_ACTION: 'GREENSTUDIO_SITE_ACTION',
-    BROWSER_ACTION: 'GREENSTUDIO_BROWSER_ACTION',
-    LOCATION_CONTEXT_UPDATE: 'GREENSTUDIO_LOCATION_CONTEXT_UPDATE',
-    SMTP_SEND: 'GREENSTUDIO_SMTP_SEND',
-    NATIVE_HOST_PING: 'GREENSTUDIO_NATIVE_HOST_PING'
+    GET_TAB_CONTEXT: 'GREENE_GET_TAB_CONTEXT',
+    TAB_CONTEXT_PUSH: 'GREENE_TAB_CONTEXT_PUSH',
+    GET_TAB_CONTEXT_SNAPSHOT: 'GREENE_GET_TAB_CONTEXT_SNAPSHOT',
+    TAB_CONTEXT_UPDATED: 'GREENE_TAB_CONTEXT_UPDATED',
+    SITE_ACTION_IN_TAB: 'GREENE_SITE_ACTION_IN_TAB',
+    SITE_ACTION: 'GREENE_SITE_ACTION',
+    BROWSER_ACTION: 'GREENE_BROWSER_ACTION',
+    LOCATION_CONTEXT_UPDATE: 'GREENE_LOCATION_CONTEXT_UPDATE',
+    SMTP_SEND: 'GREENE_SMTP_SEND',
+    NATIVE_HOST_PING: 'GREENE_NATIVE_HOST_PING'
   });
 
   const EXTERNAL_MESSAGE_TYPES = Object.freeze({
@@ -33,14 +33,14 @@
   });
   const EXTERNAL_MESSAGE_TYPE_SET = new Set(Object.values(EXTERNAL_MESSAGE_TYPES));
 
-  const LOG_PREFIX = '[greenstudio-ext/background]';
+  const LOG_PREFIX = '[greene/background]';
   const WHATSAPP_WEB_BASE_URL = 'https://web.whatsapp.com/';
   const WHATSAPP_WEB_MATCH_PATTERN = 'https://web.whatsapp.com/*';
   const tabContextState = new Map();
   const tabTemporalState = new Map();
   const recentHistoryByUrl = new Map();
   const HISTORY_CACHE_LIMIT = 240;
-  const INITIAL_CONTEXT_SYNC_STORAGE_KEY = 'greenstudio_initial_context_sync_v1';
+  const INITIAL_CONTEXT_SYNC_STORAGE_KEY = 'greene_initial_context_sync_v1';
   const INITIAL_CONTEXT_SYNC_VERSION = 1;
   const EXTENDED_HISTORY_MIN_RESULTS = 20;
   const EXTENDED_HISTORY_MAX_RESULTS = 600;
@@ -56,7 +56,7 @@
     'http://127.0.0.1:4395/smtp/send',
     'http://localhost:4395/smtp/send'
   ]);
-  const DEFAULT_SMTP_NATIVE_HOST_NAME = 'com.greenstudio.smtp_bridge';
+  const DEFAULT_SMTP_NATIVE_HOST_NAME = 'com.greene.smtp_bridge';
   const whatsappContextLogByTab = new Map();
   let runtimeContextState = {
     updatedAt: 0,
@@ -239,7 +239,7 @@
     }
   }
 
-  const smtpBridgeService = self.GreenStudioBackgroundSmtpBridge.createBackgroundSmtpBridgeService({
+  const smtpBridgeService = self.GreeneBackgroundSmtpBridge.createBackgroundSmtpBridgeService({
     defaultSmtpNativeHostName: DEFAULT_SMTP_NATIVE_HOST_NAME,
     logDebug,
     logWarn,
@@ -920,7 +920,7 @@
     whatsappContextLogByTab.delete(tabId);
   }
 
-  const browserActionsController = self.GreenStudioBackgroundBrowserActions.createBackgroundBrowserActionsController({
+  const browserActionsController = self.GreeneBackgroundBrowserActions.createBackgroundBrowserActionsController({
     logDebug,
     logWarn,
     clamp,

@@ -1,6 +1,6 @@
 # SMTP local bridge (Chrome extension)
 
-Esta extension envia `smtp.sendMail` mediante el `background` (`GREENSTUDIO_SMTP_SEND`).
+Esta extension envia `smtp.sendMail` mediante el `background` (`GREENE_SMTP_SEND`).
 
 ## Modos soportados
 

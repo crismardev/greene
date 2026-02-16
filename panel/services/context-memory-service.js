@@ -10,12 +10,12 @@ const VECTOR_SIZE = 384;
 const WORKER_PATH = 'panel/workers/embedding-worker.js';
 const MODEL_SIMILARITY_THRESHOLD = 0.75;
 const DEFAULT_TOP_K = 5;
-const IDENTITY_STORAGE_KEY = 'greenstudio_identity_profile';
-const IDB_NAME = 'greenstudio-context-vector-db';
+const IDENTITY_STORAGE_KEY = 'greene_identity_profile';
+const IDB_NAME = 'greene-context-vector-db';
 const IDB_VERSION = 1;
 const IDB_STORE = 'vector_store';
 const IDB_KEY = 'orama_state_v1';
-const EMBEDDING_WARMUP_TEXT = 'greenstudio bootstrap warmup';
+const EMBEDDING_WARMUP_TEXT = 'greene bootstrap warmup';
 const WHATSAPP_MESSAGE_DOC_LIMIT = 28;
 const WHATSAPP_CONTACT_DOC_LIMIT = 36;
 

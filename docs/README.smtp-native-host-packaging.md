@@ -73,7 +73,7 @@ La extension SI puede:
 
 Crear `native-host/` con un host minimo:
 - comando `PING`
-- comando `GREENSTUDIO_SMTP_SEND`
+- comando `GREENE_SMTP_SEND`
 - respuesta estandar `{ ok, result|error }`
 
 Con eso puedes probar instalacion real y luego extender a otras funciones locales.

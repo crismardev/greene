@@ -34,7 +34,7 @@ Automation de WhatsApp Web implementada por content script.
 El panel dispara estas acciones via:
 
 1. `tabContextService.runSiteActionInTab(...)`
-2. background (`GREENSTUDIO_SITE_ACTION_IN_TAB`)
+2. background (`GREENE_SITE_ACTION_IN_TAB`)
 3. `content-tab-context` -> handler activo (`whatsapp`)
 
 ## Ejecucion desde tools externas
