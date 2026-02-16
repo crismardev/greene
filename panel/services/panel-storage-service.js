@@ -307,9 +307,6 @@ export function createPanelStorageService({
     }
 
     const content = typeof record.content === 'string' ? record.content.trim() : '';
-    if (!content) {
-      return null;
-    }
 
     const id =
       typeof record.id === 'string' && record.id
@@ -327,6 +324,59 @@ export function createPanelStorageService({
       : Array.isArray(record.extractedFacts)
         ? record.extractedFacts
         : [];
+    const rawAttachments = Array.isArray(record.attachments) ? record.attachments : [];
+    const attachments = rawAttachments
+      .map((item, index) => {
+        const source = item && typeof item === 'object' ? item : {};
+        const id = toSafeText(source.id || `attachment-${index}`, 120);
+        const name = toSafeText(source.name || source.fileName || 'archivo', 160);
+        const mimeType = toSafeText(source.mimeType || source.type || 'application/octet-stream', 120).toLowerCase();
+        const kindRaw = toSafeText(source.kind || '', 24).toLowerCase();
+        const kind = kindRaw === 'image' || kindRaw === 'text' ? kindRaw : mimeType.startsWith('image/') ? 'image' : 'file';
+        const sizeBytes = Math.max(0, Number(source.sizeBytes || source.size) || 0);
+        const textExcerpt = String(source.textExcerpt || source.summary || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 1400);
+
+        if (!id || !name) {
+          return null;
+        }
+
+        return {
+          id,
+          name,
+          mimeType,
+          kind,
+          sizeBytes,
+          textExcerpt
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 12);
+    const rawGeneratedImages = Array.isArray(record.generated_images)
+      ? record.generated_images
+      : Array.isArray(record.generatedImages)
+        ? record.generatedImages
+        : [];
+    const generatedImages = rawGeneratedImages
+      .map((item) => {
+        const source = item && typeof item === 'object' ? item : {};
+        const url = toSafeText(source.url || '', 1200);
+        if (!url) {
+          return null;
+        }
+        return {
+          url,
+          alt: toSafeText(source.alt || 'Generated image', 220)
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 4);
+
+    if (!content && !attachments.length && !generatedImages.length) {
+      return null;
+    }
 
     return {
       id,
@@ -358,6 +408,8 @@ export function createPanelStorageService({
         })
         .filter(Boolean)
         .slice(0, 8),
+      attachments,
+      generated_images: generatedImages,
       createdAt: Number.isFinite(createdAt) ? createdAt : Date.now()
     };
   }

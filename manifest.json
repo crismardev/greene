@@ -8,7 +8,9 @@
     "tabs",
     "history",
     "sidePanel",
-    "scripting"
+    "scripting",
+    "geolocation",
+    "audioCapture"
   ],
   "host_permissions": [
     "<all_urls>",

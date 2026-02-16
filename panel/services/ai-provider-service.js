@@ -7,6 +7,7 @@ export const AI_PROVIDER_IDS = Object.freeze({
 });
 
 const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
+const OPENAI_IMAGES_ENDPOINT = 'https://api.openai.com/v1/images/generations';
 const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -528,6 +529,92 @@ function resolveOpenAiCompatibleEndpoint(baseUrl) {
   return `${clean}/v1/chat/completions`;
 }
 
+function resolveOpenAiCompatibleImageEndpoint(baseUrl) {
+  const raw = String(baseUrl || '').trim();
+  if (!raw) {
+    throw new Error('Debes configurar una Base URL para provider OpenAI Compatible.');
+  }
+
+  if (!/^https?:\/\//i.test(raw)) {
+    throw new Error('La Base URL debe iniciar con http:// o https://.');
+  }
+
+  const clean = raw.replace(/\/+$/, '');
+
+  if (/\/images\/generations$/i.test(clean)) {
+    return clean;
+  }
+
+  if (/\/v1$/i.test(clean)) {
+    return `${clean}/images/generations`;
+  }
+
+  return `${clean}/v1/images/generations`;
+}
+
+async function generateOpenAiLikeImage({
+  endpoint,
+  model,
+  apiKey,
+  prompt,
+  providerLabel,
+  size = '1024x1024'
+}) {
+  const safePrompt = String(prompt || '').trim();
+  if (!safePrompt) {
+    throw new Error('Prompt vacio para generar imagen.');
+  }
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      prompt: safePrompt,
+      size,
+      n: 1
+    })
+  });
+
+  const payload = await parseJsonSafe(response);
+  if (!response.ok) {
+    throw new Error(`${providerLabel} image error: ${extractOpenAiError(payload, response.status)}`);
+  }
+
+  const first = Array.isArray(payload?.data) ? payload.data[0] : null;
+  const imageUrl = String(first?.url || '').trim();
+  const b64 = String(first?.b64_json || '').trim();
+  const revisedPrompt = String(first?.revised_prompt || '').trim();
+
+  if (!imageUrl && !b64) {
+    throw new Error(`${providerLabel} no devolvio imagen.`);
+  }
+
+  return {
+    imageUrl,
+    imageDataUrl: b64 ? `data:image/png;base64,${b64}` : '',
+    revisedPrompt
+  };
+}
+
+function resolveImageModelName(model) {
+  const token = String(model || '')
+    .trim()
+    .toLowerCase();
+  if (!token) {
+    return 'gpt-image-1';
+  }
+
+  if (token.includes('image') || token.includes('dall-e') || token.includes('dalle')) {
+    return String(model || '').trim();
+  }
+
+  return 'gpt-image-1';
+}
+
 function buildModelProfileId() {
   return `model-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
@@ -697,6 +784,37 @@ export function createAiProviderService({
     return ollamaService.fetchAvailableModelsFromOllama(activeModel || defaultOllamaModel);
   }
 
+  async function generateImageWithProfile({ profile, prompt, apiKey, size = '1024x1024' }) {
+    const safeProfile = normalizeProfile(profile);
+    if (!apiKey) {
+      throw new Error(`Falta API key para ${getProviderMetadata(safeProfile.provider).label}.`);
+    }
+
+    if (safeProfile.provider === AI_PROVIDER_IDS.OPENAI) {
+      return generateOpenAiLikeImage({
+        endpoint: OPENAI_IMAGES_ENDPOINT,
+        model: resolveImageModelName(safeProfile.model),
+        apiKey,
+        prompt,
+        providerLabel: 'OpenAI',
+        size
+      });
+    }
+
+    if (safeProfile.provider === AI_PROVIDER_IDS.OPENAI_COMPATIBLE) {
+      return generateOpenAiLikeImage({
+        endpoint: resolveOpenAiCompatibleImageEndpoint(safeProfile.baseUrl),
+        model: resolveImageModelName(safeProfile.model),
+        apiKey,
+        prompt,
+        providerLabel: 'OpenAI Compatible',
+        size
+      });
+    }
+
+    throw new Error('Generacion de imagen soportada solo en OpenAI/OpenAI-compatible.');
+  }
+
   return {
     AI_PROVIDER_IDS,
     buildModelProfileId,
@@ -706,6 +824,7 @@ export function createAiProviderService({
     normalizeProfile,
     requiresApiKey,
     streamWithProfile,
+    generateImageWithProfile,
     warmupProfile,
     fetchLocalModels
   };

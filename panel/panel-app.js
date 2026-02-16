@@ -48,7 +48,8 @@ export function initPanelApp() {
     AI_MODELS: 'ai_models',
     CRM_ERP_DATABASE: 'crm_erp_database',
     TABS: 'tabs',
-    SYSTEM_VARIABLES: 'system_variables'
+    SYSTEM_VARIABLES: 'system_variables',
+    APPS_INTEGRATIONS: 'apps_integrations'
   });
   const SETTINGS_PAGE_TITLES = Object.freeze({
     [SETTINGS_PAGES.HOME]: 'Settings',
@@ -57,7 +58,8 @@ export function initPanelApp() {
     [SETTINGS_PAGES.AI_MODELS]: 'AI Models',
     [SETTINGS_PAGES.CRM_ERP_DATABASE]: 'CRM/ERP Database',
     [SETTINGS_PAGES.TABS]: 'Tabs',
-    [SETTINGS_PAGES.SYSTEM_VARIABLES]: 'System Variables'
+    [SETTINGS_PAGES.SYSTEM_VARIABLES]: 'System Variables',
+    [SETTINGS_PAGES.APPS_INTEGRATIONS]: 'Apps & Integrations'
   });
   const PIN_MODAL_MODES = Object.freeze({
     SETUP: 'setup',
@@ -72,7 +74,10 @@ export function initPanelApp() {
     tools: 2,
     settings: 3
   });
+  const STAGE_SCREEN_COUNT = Object.keys(SCREEN_INDEX).length;
+  const BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE = 'GREENSTUDIO_LOCATION_CONTEXT_UPDATE';
   const DEFAULT_CHAT_SYSTEM_PROMPT = buildDefaultChatSystemPrompt(DEFAULT_ASSISTANT_LANGUAGE);
+  const DEFAULT_ASSISTANT_DISPLAY_NAME = 'Grenne';
   const DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT = [
     'Eres un asistente para redactar emails claros y accionables.',
     'Siempre responde con un correo listo para enviar en formato:',
@@ -90,6 +95,10 @@ export function initPanelApp() {
     write_email: {
       label: 'Write an email',
       systemPrompt: DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT
+    },
+    create_image: {
+      label: 'Create image',
+      systemPrompt: 'Eres un asistente para generar imagenes con prompts claros.'
     }
   });
 
@@ -143,6 +152,8 @@ export function initPanelApp() {
   const MAX_CHAT_HISTORY_MESSAGES = 160;
   const MAX_CHAT_HISTORY_STORAGE_LIMIT = 600;
   const MAX_LOCAL_TOOL_CALLS = 3;
+  const MAX_CHAT_ATTACHMENTS_PER_TURN = 8;
+  const MAX_CHAT_ATTACHMENT_TEXT_CHARS = 3200;
   const MAX_IMAGE_FILES = 10;
   const MAX_TABS_FOR_AI_SUMMARY = 20;
   const TAB_SUMMARY_MAX_CHARS = 160;
@@ -254,7 +265,33 @@ export function initPanelApp() {
     ];
   }
 
+  function createDefaultIntegrationsConfig() {
+    return {
+      smtp: {
+        relayUrl: '',
+        host: '',
+        port: 587,
+        secure: 'auto',
+        username: '',
+        password: '',
+        from: ''
+      },
+      maps: {
+        apiKey: '',
+        nearbyType: 'restaurant',
+        lastKnownLocation: null,
+        nearbyPlaces: []
+      },
+      permissions: {
+        microphone: 'prompt',
+        location: 'prompt'
+      },
+      customTools: []
+    };
+  }
+
   const PANEL_SETTINGS_DEFAULTS = Object.freeze({
+    assistantName: DEFAULT_ASSISTANT_DISPLAY_NAME,
     displayName: '',
     birthday: '',
     language: DEFAULT_ASSISTANT_LANGUAGE,
@@ -268,7 +305,8 @@ export function initPanelApp() {
     crmErpDatabaseUrl: '',
     crmErpDatabaseSchemaSnapshot: null,
     crmErpDatabaseMeProfile: null,
-    whatsappConversationPrompts: {}
+    whatsappConversationPrompts: {},
+    integrations: createDefaultIntegrationsConfig()
   });
 
   const ALLOWED_IMAGE_TYPES = new Set([
@@ -282,6 +320,8 @@ export function initPanelApp() {
   const app = document.getElementById('app');
   const stageTrack = document.getElementById('stageTrack');
   const brandHomeBtn = document.getElementById('brandHomeBtn');
+  const brandRoleLabel = document.getElementById('brandRoleLabel');
+  const brandNameText = document.getElementById('brandNameText');
   const toolsScreen = document.getElementById('toolsScreen');
   const openToolsBtn = document.getElementById('openToolsBtn');
   const openSettingsBtn = document.getElementById('openSettingsBtn');
@@ -305,6 +345,8 @@ export function initPanelApp() {
   const chatBody = document.getElementById('chatBody');
   const chatMessagesEl = document.getElementById('chatMessages');
   const chatInput = document.getElementById('chatInput');
+  const chatAttachmentInput = document.getElementById('chatAttachmentInput');
+  const chatAttachmentsBar = document.getElementById('chatAttachmentsBar');
   const chatSendBtn = document.getElementById('chatSendBtn');
   const chatStatus = document.getElementById('chatStatus');
   const chatResetBtn = document.getElementById('chatResetBtn');
@@ -340,6 +382,7 @@ export function initPanelApp() {
   const retoolToggle = document.getElementById('retoolToggle');
   const applyRetoolBtn = document.getElementById('applyRetoolBtn');
   const retoolStatus = document.getElementById('retoolStatus');
+  const onboardingAssistantNameInput = document.getElementById('onboardingAssistantNameInput');
   const onboardingNameInput = document.getElementById('onboardingNameInput');
   const onboardingContinueBtn = document.getElementById('onboardingContinueBtn');
   const onboardingStatus = document.getElementById('onboardingStatus');
@@ -377,6 +420,22 @@ export function initPanelApp() {
   const settingsCrmErpMeClearBtn = document.getElementById('settingsCrmErpMeClearBtn');
   const settingsCrmErpMeStatus = document.getElementById('settingsCrmErpMeStatus');
   const settingsCrmErpDbSchemaSummary = document.getElementById('settingsCrmErpDbSchemaSummary');
+  const settingsIntegrationsSaveBtn = document.getElementById('settingsIntegrationsSaveBtn');
+  const settingsIntegrationsStatus = document.getElementById('settingsIntegrationsStatus');
+  const settingsSmtpRelayUrlInput = document.getElementById('settingsSmtpRelayUrlInput');
+  const settingsSmtpHostInput = document.getElementById('settingsSmtpHostInput');
+  const settingsSmtpPortInput = document.getElementById('settingsSmtpPortInput');
+  const settingsSmtpSecureSelect = document.getElementById('settingsSmtpSecureSelect');
+  const settingsSmtpUsernameInput = document.getElementById('settingsSmtpUsernameInput');
+  const settingsSmtpPasswordInput = document.getElementById('settingsSmtpPasswordInput');
+  const settingsSmtpFromInput = document.getElementById('settingsSmtpFromInput');
+  const settingsMapsApiKeyInput = document.getElementById('settingsMapsApiKeyInput');
+  const settingsMapsNearbyTypeSelect = document.getElementById('settingsMapsNearbyTypeSelect');
+  const settingsPermissionMicBtn = document.getElementById('settingsPermissionMicBtn');
+  const settingsPermissionLocationBtn = document.getElementById('settingsPermissionLocationBtn');
+  const settingsMapsNearbyRefreshBtn = document.getElementById('settingsMapsNearbyRefreshBtn');
+  const settingsLocationMeta = document.getElementById('settingsLocationMeta');
+  const settingsCustomToolsSchemaInput = document.getElementById('settingsCustomToolsSchemaInput');
   const tabsContextJson = document.getElementById('tabsContextJson');
   const systemVariablesList = document.getElementById('systemVariablesList');
   const systemVariablesResetBtn = document.getElementById('systemVariablesResetBtn');
@@ -446,6 +505,7 @@ export function initPanelApp() {
 
   let chatHistory = [];
   let selectedChatTool = DEFAULT_CHAT_TOOL;
+  let pendingConversationAttachments = [];
   let panelSettings = {
     ...PANEL_SETTINGS_DEFAULTS,
     aiModelProfiles: createPreloadedModelProfiles()
@@ -463,7 +523,7 @@ export function initPanelApp() {
   let stageResizeObserver = null;
   let settingsScreenController = null;
   let settingsScreenState = null;
-  let tabContextSnapshot = { activeTabId: -1, tabs: [], history: [], updatedAt: Date.now(), reason: 'init' };
+  let tabContextSnapshot = { activeTabId: -1, tabs: [], history: [], runtimeContext: {}, updatedAt: Date.now(), reason: 'init' };
   let tabSummaryByKey = new Map();
   let tabSummaryQueue = [];
   let tabSummaryQueueRunning = false;
@@ -496,6 +556,8 @@ export function initPanelApp() {
   let crmMeSettingsAutosaveToken = 0;
   let systemVariablesAutosaveTimer = 0;
   let systemVariablesAutosaveToken = 0;
+  let integrationsAutosaveTimer = 0;
+  let integrationsAutosaveToken = 0;
   let dynamicContextSignals = {
     phones: [],
     emails: []
@@ -1111,6 +1173,140 @@ export function initPanelApp() {
     return normalized;
   }
 
+  function normalizeIntegrationPermissionState(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    if (token === 'granted' || token === 'denied' || token === 'prompt') {
+      return token;
+    }
+    return 'prompt';
+  }
+
+  function normalizeCustomIntegrationToolEntry(rawTool) {
+    const source = rawTool && typeof rawTool === 'object' ? rawTool : {};
+    const name = String(source.name || source.id || '')
+      .trim()
+      .replace(/\s+/g, '_')
+      .slice(0, 80);
+    const endpoint = String(source.endpoint || source.url || '').trim().slice(0, 500);
+    if (!name || !endpoint) {
+      return null;
+    }
+
+    const methodRaw = String(source.method || 'POST').trim().toUpperCase();
+    const method = methodRaw === 'GET' || methodRaw === 'PUT' || methodRaw === 'PATCH' || methodRaw === 'DELETE' ? methodRaw : 'POST';
+    const description = String(source.description || '')
+      .trim()
+      .slice(0, 320);
+    const headers =
+      source.headers && typeof source.headers === 'object' && !Array.isArray(source.headers) ? source.headers : {};
+    const inputSchema =
+      source.input_schema && typeof source.input_schema === 'object' && !Array.isArray(source.input_schema)
+        ? source.input_schema
+        : source.inputSchema && typeof source.inputSchema === 'object' && !Array.isArray(source.inputSchema)
+          ? source.inputSchema
+          : {
+              type: 'object',
+              properties: {}
+            };
+
+    return {
+      name,
+      description,
+      endpoint,
+      method,
+      headers,
+      input_schema: inputSchema
+    };
+  }
+
+  function normalizeCustomIntegrationTools(rawTools) {
+    const source = Array.isArray(rawTools) ? rawTools : [];
+    const normalized = [];
+    const seen = new Set();
+
+    for (const item of source) {
+      const safeTool = normalizeCustomIntegrationToolEntry(item);
+      if (!safeTool || seen.has(safeTool.name)) {
+        continue;
+      }
+
+      seen.add(safeTool.name);
+      normalized.push(safeTool);
+      if (normalized.length >= 80) {
+        break;
+      }
+    }
+
+    return normalized;
+  }
+
+  function normalizeIntegrationsConfig(rawConfig) {
+    const defaults = createDefaultIntegrationsConfig();
+    const source = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+    const rawSmtp = source.smtp && typeof source.smtp === 'object' ? source.smtp : {};
+    const rawMaps = source.maps && typeof source.maps === 'object' ? source.maps : {};
+    const rawPermissions = source.permissions && typeof source.permissions === 'object' ? source.permissions : {};
+    const rawLocation = rawMaps.lastKnownLocation && typeof rawMaps.lastKnownLocation === 'object' ? rawMaps.lastKnownLocation : null;
+    const rawNearbyPlaces = Array.isArray(rawMaps.nearbyPlaces) ? rawMaps.nearbyPlaces : [];
+
+    return {
+      smtp: {
+        relayUrl: String(rawSmtp.relayUrl || '').trim().slice(0, 500),
+        host: String(rawSmtp.host || '').trim().slice(0, 200),
+        port: Math.max(1, Math.min(65535, Number(rawSmtp.port) || defaults.smtp.port)),
+        secure: ['auto', 'true', 'false'].includes(String(rawSmtp.secure || '').trim()) ? String(rawSmtp.secure || '').trim() : 'auto',
+        username: String(rawSmtp.username || '').trim().slice(0, 220),
+        password: String(rawSmtp.password || '').trim().slice(0, 220),
+        from: String(rawSmtp.from || '').trim().slice(0, 220)
+      },
+      maps: {
+        apiKey: String(rawMaps.apiKey || '').trim().slice(0, 240),
+        nearbyType: String(rawMaps.nearbyType || defaults.maps.nearbyType)
+          .trim()
+          .toLowerCase()
+          .slice(0, 60),
+        lastKnownLocation:
+          rawLocation && Number.isFinite(Number(rawLocation.latitude)) && Number.isFinite(Number(rawLocation.longitude))
+            ? {
+                latitude: Number(rawLocation.latitude),
+                longitude: Number(rawLocation.longitude),
+                accuracy: Math.max(0, Number(rawLocation.accuracy) || 0),
+                capturedAt: Math.max(0, Number(rawLocation.capturedAt) || Date.now())
+              }
+            : null,
+        nearbyPlaces: rawNearbyPlaces
+          .map((item) => {
+            const sourceItem = item && typeof item === 'object' ? item : {};
+            const name = String(sourceItem.name || '').trim().slice(0, 140);
+            const address = String(sourceItem.address || '').trim().slice(0, 220);
+            if (!name) {
+              return null;
+            }
+            return {
+              name,
+              address,
+              rating: Number.isFinite(Number(sourceItem.rating)) ? Number(sourceItem.rating) : 0,
+              userRatingCount: Math.max(0, Number(sourceItem.userRatingCount) || 0),
+              primaryType: String(sourceItem.primaryType || '').trim().slice(0, 80)
+            };
+          })
+          .filter(Boolean)
+          .slice(0, 24)
+      },
+      permissions: {
+        microphone: normalizeIntegrationPermissionState(rawPermissions.microphone),
+        location: normalizeIntegrationPermissionState(rawPermissions.location)
+      },
+      customTools: normalizeCustomIntegrationTools(source.customTools)
+    };
+  }
+
+  function getIntegrationsConfig() {
+    return normalizeIntegrationsConfig(panelSettings.integrations);
+  }
+
   function isCrmErpMeProfileComplete(profile) {
     const safe = profile && typeof profile === 'object' ? profile : null;
     return Boolean(
@@ -1387,6 +1583,454 @@ export function initPanelApp() {
     renderCrmErpMeProfileSettings({
       syncInput: options.syncProfileInput !== false
     });
+  }
+
+  function buildLocationMetaText(location, nearbyPlaces = []) {
+    const safeLocation = location && typeof location === 'object' ? location : null;
+    if (!safeLocation) {
+      return 'Ubicacion: no disponible.';
+    }
+
+    const latitude = Number(safeLocation.latitude);
+    const longitude = Number(safeLocation.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return 'Ubicacion: no disponible.';
+    }
+
+    const accuracy = Math.max(0, Number(safeLocation.accuracy) || 0);
+    const capturedAt = formatDateTime(Number(safeLocation.capturedAt) || 0);
+    const places = (Array.isArray(nearbyPlaces) ? nearbyPlaces : [])
+      .slice(0, 4)
+      .map((item) => String(item?.name || '').trim())
+      .filter(Boolean);
+    const placesToken = places.length ? ` | nearby: ${places.join(', ')}` : '';
+    const accuracyToken = accuracy > 0 ? ` ±${Math.round(accuracy)}m` : '';
+    const timeToken = capturedAt ? ` @ ${capturedAt}` : '';
+
+    return `Ubicacion: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}${accuracyToken}${timeToken}${placesToken}`;
+  }
+
+  function buildRuntimeLocationContextPayload(integrations, options = {}) {
+    const safeIntegrations = normalizeIntegrationsConfig(integrations);
+    const maps = safeIntegrations.maps || {};
+    const permissions = safeIntegrations.permissions || {};
+    const storedLocation = maps.lastKnownLocation && typeof maps.lastKnownLocation === 'object' ? maps.lastKnownLocation : null;
+    const latitude = Number(storedLocation?.latitude);
+    const longitude = Number(storedLocation?.longitude);
+    const location =
+      Number.isFinite(latitude) && Number.isFinite(longitude)
+        ? {
+            latitude,
+            longitude,
+            accuracy: Math.max(0, Number(storedLocation?.accuracy) || 0),
+            capturedAt: Math.max(0, Number(storedLocation?.capturedAt) || 0)
+          }
+        : null;
+    const nearbyPlaces = (Array.isArray(maps.nearbyPlaces) ? maps.nearbyPlaces : [])
+      .slice(0, 10)
+      .map((item) => {
+        const entry = item && typeof item === 'object' ? item : {};
+        const name = String(entry.name || '').trim().slice(0, 140);
+        if (!name) {
+          return null;
+        }
+        return {
+          name,
+          address: String(entry.address || '').trim().slice(0, 220),
+          rating: Number.isFinite(Number(entry.rating)) ? Number(entry.rating) : 0,
+          userRatingCount: Math.max(0, Number(entry.userRatingCount) || 0),
+          primaryType: String(entry.primaryType || '').trim().slice(0, 80)
+        };
+      })
+      .filter(Boolean);
+
+    return {
+      reason: String(options.reason || 'panel_sync').trim().slice(0, 80),
+      updatedAt: Date.now(),
+      permissions: {
+        microphone: normalizeIntegrationPermissionState(permissions.microphone),
+        location: normalizeIntegrationPermissionState(permissions.location)
+      },
+      maps: {
+        hasApiKey: Boolean(String(maps.apiKey || '').trim()),
+        nearbyType: String(maps.nearbyType || 'restaurant').trim().slice(0, 40)
+      },
+      location,
+      nearbyPlaces
+    };
+  }
+
+  function syncLocationContextToBackground(integrations, options = {}) {
+    if (!chrome?.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+      return false;
+    }
+
+    const payload = buildRuntimeLocationContextPayload(integrations, options);
+    try {
+      chrome.runtime.sendMessage(
+        {
+          type: BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE,
+          payload
+        },
+        () => {
+          void chrome.runtime.lastError;
+        }
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function parseCustomToolsSchemaText(rawText) {
+    const source = String(rawText || '').trim();
+    if (!source) {
+      return {
+        ok: true,
+        tools: []
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(source);
+      if (!Array.isArray(parsed)) {
+        return {
+          ok: false,
+          error: 'El schema de tools debe ser un array JSON.'
+        };
+      }
+
+      return {
+        ok: true,
+        tools: normalizeCustomIntegrationTools(parsed)
+      };
+    } catch (_) {
+      return {
+        ok: false,
+        error: 'JSON invalido en Custom Tools Schema.'
+      };
+    }
+  }
+
+  function buildCustomToolsSchemaText(tools) {
+    const safeTools = normalizeCustomIntegrationTools(tools);
+    if (!safeTools.length) {
+      return '[]';
+    }
+
+    return JSON.stringify(safeTools, null, 2);
+  }
+
+  function renderAppsIntegrationsSettings(options = {}) {
+    const syncInput = options.syncInput !== false;
+    const integrations = getIntegrationsConfig();
+    const smtp = integrations.smtp || {};
+    const maps = integrations.maps || {};
+
+    if (syncInput) {
+      if (settingsSmtpRelayUrlInput) {
+        settingsSmtpRelayUrlInput.value = String(smtp.relayUrl || '');
+      }
+      if (settingsSmtpHostInput) {
+        settingsSmtpHostInput.value = String(smtp.host || '');
+      }
+      if (settingsSmtpPortInput) {
+        settingsSmtpPortInput.value = String(smtp.port || 587);
+      }
+      if (settingsSmtpSecureSelect) {
+        settingsSmtpSecureSelect.value = ['auto', 'true', 'false'].includes(String(smtp.secure || ''))
+          ? String(smtp.secure || 'auto')
+          : 'auto';
+      }
+      if (settingsSmtpUsernameInput) {
+        settingsSmtpUsernameInput.value = String(smtp.username || '');
+      }
+      if (settingsSmtpPasswordInput) {
+        settingsSmtpPasswordInput.value = String(smtp.password || '');
+      }
+      if (settingsSmtpFromInput) {
+        settingsSmtpFromInput.value = String(smtp.from || '');
+      }
+      if (settingsMapsApiKeyInput) {
+        settingsMapsApiKeyInput.value = String(maps.apiKey || '');
+      }
+      if (settingsMapsNearbyTypeSelect) {
+        settingsMapsNearbyTypeSelect.value = String(maps.nearbyType || 'restaurant') || 'restaurant';
+      }
+      if (settingsCustomToolsSchemaInput) {
+        settingsCustomToolsSchemaInput.value = buildCustomToolsSchemaText(integrations.customTools);
+      }
+    }
+
+    if (settingsLocationMeta) {
+      settingsLocationMeta.textContent = buildLocationMetaText(maps.lastKnownLocation, maps.nearbyPlaces);
+    }
+  }
+
+  function collectAppsIntegrationsSettingsFromScreen() {
+    const parsedTools = parseCustomToolsSchemaText(settingsCustomToolsSchemaInput?.value || '');
+    if (!parsedTools.ok) {
+      return {
+        ok: false,
+        error: parsedTools.error || 'Custom tools invalidos.'
+      };
+    }
+
+    const nextIntegrations = normalizeIntegrationsConfig({
+      ...getIntegrationsConfig(),
+      smtp: {
+        relayUrl: String(settingsSmtpRelayUrlInput?.value || ''),
+        host: String(settingsSmtpHostInput?.value || ''),
+        port: Number(settingsSmtpPortInput?.value || 587),
+        secure: String(settingsSmtpSecureSelect?.value || 'auto'),
+        username: String(settingsSmtpUsernameInput?.value || ''),
+        password: String(settingsSmtpPasswordInput?.value || ''),
+        from: String(settingsSmtpFromInput?.value || '')
+      },
+      maps: {
+        ...getIntegrationsConfig().maps,
+        apiKey: String(settingsMapsApiKeyInput?.value || ''),
+        nearbyType: String(settingsMapsNearbyTypeSelect?.value || 'restaurant')
+      },
+      customTools: parsedTools.tools
+    });
+
+    return {
+      ok: true,
+      integrations: nextIntegrations
+    };
+  }
+
+  async function saveAppsIntegrationsFromScreen(options = {}) {
+    const autosave = options.autosave === true;
+    const parsed = collectAppsIntegrationsSettingsFromScreen();
+    if (!parsed.ok) {
+      setStatus(settingsIntegrationsStatus, parsed.error || 'No se pudieron validar integraciones.', true);
+      return false;
+    }
+
+    const ok = await savePanelSettings({
+      integrations: parsed.integrations
+    });
+    if (!ok) {
+      setStatus(settingsIntegrationsStatus, 'No se pudieron guardar integraciones.', true);
+      return false;
+    }
+
+    if (!autosave) {
+      renderAppsIntegrationsSettings({ syncInput: false });
+    }
+    setStatus(settingsIntegrationsStatus, autosave ? 'Integraciones guardadas (auto).' : 'Integraciones guardadas.');
+    return true;
+  }
+
+  async function fetchNearbyPlacesForLocation(location, options = {}) {
+    const safeLocation = location && typeof location === 'object' ? location : null;
+    const latitude = Number(safeLocation?.latitude);
+    const longitude = Number(safeLocation?.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      throw new Error('No hay coordenadas validas para buscar lugares cercanos.');
+    }
+
+    const integrations = getIntegrationsConfig();
+    const mapsApiKey = String(integrations.maps?.apiKey || '').trim();
+    if (!mapsApiKey) {
+      throw new Error('Configura Maps API Key para consultar lugares cercanos.');
+    }
+
+    const nearbyType = String(options.nearbyType || integrations.maps?.nearbyType || 'restaurant')
+      .trim()
+      .toLowerCase();
+    const radiusMeters = Math.max(100, Math.min(50000, Number(options.radiusMeters) || 1500));
+    const maxResultCount = Math.max(1, Math.min(20, Number(options.maxResultCount) || 6));
+
+    const response = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': mapsApiKey,
+        'X-Goog-FieldMask':
+          'places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType'
+      },
+      body: JSON.stringify({
+        includedTypes: [nearbyType],
+        maxResultCount,
+        locationRestriction: {
+          circle: {
+            center: {
+              latitude,
+              longitude
+            },
+            radius: radiusMeters
+          }
+        }
+      })
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const errorText = String(payload?.error?.message || payload?.message || `HTTP ${response.status}`).trim();
+      throw new Error(`Maps error: ${errorText}`);
+    }
+
+    const places = (Array.isArray(payload?.places) ? payload.places : [])
+      .map((item) => {
+        const name = String(item?.displayName?.text || '').trim().slice(0, 140);
+        if (!name) {
+          return null;
+        }
+        return {
+          name,
+          address: String(item?.formattedAddress || '').trim().slice(0, 220),
+          rating: Number.isFinite(Number(item?.rating)) ? Number(item.rating) : 0,
+          userRatingCount: Math.max(0, Number(item?.userRatingCount) || 0),
+          primaryType: String(item?.primaryType || '').trim().slice(0, 80)
+        };
+      })
+      .filter(Boolean)
+      .slice(0, maxResultCount);
+
+    return places;
+  }
+
+  async function requestLocationPermissionAndSync(options = {}) {
+    if (!navigator.geolocation) {
+      setStatus(settingsIntegrationsStatus, 'Geolocalizacion no soportada en este navegador.', true);
+      return false;
+    }
+
+    const position = await new Promise((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(
+        (value) => resolve(value),
+        (error) => reject(error),
+        {
+          enableHighAccuracy: true,
+          maximumAge: 30000,
+          timeout: 12000
+        }
+      );
+    });
+
+    const latitude = Number(position?.coords?.latitude);
+    const longitude = Number(position?.coords?.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      throw new Error('No se pudo obtener coordenadas validas.');
+    }
+
+    const nextLocation = {
+      latitude,
+      longitude,
+      accuracy: Math.max(0, Number(position?.coords?.accuracy) || 0),
+      capturedAt: Date.now()
+    };
+    const integrations = getIntegrationsConfig();
+    let nearbyPlaces = integrations.maps?.nearbyPlaces || [];
+
+    if (options.refreshNearby === true) {
+      try {
+        nearbyPlaces = await fetchNearbyPlacesForLocation(nextLocation, {
+          nearbyType: integrations.maps?.nearbyType || 'restaurant'
+        });
+      } catch (error) {
+        setStatus(settingsIntegrationsStatus, error instanceof Error ? error.message : 'No se pudo actualizar nearby places.', true);
+      }
+    }
+
+    const nextIntegrations = normalizeIntegrationsConfig({
+      ...integrations,
+      maps: {
+        ...integrations.maps,
+        lastKnownLocation: nextLocation,
+        nearbyPlaces
+      },
+      permissions: {
+        ...integrations.permissions,
+        location: 'granted'
+      }
+    });
+
+    const ok = await savePanelSettings({ integrations: nextIntegrations });
+    if (!ok) {
+      throw new Error('No se pudo guardar ubicacion.');
+    }
+
+    renderAppsIntegrationsSettings({ syncInput: false });
+    setStatus(settingsIntegrationsStatus, 'Ubicacion actualizada.');
+    return true;
+  }
+
+  async function requestMicrophonePermissionAndSync() {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      setStatus(settingsIntegrationsStatus, 'Microfono no soportado en este navegador.', true);
+      return false;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+      const tracks = Array.isArray(stream?.getTracks?.()) ? stream.getTracks() : [];
+      for (const track of tracks) {
+        track.stop();
+      }
+    } catch (_) {
+      // Ignore cleanup issues.
+    }
+
+    const integrations = getIntegrationsConfig();
+    const nextIntegrations = normalizeIntegrationsConfig({
+      ...integrations,
+      permissions: {
+        ...integrations.permissions,
+        microphone: 'granted'
+      }
+    });
+
+    const ok = await savePanelSettings({ integrations: nextIntegrations });
+    if (!ok) {
+      throw new Error('No se pudo guardar estado de microfono.');
+    }
+
+    renderAppsIntegrationsSettings({ syncInput: false });
+    setStatus(settingsIntegrationsStatus, 'Permiso de microfono concedido.');
+    return true;
+  }
+
+  async function refreshNearbyPlacesFromStoredLocation() {
+    const integrations = getIntegrationsConfig();
+    const location = resolveLocationFromArgs({});
+    if (!location) {
+      throw new Error('No hay ubicacion guardada. Usa "Pedir ubicacion".');
+    }
+
+    const places = await fetchNearbyPlacesForLocation(location, {
+      nearbyType: integrations.maps?.nearbyType || 'restaurant'
+    });
+    const nextIntegrations = normalizeIntegrationsConfig({
+      ...integrations,
+      maps: {
+        ...integrations.maps,
+        lastKnownLocation: {
+          ...(integrations.maps?.lastKnownLocation || {}),
+          latitude: Number(location.latitude),
+          longitude: Number(location.longitude),
+          capturedAt: Date.now()
+        },
+        nearbyPlaces: places
+      }
+    });
+
+    const ok = await savePanelSettings({ integrations: nextIntegrations });
+    if (!ok) {
+      throw new Error('No se pudieron guardar nearby places.');
+    }
+
+    renderAppsIntegrationsSettings({ syncInput: false });
+    return places;
   }
 
   function getWhatsappPromptTargetLabel(target) {
@@ -2392,6 +3036,7 @@ export function initPanelApp() {
 
     if (stageTrack) {
       stageTrack.style.setProperty('--stage-index', String(SCREEN_INDEX[safeScreen]));
+      stageTrack.style.setProperty('--stage-count', String(STAGE_SCREEN_COUNT));
     }
 
     if (safeScreen !== 'tools') {
@@ -2505,6 +3150,7 @@ export function initPanelApp() {
     setSettingsPage(SETTINGS_PAGES.HOME);
     renderAiModelsSettings();
     renderCrmErpDatabaseSettings({ syncInput: true });
+    renderAppsIntegrationsSettings({ syncInput: true });
     renderSystemVariables();
     hydrateWhatsappPromptEditorFromActiveChat({
       keepCurrentTarget: false,
@@ -2569,6 +3215,7 @@ export function initPanelApp() {
     next.aiModelProfiles = normalizedProfiles;
     next.primaryModelProfileId = resolvedPrimary;
     next.defaultModel = resolvedPrimaryProfile ? resolvedPrimaryProfile.model : legacyDefaultModel;
+    next.assistantName = normalizeAssistantDisplayName(next.assistantName) || DEFAULT_ASSISTANT_DISPLAY_NAME;
     next.securityConfig = pinCryptoService.isConfigured(next.securityConfig) ? next.securityConfig : null;
     next.systemVariables = normalizeSystemVariables(next.systemVariables);
     next.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(next.crmErpDatabaseUrl || '');
@@ -2578,6 +3225,7 @@ export function initPanelApp() {
       next.crmErpDatabaseSchemaSnapshot
     );
     next.whatsappConversationPrompts = normalizeWhatsappConversationPrompts(next.whatsappConversationPrompts);
+    next.integrations = normalizeIntegrationsConfig(next.integrations);
     return next;
   }
 
@@ -2634,6 +3282,10 @@ export function initPanelApp() {
 
     if (safePage === SETTINGS_PAGES.SYSTEM_VARIABLES) {
       renderSystemVariables();
+    }
+
+    if (safePage === SETTINGS_PAGES.APPS_INTEGRATIONS) {
+      renderAppsIntegrationsSettings({ syncInput: true });
     }
 
     if (safePage === SETTINGS_PAGES.ASSISTANT) {
@@ -3569,6 +4221,8 @@ export function initPanelApp() {
     syncModelSelectors();
     renderPinStatus();
     renderCrmErpDatabaseSettings({ syncInput: true });
+    renderAppsIntegrationsSettings({ syncInput: true });
+    renderAssistantBranding();
   }
 
   function populateSettingsForm() {
@@ -3576,8 +4230,11 @@ export function initPanelApp() {
     syncModelSelectors();
     renderPinStatus();
     renderCrmErpDatabaseSettings({ syncInput: true });
+    renderAppsIntegrationsSettings({ syncInput: true });
     setStatus(settingsCrmErpDbStatus, '');
     setStatus(settingsCrmErpMeStatus, '');
+    setStatus(settingsIntegrationsStatus, '');
+    renderAssistantBranding();
   }
 
   function isOnboardingComplete() {
@@ -3601,7 +4258,7 @@ export function initPanelApp() {
       return;
     }
 
-    onboardingNameInput?.focus();
+    onboardingAssistantNameInput?.focus();
   }
 
   async function refreshLocalModels(options = {}) {
@@ -3706,7 +4363,32 @@ export function initPanelApp() {
   }
 
   async function saveChatHistory() {
-    return storageService.saveChatHistory(chatHistory);
+    const payload = chatHistory.map((item) => {
+      const source = item && typeof item === 'object' ? item : {};
+      const generatedImages = Array.isArray(source.generated_images)
+        ? source.generated_images
+            .map((image) => {
+              const imageUrl = String(image?.url || '').trim();
+              if (!imageUrl) {
+                return null;
+              }
+              return {
+                url: imageUrl,
+                alt: String(image?.alt || '').trim().slice(0, 220)
+              };
+            })
+            .filter(Boolean)
+            .slice(0, 4)
+        : [];
+
+      return {
+        ...source,
+        pending: false,
+        generated_images: generatedImages
+      };
+    });
+
+    return storageService.saveChatHistory(payload);
   }
 
   async function syncWhatsappChatContext(tabContext, options = {}) {
@@ -3755,6 +4437,7 @@ export function initPanelApp() {
 
   async function savePanelSettings(nextSettings) {
     const patch = nextSettings && typeof nextSettings === 'object' ? nextSettings : {};
+    const previousIntegrationsToken = JSON.stringify(normalizeIntegrationsConfig(panelSettings.integrations));
     if (settingsScreenState) {
       settingsScreenState.panelSettings = { ...settingsScreenState.panelSettings, ...patch };
       panelSettings = { ...settingsScreenState.panelSettings };
@@ -3766,6 +4449,7 @@ export function initPanelApp() {
       panelSettings.systemPrompt = buildDefaultChatSystemPrompt(panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE);
     }
 
+    panelSettings.assistantName = normalizeAssistantDisplayName(panelSettings.assistantName) || DEFAULT_ASSISTANT_DISPLAY_NAME;
     panelSettings.systemVariables = normalizeSystemVariables(panelSettings.systemVariables);
     panelSettings.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
     panelSettings.crmErpDatabaseSchemaSnapshot = normalizeCrmErpDatabaseSnapshot(panelSettings.crmErpDatabaseSchemaSnapshot);
@@ -3774,19 +4458,35 @@ export function initPanelApp() {
       panelSettings.crmErpDatabaseSchemaSnapshot
     );
     panelSettings.whatsappConversationPrompts = normalizeWhatsappConversationPrompts(panelSettings.whatsappConversationPrompts);
+    panelSettings.integrations = normalizeIntegrationsConfig(panelSettings.integrations);
 
     if (settingsScreenState) {
       settingsScreenState.panelSettings = {
         ...settingsScreenState.panelSettings,
+        assistantName: panelSettings.assistantName,
         systemPrompt: panelSettings.systemPrompt,
         systemVariables: { ...panelSettings.systemVariables },
         crmErpDatabaseUrl: panelSettings.crmErpDatabaseUrl,
         crmErpDatabaseSchemaSnapshot: panelSettings.crmErpDatabaseSchemaSnapshot,
         crmErpDatabaseMeProfile: panelSettings.crmErpDatabaseMeProfile,
-        whatsappConversationPrompts: { ...panelSettings.whatsappConversationPrompts }
+        whatsappConversationPrompts: { ...panelSettings.whatsappConversationPrompts },
+        integrations: normalizeIntegrationsConfig(panelSettings.integrations)
       };
     }
-    return storageService.savePanelSettings(panelSettings);
+    const saved = await storageService.savePanelSettings(panelSettings);
+    if (!saved) {
+      return false;
+    }
+
+    const currentIntegrationsToken = JSON.stringify(panelSettings.integrations);
+    if (currentIntegrationsToken !== previousIntegrationsToken) {
+      syncLocationContextToBackground(panelSettings.integrations, {
+        reason: 'panel_settings_save'
+      });
+    }
+    renderAssistantBranding();
+
+    return true;
   }
 
   async function readSecret(secretKey) {
@@ -3923,6 +4623,258 @@ export function initPanelApp() {
     }
   }
 
+  function normalizeAttachmentMimeType(file) {
+    const mime = String(file?.type || '').trim().toLowerCase();
+    if (mime) {
+      return mime;
+    }
+    return 'application/octet-stream';
+  }
+
+  function normalizeAttachmentKind(file) {
+    const mimeType = normalizeAttachmentMimeType(file);
+    if (mimeType.startsWith('image/')) {
+      return 'image';
+    }
+    if (
+      mimeType.startsWith('text/') ||
+      mimeType.includes('json') ||
+      mimeType.includes('xml') ||
+      mimeType.includes('csv') ||
+      mimeType.includes('yaml')
+    ) {
+      return 'text';
+    }
+    return 'file';
+  }
+
+  function sanitizeAttachmentText(value, maxChars = MAX_CHAT_ATTACHMENT_TEXT_CHARS) {
+    return String(value || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\t/g, ' ')
+      .trim()
+      .slice(0, Math.max(200, Number(maxChars) || MAX_CHAT_ATTACHMENT_TEXT_CHARS));
+  }
+
+  function buildAttachmentFingerprint(file) {
+    return `${String(file?.name || '').trim()}::${Math.max(0, Number(file?.size) || 0)}::${Math.max(
+      0,
+      Number(file?.lastModified) || 0
+    )}`;
+  }
+
+  function fileToText(file, maxChars = MAX_CHAT_ATTACHMENT_TEXT_CHARS) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = typeof reader.result === 'string' ? reader.result : '';
+        resolve(sanitizeAttachmentText(text, maxChars));
+      };
+      reader.onerror = () => reject(reader.error || new Error('No se pudo leer el archivo.'));
+      reader.readAsText(file);
+    });
+  }
+
+  function readImageSize(file) {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const image = new Image();
+      image.onload = () => {
+        const width = Math.max(0, Number(image.naturalWidth) || 0);
+        const height = Math.max(0, Number(image.naturalHeight) || 0);
+        URL.revokeObjectURL(url);
+        resolve({ width, height });
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve({ width: 0, height: 0 });
+      };
+      image.src = url;
+    });
+  }
+
+  async function buildChatAttachmentDraft(file, index = 0) {
+    const safeFile = file instanceof File ? file : null;
+    if (!safeFile) {
+      return null;
+    }
+
+    const name = String(safeFile.name || '').trim().slice(0, 180);
+    if (!name) {
+      return null;
+    }
+
+    const mimeType = normalizeAttachmentMimeType(safeFile);
+    const kind = normalizeAttachmentKind(safeFile);
+    const sizeBytes = Math.max(0, Number(safeFile.size) || 0);
+    const fingerprint = buildAttachmentFingerprint(safeFile);
+    const id = `${Date.now()}-${index}-${Math.random().toString(16).slice(2, 8)}`;
+    let textExcerpt = '';
+    let imageWidth = 0;
+    let imageHeight = 0;
+
+    if (kind === 'text') {
+      try {
+        textExcerpt = await fileToText(safeFile);
+      } catch (_) {
+        textExcerpt = '';
+      }
+    } else if (kind === 'image') {
+      const dimensions = await readImageSize(safeFile);
+      imageWidth = dimensions.width;
+      imageHeight = dimensions.height;
+    }
+
+    return {
+      id,
+      fingerprint,
+      name,
+      mimeType,
+      kind,
+      sizeBytes,
+      textExcerpt,
+      imageWidth,
+      imageHeight
+    };
+  }
+
+  function renderPendingConversationAttachments() {
+    if (!chatAttachmentsBar) {
+      return;
+    }
+
+    if (!pendingConversationAttachments.length) {
+      chatAttachmentsBar.hidden = true;
+      chatAttachmentsBar.textContent = '';
+      return;
+    }
+
+    chatAttachmentsBar.hidden = false;
+    chatAttachmentsBar.textContent = '';
+
+    for (const attachment of pendingConversationAttachments) {
+      const chip = document.createElement('span');
+      chip.className = 'chat-attachment-chip';
+      chip.dataset.attachmentId = String(attachment.id || '');
+
+      const name = document.createElement('span');
+      name.className = 'chat-attachment-chip__name';
+      const kindLabel = attachment.kind === 'image' ? 'img' : attachment.kind === 'text' ? 'txt' : 'file';
+      name.textContent = `[${kindLabel}] ${attachment.name} • ${formatBytes(attachment.sizeBytes)}`;
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'chat-attachment-chip__remove';
+      removeBtn.type = 'button';
+      removeBtn.dataset.attachmentRemove = String(attachment.id || '');
+      removeBtn.setAttribute('aria-label', `Quitar ${attachment.name}`);
+      removeBtn.textContent = '×';
+
+      chip.append(name, removeBtn);
+      chatAttachmentsBar.appendChild(chip);
+    }
+  }
+
+  function clearPendingConversationAttachments() {
+    pendingConversationAttachments = [];
+    renderPendingConversationAttachments();
+    if (chatAttachmentInput) {
+      chatAttachmentInput.value = '';
+    }
+  }
+
+  function removePendingConversationAttachment(attachmentId) {
+    const token = String(attachmentId || '').trim();
+    if (!token) {
+      return;
+    }
+
+    pendingConversationAttachments = pendingConversationAttachments.filter((item) => String(item?.id || '') !== token);
+    renderPendingConversationAttachments();
+  }
+
+  async function queueChatAttachmentsFromFiles(fileList) {
+    const sourceFiles = Array.from(fileList || []).filter((item) => item instanceof File);
+    if (!sourceFiles.length) {
+      return;
+    }
+
+    const existingFingerprints = new Set(
+      pendingConversationAttachments.map((item) => String(item?.fingerprint || '').trim()).filter(Boolean)
+    );
+    let added = 0;
+
+    for (let index = 0; index < sourceFiles.length; index += 1) {
+      const file = sourceFiles[index];
+      const fingerprint = buildAttachmentFingerprint(file);
+      if (!fingerprint || existingFingerprints.has(fingerprint)) {
+        continue;
+      }
+
+      if (pendingConversationAttachments.length >= MAX_CHAT_ATTACHMENTS_PER_TURN) {
+        break;
+      }
+
+      const draft = await buildChatAttachmentDraft(file, index);
+      if (!draft) {
+        continue;
+      }
+
+      existingFingerprints.add(fingerprint);
+      pendingConversationAttachments.push(draft);
+      added += 1;
+    }
+
+    renderPendingConversationAttachments();
+
+    if (added > 0) {
+      setStatus(chatStatus, `${added} adjunto(s) listos para enviar.`);
+    } else {
+      setStatus(chatStatus, 'No se agregaron nuevos adjuntos.');
+    }
+  }
+
+  function buildAttachmentsPromptBlock(attachments) {
+    const source = Array.isArray(attachments) ? attachments : [];
+    if (!source.length) {
+      return '';
+    }
+
+    const lines = ['Adjuntos del usuario:'];
+    for (const attachment of source.slice(0, MAX_CHAT_ATTACHMENTS_PER_TURN)) {
+      const base = `- ${attachment.name} (${attachment.mimeType}, ${formatBytes(attachment.sizeBytes)})`;
+      if (attachment.kind === 'image') {
+        const dimensions =
+          attachment.imageWidth > 0 && attachment.imageHeight > 0 ? ` ${attachment.imageWidth}x${attachment.imageHeight}` : '';
+        lines.push(`${base}${dimensions}`);
+        continue;
+      }
+
+      if (attachment.textExcerpt) {
+        lines.push(`${base}\n  Contenido resumido: ${attachment.textExcerpt.slice(0, MAX_CHAT_ATTACHMENT_TEXT_CHARS)}`);
+        continue;
+      }
+
+      lines.push(base);
+    }
+
+    return lines.join('\n');
+  }
+
+  function buildChatMessageContentForModel(message) {
+    const baseContent = String(message?.content || '').trim();
+    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+    if (!attachments.length) {
+      return baseContent;
+    }
+
+    const attachmentsBlock = buildAttachmentsPromptBlock(attachments);
+    if (!attachmentsBlock) {
+      return baseContent;
+    }
+
+    return [baseContent, attachmentsBlock].filter(Boolean).join('\n\n');
+  }
+
   function getResolvedTheme(mode) {
     if (mode === 'dark' || mode === 'light') {
       return mode;
@@ -3957,6 +4909,27 @@ export function initPanelApp() {
     }
 
     return 'system';
+  }
+
+  function normalizeAssistantDisplayName(value) {
+    return String(value || '')
+      .trim()
+      .slice(0, 80);
+  }
+
+  function getResolvedAssistantDisplayName() {
+    return normalizeAssistantDisplayName(panelSettings.assistantName) || DEFAULT_ASSISTANT_DISPLAY_NAME;
+  }
+
+  function renderAssistantBranding() {
+    const assistantName = getResolvedAssistantDisplayName();
+    if (brandNameText) {
+      brandNameText.textContent = assistantName;
+    }
+    if (brandRoleLabel) {
+      brandRoleLabel.textContent = 'assistant';
+    }
+    document.title = assistantName;
   }
 
   function applyTheme(mode) {
@@ -4045,6 +5018,49 @@ export function initPanelApp() {
 
     article.appendChild(bubble);
 
+    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+    if (attachments.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-message-attachments';
+
+      for (const attachment of attachments.slice(0, MAX_CHAT_ATTACHMENTS_PER_TURN)) {
+        const item = document.createElement('div');
+        item.className = 'chat-message-attachment';
+        const label = attachment.kind === 'image' ? 'Imagen' : attachment.kind === 'text' ? 'Texto' : 'Archivo';
+        const name = String(attachment.name || 'adjunto').trim();
+        const metaParts = [`${label}`, formatBytes(Math.max(0, Number(attachment.sizeBytes) || 0))];
+        if (attachment.kind === 'image' && Number(attachment.imageWidth) > 0 && Number(attachment.imageHeight) > 0) {
+          metaParts.push(`${attachment.imageWidth}x${attachment.imageHeight}`);
+        }
+        item.innerHTML = `<strong>${escapeHtml(name)}</strong><br><span>${escapeHtml(metaParts.join(' • '))}</span>`;
+        wrap.appendChild(item);
+      }
+
+      article.appendChild(wrap);
+    }
+
+    const generatedImages = Array.isArray(message?.generated_images) ? message.generated_images : [];
+    if (generatedImages.length) {
+      const imageWrap = document.createElement('div');
+      imageWrap.className = 'chat-generated-images';
+
+      for (const image of generatedImages.slice(0, 4)) {
+        const src = String(image?.url || image?.dataUrl || '').trim();
+        if (!src) {
+          continue;
+        }
+        const img = document.createElement('img');
+        img.src = src;
+        img.alt = String(image?.alt || 'Generated image').trim() || 'Generated image';
+        img.loading = 'lazy';
+        imageWrap.appendChild(img);
+      }
+
+      if (imageWrap.childElementCount > 0) {
+        article.appendChild(imageWrap);
+      }
+    }
+
     return article;
   }
 
@@ -4087,7 +5103,34 @@ export function initPanelApp() {
 
   async function pushChatMessage(role, content, options = {}) {
     const text = content.trim();
-    if (!text) {
+    const attachmentsRaw = Array.isArray(options.attachments) ? options.attachments : [];
+    const attachments = attachmentsRaw
+      .map((item, index) => {
+        const source = item && typeof item === 'object' ? item : {};
+        const name = String(source.name || '').trim().slice(0, 180);
+        const mimeType = String(source.mimeType || normalizeAttachmentMimeType(source)).trim().slice(0, 120);
+        if (!name || !mimeType) {
+          return null;
+        }
+
+        const kindToken = String(source.kind || '').trim().toLowerCase();
+        const kind = kindToken === 'image' || kindToken === 'text' || kindToken === 'file' ? kindToken : 'file';
+        return {
+          id: String(source.id || `attachment-${index}`).trim().slice(0, 120),
+          name,
+          mimeType,
+          kind,
+          sizeBytes: Math.max(0, Number(source.sizeBytes) || 0),
+          textExcerpt: sanitizeAttachmentText(source.textExcerpt || '', 1400),
+          imageWidth: Math.max(0, Number(source.imageWidth) || 0),
+          imageHeight: Math.max(0, Number(source.imageHeight) || 0),
+          fingerprint: String(source.fingerprint || '').trim().slice(0, 240)
+        };
+      })
+      .filter(Boolean)
+      .slice(0, MAX_CHAT_ATTACHMENTS_PER_TURN);
+
+    if (!text && !attachments.length) {
       return;
     }
 
@@ -4135,10 +5178,11 @@ export function initPanelApp() {
     const messageRecord = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       role,
-      content: text,
+      content: text || '[Adjuntos]',
       tool: selectedChatTool,
       context_used: contextUsed,
       extracted_facts: extractedFacts,
+      attachments,
       createdAt: Date.now()
     };
 
@@ -4157,6 +5201,7 @@ export function initPanelApp() {
 
   async function resetChatHistory() {
     chatHistory = [];
+    clearPendingConversationAttachments();
     renderChatMessages();
     await saveChatHistory();
     setStatus(chatStatus, 'Historial limpiado.');
@@ -4287,16 +5332,50 @@ export function initPanelApp() {
     return ['Contexto DB CRM/ERP disponible para tools db.*:', summary].join('\n');
   }
 
+  function buildLocationToolsSystemContext() {
+    const integrations = getIntegrationsConfig();
+    const permissions = integrations.permissions || {};
+    const maps = integrations.maps || {};
+    const locationMeta = buildLocationMetaText(maps.lastKnownLocation, maps.nearbyPlaces || []);
+    const micState = normalizeIntegrationPermissionState(permissions.microphone);
+    const locState = normalizeIntegrationPermissionState(permissions.location);
+
+    return [
+      `Permisos locales: microfono=${micState}, ubicacion=${locState}.`,
+      locationMeta
+    ].join('\n');
+  }
+
+  function buildCustomIntegrationsToolsContext() {
+    const customTools = normalizeCustomIntegrationTools(getIntegrationsConfig().customTools);
+    if (!customTools.length) {
+      return 'Custom integrations: sin tools registradas.';
+    }
+
+    const lines = customTools.slice(0, 20).map((tool, index) => {
+      const name = String(tool?.name || '').trim();
+      const method = String(tool?.method || 'POST').trim().toUpperCase();
+      const endpoint = String(tool?.endpoint || '').trim().slice(0, 120);
+      const description = String(tool?.description || '').trim().slice(0, 120);
+      return `${index + 1}. ${name} (${method}) ${endpoint}${description ? ` | ${description}` : ''}`;
+    });
+    return ['Custom integrations registradas:', ...lines].join('\n');
+  }
+
   function buildLocalToolSystemPrompt() {
     const hasWhatsappTab = Boolean(getPreferredWhatsappTab());
     const hasCrmErpDbConnection = Boolean(getCrmErpDatabaseConnectionUrl());
+    const integrations = getIntegrationsConfig();
+    const hasSmtpRelay = Boolean(String(integrations.smtp?.relayUrl || '').trim());
+    const hasMapsApiKey = Boolean(String(integrations.maps?.apiKey || '').trim());
+    const hasCustomTools = normalizeCustomIntegrationTools(integrations.customTools).length > 0;
     return [
       'Eres un agente de productividad que opera en el navegador del usuario.',
       'Responde SIEMPRE en Markdown claro.',
       'Si necesitas ejecutar acciones locales del navegador, responde SOLO con un bloque ```tool JSON``` sin texto adicional.',
       'Formato exacto del bloque tool:',
       '```tool',
-      '{"tool":"browser.<accion>|whatsapp.<accion>|db.<accion>","args":{...}}',
+      '{"tool":"browser.<accion>|whatsapp.<accion>|db.<accion>|smtp.<accion>|maps.<accion>|integration.<accion>","args":{...}}',
       '```',
       'Puedes devolver un objeto o un array de objetos tool para encadenar acciones.',
       'Tools disponibles:',
@@ -4325,15 +5404,31 @@ export function initPanelApp() {
             '- db.queryWrite (args: sql, params opcional array, maxRows opcional; solo INSERT/UPDATE/DELETE)'
           ]
         : ['- db.* requiere configurar la URL de PostgreSQL en Settings > CRM/ERP Database.']),
+      ...(hasSmtpRelay
+        ? ['- smtp.sendMail (args: to, subject, text|html, from opcional; usa relay SMTP configurado)']
+        : ['- smtp.sendMail requiere configurar Relay URL en Settings > Apps & Integrations.']),
+      ...(hasMapsApiKey
+        ? [
+            '- maps.getCurrentLocation (sin args; devuelve coordenadas guardadas)',
+            '- maps.getNearbyPlaces (args: type opcional, radiusMeters opcional, maxResults opcional)',
+            '- maps.getDirectionsTime (args: destination requerido, origin opcional, travelMode opcional)'
+          ]
+        : ['- maps.* requiere configurar Maps API Key en Settings > Apps & Integrations.']),
+      ...(hasCustomTools
+        ? ['- integration.call (args: name requerido, input objeto opcional)']
+        : ['- integration.call requiere registrar Custom Tools Schema en Settings > Apps & Integrations.']),
       'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
       'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
       'Para preguntas de CRM/ERP, usa db.refreshSchema si falta contexto y luego db.queryRead/db.queryWrite segun corresponda.',
+      'Para consultas cercanas (restaurantes/cafes/lugares), usa maps.getNearbyPlaces con la ubicacion guardada.',
       'En db.queryRead agrega LIMIT razonable (<= 100) para evitar respuestas gigantes.',
       'No inventes tools fuera de esta lista.',
       buildActiveTabsSystemContext(),
       buildRecentHistorySystemContext(),
       buildWhatsappToolsSystemContext(),
-      buildCrmErpDatabaseToolsContext()
+      buildCrmErpDatabaseToolsContext(),
+      buildLocationToolsSystemContext(),
+      buildCustomIntegrationsToolsContext()
     ].join('\n');
   }
 
@@ -4402,7 +5497,23 @@ export function initPanelApp() {
       'db.query_write': 'db.queryWrite',
       'db.write_query': 'db.queryWrite',
       'db.writeQuery': 'db.queryWrite',
-      'db.queryWrite': 'db.queryWrite'
+      'db.queryWrite': 'db.queryWrite',
+      'smtp.send_mail': 'smtp.sendMail',
+      'smtp.sendEmail': 'smtp.sendMail',
+      'smtp.sendMail': 'smtp.sendMail',
+      'maps.get_current_location': 'maps.getCurrentLocation',
+      'maps.getCurrentLocation': 'maps.getCurrentLocation',
+      'maps.get_nearby_places': 'maps.getNearbyPlaces',
+      'maps.getNearbyPlaces': 'maps.getNearbyPlaces',
+      'maps.get_locations_places': 'maps.getNearbyPlaces',
+      'maps.getLocationsPlaces': 'maps.getNearbyPlaces',
+      'maps.get_places': 'maps.getNearbyPlaces',
+      'maps.get_directions_time': 'maps.getDirectionsTime',
+      'maps.getDirectionsTime': 'maps.getDirectionsTime',
+      'maps.get_directions_duration': 'maps.getDirectionsTime',
+      'integration.call': 'integration.call',
+      'integration.invoke': 'integration.call',
+      'integration.run': 'integration.call'
     };
     const tool = aliases[inputTool] || '';
     const args = source.args && typeof source.args === 'object' ? source.args : {};
@@ -4476,6 +5587,226 @@ export function initPanelApp() {
     return parsed;
   }
 
+  function getCustomIntegrationToolByName(name) {
+    const token = String(name || '')
+      .trim()
+      .toLowerCase();
+    if (!token) {
+      return null;
+    }
+
+    return normalizeCustomIntegrationTools(getIntegrationsConfig().customTools).find(
+      (item) => String(item?.name || '').trim().toLowerCase() === token
+    ) || null;
+  }
+
+  async function callCustomIntegrationTool(name, input = {}) {
+    const tool = getCustomIntegrationToolByName(name);
+    if (!tool) {
+      throw new Error('Custom tool no encontrada.');
+    }
+
+    const method = String(tool.method || 'POST').trim().toUpperCase();
+    const endpoint = String(tool.endpoint || '').trim();
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(tool.headers && typeof tool.headers === 'object' ? tool.headers : {})
+    };
+
+    const requestInit = {
+      method,
+      headers
+    };
+    if (method !== 'GET' && method !== 'HEAD') {
+      requestInit.body = JSON.stringify(input && typeof input === 'object' ? input : {});
+    }
+
+    const response = await fetch(endpoint, requestInit);
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const errorText = String(payload?.error || payload?.message || `HTTP ${response.status}`).trim();
+      throw new Error(`Custom tool error: ${errorText}`);
+    }
+
+    return payload || {
+      ok: true
+    };
+  }
+
+  async function sendMailViaConfiguredSmtp(args = {}) {
+    const integrations = getIntegrationsConfig();
+    const smtp = integrations.smtp || {};
+    const relayUrl = String(smtp.relayUrl || '').trim();
+    if (!relayUrl) {
+      throw new Error('Configura SMTP Relay URL en Settings > Apps & Integrations.');
+    }
+
+    const toRaw = Array.isArray(args.to) ? args.to : [args.to];
+    const to = toRaw
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    const subject = String(args.subject || '').trim().slice(0, 220);
+    const text = String(args.text || '').trim().slice(0, 12000);
+    const html = String(args.html || '').trim().slice(0, 18000);
+    const from = String(args.from || smtp.from || '').trim().slice(0, 220);
+
+    if (!to.length) {
+      throw new Error('smtp.sendMail requiere args.to.');
+    }
+    if (!subject) {
+      throw new Error('smtp.sendMail requiere args.subject.');
+    }
+    if (!text && !html) {
+      throw new Error('smtp.sendMail requiere args.text o args.html.');
+    }
+
+    const response = await fetch(relayUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        smtp: {
+          host: String(smtp.host || '').trim(),
+          port: Math.max(1, Math.min(65535, Number(smtp.port) || 587)),
+          secure: String(smtp.secure || 'auto'),
+          username: String(smtp.username || '').trim(),
+          password: String(smtp.password || '').trim(),
+          from
+        },
+        mail: {
+          to,
+          subject,
+          text,
+          html
+        }
+      })
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const errorText = String(payload?.error || payload?.message || `HTTP ${response.status}`).trim();
+      throw new Error(`SMTP relay error: ${errorText}`);
+    }
+
+    return payload || {
+      ok: true,
+      queued: true
+    };
+  }
+
+  function resolveLocationFromArgs(rawArgs = {}) {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const lat = Number(args.latitude ?? args.lat);
+    const lng = Number(args.longitude ?? args.lng ?? args.lon);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return {
+        latitude: lat,
+        longitude: lng
+      };
+    }
+
+    const stored = getIntegrationsConfig().maps?.lastKnownLocation;
+    if (stored && Number.isFinite(Number(stored.latitude)) && Number.isFinite(Number(stored.longitude))) {
+      return {
+        latitude: Number(stored.latitude),
+        longitude: Number(stored.longitude)
+      };
+    }
+
+    return null;
+  }
+
+  async function getDirectionsTimeFromMaps(rawArgs = {}) {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const integrations = getIntegrationsConfig();
+    const mapsApiKey = String(integrations.maps?.apiKey || '').trim();
+    if (!mapsApiKey) {
+      throw new Error('Configura Maps API Key en Settings > Apps & Integrations.');
+    }
+
+    const destination = String(args.destination || '').trim();
+    if (!destination) {
+      throw new Error('maps.getDirectionsTime requiere args.destination.');
+    }
+
+    const originInput = String(args.origin || '').trim();
+    const travelModeToken = String(args.travelMode || args.mode || 'DRIVE')
+      .trim()
+      .toUpperCase();
+    const travelMode =
+      travelModeToken === 'WALK' || travelModeToken === 'BICYCLE' || travelModeToken === 'TRANSIT' ? travelModeToken : 'DRIVE';
+    const location = resolveLocationFromArgs(args);
+    if (!originInput && !location) {
+      throw new Error('No hay origen disponible. Pide ubicacion o pasa args.origin.');
+    }
+
+    const originWaypoint = originInput
+      ? {
+          address: originInput
+        }
+      : {
+          location: {
+            latLng: {
+              latitude: Number(location.latitude),
+              longitude: Number(location.longitude)
+            }
+          }
+        };
+
+    const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': mapsApiKey,
+        'X-Goog-FieldMask': 'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline'
+      },
+      body: JSON.stringify({
+        origin: originWaypoint,
+        destination: {
+          address: destination
+        },
+        travelMode
+      })
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const errorText = String(payload?.error?.message || payload?.message || `HTTP ${response.status}`).trim();
+      throw new Error(`Maps routes error: ${errorText}`);
+    }
+
+    const route = Array.isArray(payload?.routes) ? payload.routes[0] : null;
+    if (!route) {
+      throw new Error('No se encontro ruta para el destino solicitado.');
+    }
+
+    return {
+      duration: String(route.duration || '').trim(),
+      distanceMeters: Math.max(0, Number(route.distanceMeters) || 0),
+      polyline: String(route?.polyline?.encodedPolyline || '').trim()
+    };
+  }
+
   async function executeLocalToolCalls(toolCalls) {
     const calls = Array.isArray(toolCalls)
       ? toolCalls.slice(0, getSystemVariableNumber('chat.maxLocalToolCalls', MAX_LOCAL_TOOL_CALLS))
@@ -4493,8 +5824,11 @@ export function initPanelApp() {
       const isBrowserTool = tool.startsWith('browser.');
       const isWhatsappTool = tool.startsWith('whatsapp.');
       const isDbTool = tool.startsWith('db.');
+      const isSmtpTool = tool.startsWith('smtp.');
+      const isMapsTool = tool.startsWith('maps.');
+      const isIntegrationTool = tool.startsWith('integration.');
 
-      if (!isBrowserTool && !isWhatsappTool && !isDbTool) {
+      if (!isBrowserTool && !isWhatsappTool && !isDbTool && !isSmtpTool && !isMapsTool && !isIntegrationTool) {
         results.push({
           tool,
           ok: false,
@@ -4597,6 +5931,140 @@ export function initPanelApp() {
             tool,
             ok: false,
             error: 'Accion db.* no soportada.'
+          });
+          continue;
+        }
+
+        if (isSmtpTool) {
+          const smtpAction = tool.replace(/^smtp\./, '');
+          if (smtpAction !== 'sendMail') {
+            results.push({
+              tool,
+              ok: false,
+              error: 'Accion smtp.* no soportada.'
+            });
+            continue;
+          }
+
+          const smtpResult = await sendMailViaConfiguredSmtp(args);
+          results.push({
+            tool,
+            ok: true,
+            result: smtpResult
+          });
+          continue;
+        }
+
+        if (isMapsTool) {
+          const mapsAction = tool.replace(/^maps\./, '');
+          if (mapsAction === 'getCurrentLocation') {
+            const location = resolveLocationFromArgs(args);
+            if (!location) {
+              results.push({
+                tool,
+                ok: false,
+                error: 'No hay ubicacion guardada.'
+              });
+            } else {
+              results.push({
+                tool,
+                ok: true,
+                result: location
+              });
+            }
+            continue;
+          }
+
+          if (mapsAction === 'getNearbyPlaces') {
+            const location = resolveLocationFromArgs(args);
+            if (!location) {
+              results.push({
+                tool,
+                ok: false,
+                error: 'No hay ubicacion disponible para nearby places.'
+              });
+              continue;
+            }
+
+            const places = await fetchNearbyPlacesForLocation(location, {
+              nearbyType: args.type || args.nearbyType,
+              radiusMeters: args.radiusMeters,
+              maxResultCount: args.maxResults || args.limit
+            });
+
+            const integrations = getIntegrationsConfig();
+            const nextIntegrations = normalizeIntegrationsConfig({
+              ...integrations,
+              maps: {
+                ...integrations.maps,
+                lastKnownLocation: {
+                  ...integrations.maps?.lastKnownLocation,
+                  latitude: Number(location.latitude),
+                  longitude: Number(location.longitude),
+                  capturedAt: Date.now()
+                },
+                nearbyPlaces: places
+              }
+            });
+            await savePanelSettings({ integrations: nextIntegrations });
+            renderAppsIntegrationsSettings({ syncInput: false });
+
+            results.push({
+              tool,
+              ok: true,
+              result: {
+                location,
+                places
+              }
+            });
+            continue;
+          }
+
+          if (mapsAction === 'getDirectionsTime') {
+            const route = await getDirectionsTimeFromMaps(args);
+            results.push({
+              tool,
+              ok: true,
+              result: route
+            });
+            continue;
+          }
+
+          results.push({
+            tool,
+            ok: false,
+            error: 'Accion maps.* no soportada.'
+          });
+          continue;
+        }
+
+        if (isIntegrationTool) {
+          const integrationAction = tool.replace(/^integration\./, '');
+          if (integrationAction !== 'call') {
+            results.push({
+              tool,
+              ok: false,
+              error: 'Accion integration.* no soportada.'
+            });
+            continue;
+          }
+
+          const integrationName = String(args.name || '').trim();
+          if (!integrationName) {
+            results.push({
+              tool,
+              ok: false,
+              error: 'integration.call requiere args.name.'
+            });
+            continue;
+          }
+
+          const payload = args.input && typeof args.input === 'object' ? args.input : {};
+          const integrationResult = await callCustomIntegrationTool(integrationName, payload);
+          results.push({
+            tool,
+            ok: true,
+            result: integrationResult
           });
           continue;
         }
@@ -4782,7 +6250,7 @@ export function initPanelApp() {
       .slice(-getSystemVariableNumber('chat.maxContextMessages', MAX_CHAT_CONTEXT_MESSAGES))
       .map((msg) => ({
         role: msg.role === 'assistant' ? 'assistant' : 'user',
-        content: msg.content
+        content: buildChatMessageContentForModel(msg)
       }));
 
     return {
@@ -4846,7 +6314,8 @@ export function initPanelApp() {
     }
 
     const content = chatInput.value.trim();
-    if (!content) {
+    const attachmentsForTurn = pendingConversationAttachments.slice(0, MAX_CHAT_ATTACHMENTS_PER_TURN);
+    if (!content && !attachmentsForTurn.length) {
       return;
     }
 
@@ -4859,9 +6328,14 @@ export function initPanelApp() {
     try {
       const activeProfile = getActiveModelProfile();
       const activeModel = activeProfile ? `${activeProfile.name} · ${activeProfile.model}` : getActiveModel();
-      const userMessage = await pushChatMessage('user', content);
+      const attachmentsPromptBlock = buildAttachmentsPromptBlock(attachmentsForTurn);
+      const contentForModel = [content, attachmentsPromptBlock].filter(Boolean).join('\n\n').trim() || content;
+      const userMessage = await pushChatMessage('user', content, {
+        attachments: attachmentsForTurn
+      });
       chatInput.value = '';
       updateChatInputSize();
+      clearPendingConversationAttachments();
       setStatus(chatStatus, `Conectando con ${activeModel}...`, false, { loading: true });
       stopRandomEmotionCycle();
       setBrandEmotion('intrigued');
@@ -4874,13 +6348,62 @@ export function initPanelApp() {
         tool: selectedChatTool,
         context_used: [],
         extracted_facts: [],
+        generated_images: [],
         createdAt: Date.now()
       };
       chatHistory.push(assistantMessage);
       renderChatMessages();
       scrollChatToBottom();
 
-      const streamPayload = await streamChatResponse(content, (chunk) => {
+      if (selectedChatTool === 'create_image') {
+        setStatus(chatStatus, 'Generando imagen...', false, { loading: true });
+
+        const imageResult = await generateImageWithActiveModel(contentForModel || content, {
+          statusTarget: chatStatus,
+          size: '1024x1024'
+        });
+        const imageUrl = String(imageResult?.imageUrl || '').trim();
+        const imageDataUrl = String(imageResult?.imageDataUrl || '').trim();
+        const revisedPrompt = String(imageResult?.revisedPrompt || '').trim();
+        const previewSource = imageUrl || imageDataUrl;
+        if (!previewSource) {
+          throw new Error('No se pudo generar imagen.');
+        }
+
+        assistantMessage.pending = false;
+        assistantMessage.generated_images = [
+          {
+            url: imageUrl,
+            dataUrl: imageDataUrl,
+            alt: content || 'Imagen generada'
+          }
+        ];
+        assistantMessage.content = revisedPrompt
+          ? `Imagen generada.\n\nPrompt aplicado: ${revisedPrompt}`
+          : 'Imagen generada.';
+
+        const contextUsed = [];
+        const turnMemory = await contextMemoryService.rememberChatTurn({
+          userMessage: contentForModel || content || '[Adjuntos]',
+          assistantMessage: assistantMessage.content,
+          contextUsed
+        });
+        assistantMessage.extracted_facts = Array.isArray(turnMemory?.extracted_facts) ? turnMemory.extracted_facts : [];
+        if (userMessage && Array.isArray(userMessage.extracted_facts) && assistantMessage.extracted_facts.length) {
+          userMessage.extracted_facts = assistantMessage.extracted_facts;
+        }
+
+        renderChatMessages();
+        scrollChatToBottom();
+        await saveChatHistory();
+        const imageProfile = imageResult?.profile && typeof imageResult.profile === 'object' ? imageResult.profile : null;
+        const imageModel = imageProfile ? `${imageProfile.name} · ${imageProfile.model}` : 'modelo de imagen';
+        setStatus(chatStatus, `Imagen generada con ${imageModel}.`);
+        setBrandEmotion('excited');
+        return;
+      }
+
+      const streamPayload = await streamChatResponse(contentForModel || content, (chunk) => {
         if (!assistantMessage || !chunk) {
           return;
         }
@@ -4928,7 +6451,7 @@ export function initPanelApp() {
         scheduleChatRender();
 
         const finalStream = await streamChatResponse(
-          content,
+          contentForModel || content,
           (chunk) => {
             if (!assistantMessage || !chunk) {
               return;
@@ -4969,7 +6492,7 @@ export function initPanelApp() {
       }
 
       const turnMemory = await contextMemoryService.rememberChatTurn({
-        userMessage: content,
+        userMessage: contentForModel || content || '[Adjuntos]',
         assistantMessage: assistantMessage.content,
         contextUsed
       });
@@ -5430,6 +6953,9 @@ export function initPanelApp() {
       activeTabId: tabContextSnapshot.activeTabId,
       reason: tabContextSnapshot.reason,
       updatedAt: tabContextSnapshot.updatedAt,
+      runtimeContext: tabContextSnapshot.runtimeContext && typeof tabContextSnapshot.runtimeContext === 'object'
+        ? tabContextSnapshot.runtimeContext
+        : {},
       history: Array.isArray(tabContextSnapshot.history) ? tabContextSnapshot.history : [],
       tabs: tabsPayload
     };
@@ -5460,6 +6986,55 @@ export function initPanelApp() {
     });
 
     return output.trim();
+  }
+
+  function profileSupportsImageGeneration(profile) {
+    const provider = String(profile?.provider || '').trim();
+    return provider === AI_PROVIDER_IDS.OPENAI || provider === AI_PROVIDER_IDS.OPENAI_COMPATIBLE;
+  }
+
+  function resolveImageGenerationProfile() {
+    const active = getActiveModelProfile();
+    if (active && profileSupportsImageGeneration(active)) {
+      return active;
+    }
+
+    const candidates = getModelProfiles();
+    for (const item of candidates) {
+      if (profileSupportsImageGeneration(item) && item.hasApiKey) {
+        return item;
+      }
+    }
+
+    for (const item of candidates) {
+      if (profileSupportsImageGeneration(item)) {
+        return item;
+      }
+    }
+
+    return null;
+  }
+
+  async function generateImageWithActiveModel(prompt, options = {}) {
+    const profile = resolveImageGenerationProfile();
+    if (!profile) {
+      throw new Error('No hay modelo OpenAI/OpenAI-compatible configurado para generar imagen.');
+    }
+
+    const apiKey = await getApiKeyForProfile(profile, {
+      statusTarget: options.statusTarget || chatStatus
+    });
+    const imageResult = await aiProviderService.generateImageWithProfile({
+      profile,
+      prompt: String(prompt || '').trim(),
+      apiKey,
+      size: String(options.size || '1024x1024')
+    });
+
+    return {
+      ...imageResult,
+      profile
+    };
   }
 
   function enqueueTabSummary(tabContext) {
@@ -8454,11 +10029,13 @@ export function initPanelApp() {
 
     const tabs = Array.isArray(snapshot.tabs) ? snapshot.tabs : [];
     const history = Array.isArray(snapshot.history) ? snapshot.history : [];
+    const runtimeContext = snapshot.runtimeContext && typeof snapshot.runtimeContext === 'object' ? snapshot.runtimeContext : {};
     tabContextSnapshot = {
       activeTabId: typeof snapshot.activeTabId === 'number' ? snapshot.activeTabId : -1,
       reason: String(snapshot.reason || 'snapshot'),
       updatedAt: Number(snapshot.updatedAt) || Date.now(),
       history,
+      runtimeContext,
       tabs
     };
 
@@ -9126,6 +10703,11 @@ export function initPanelApp() {
     renderAiModelsSettings();
     renderPinStatus();
     renderCrmErpDatabaseSettings({ syncInput: true });
+    renderAppsIntegrationsSettings({ syncInput: true });
+    renderAssistantBranding();
+    syncLocationContextToBackground(panelSettings.integrations, {
+      reason: 'panel_hydrate'
+    });
     await contextMemoryService.syncIdentityProfile({
       user_name: panelSettings.displayName || ''
     });
@@ -9141,6 +10723,7 @@ export function initPanelApp() {
       requestChatAutofocus
     });
     panelSettings = { ...settingsScreenController.getPanelSettings() };
+    renderAssistantBranding();
     currentChatModelProfileId = resolvePrimaryProfileId();
     await contextMemoryService.syncIdentityProfile({
       user_name: panelSettings.displayName || ''
@@ -9203,12 +10786,20 @@ export function initPanelApp() {
     }
   }
 
+  function clearIntegrationsAutosaveTimer() {
+    if (integrationsAutosaveTimer) {
+      window.clearTimeout(integrationsAutosaveTimer);
+      integrationsAutosaveTimer = 0;
+    }
+  }
+
   function clearAllSettingsAutosaveTimers() {
     clearUserSettingsAutosaveTimer();
     clearAssistantSettingsAutosaveTimer();
     clearCrmDbSettingsAutosaveTimer();
     clearCrmMeSettingsAutosaveTimer();
     clearSystemVariablesAutosaveTimer();
+    clearIntegrationsAutosaveTimer();
   }
 
   function scheduleUserSettingsAutosave(options = {}) {
@@ -9406,6 +10997,35 @@ export function initPanelApp() {
     }, Math.max(180, Number(options.delayMs) || 620));
   }
 
+  function scheduleIntegrationsAutosave(options = {}) {
+    clearIntegrationsAutosaveTimer();
+    const token = ++integrationsAutosaveToken;
+    setStatus(settingsIntegrationsStatus, 'Guardado en vivo pendiente...');
+
+    integrationsAutosaveTimer = window.setTimeout(async () => {
+      integrationsAutosaveTimer = 0;
+      if (token !== integrationsAutosaveToken) {
+        return;
+      }
+
+      const parsed = collectAppsIntegrationsSettingsFromScreen();
+      if (!parsed.ok) {
+        setStatus(settingsIntegrationsStatus, parsed.error || 'No se pudieron validar integraciones.', true);
+        return;
+      }
+
+      const current = JSON.stringify(getIntegrationsConfig());
+      const next = JSON.stringify(parsed.integrations);
+      if (current === next) {
+        setStatus(settingsIntegrationsStatus, 'Sin cambios pendientes.');
+        return;
+      }
+
+      setStatus(settingsIntegrationsStatus, 'Guardando integraciones...', false, { loading: true });
+      await saveAppsIntegrationsFromScreen({ autosave: true });
+    }, Math.max(240, Number(options.delayMs) || 780));
+  }
+
   async function hydrateChatHistory() {
     chatHistory = await readChatHistory();
     const maxHistoryMessages = getSystemVariableNumber('chat.maxHistoryMessages', MAX_CHAT_HISTORY_MESSAGES);
@@ -9443,33 +11063,6 @@ export function initPanelApp() {
       const normalizedX = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       const normalizedY = ((event.clientY - rect.top) / rect.height) * 2 - 1;
       setBrandEmotionLookVector(normalizedX, normalizedY);
-    };
-
-    const handleDynamicAreaWheel = (event) => {
-      const container = event.currentTarget;
-      if (!(container instanceof HTMLElement) || event.ctrlKey) {
-        return;
-      }
-
-      const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
-      if (maxScrollLeft <= 1) {
-        return;
-      }
-
-      const deltaX = Number(event.deltaX) || 0;
-      const deltaY = Number(event.deltaY) || 0;
-      const delta = Math.abs(deltaY) >= Math.abs(deltaX) ? deltaY : deltaX;
-      if (!Number.isFinite(delta) || delta === 0) {
-        return;
-      }
-
-      const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, container.scrollLeft + delta));
-      if (nextScrollLeft === container.scrollLeft) {
-        return;
-      }
-
-      container.scrollLeft = nextScrollLeft;
-      event.preventDefault();
     };
 
     wirePinDigitGroup(pinDigitInputs);
@@ -9512,14 +11105,16 @@ export function initPanelApp() {
       handleOnboardingContinue();
     });
 
-    onboardingNameInput?.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter') {
-        return;
-      }
+    for (const input of [onboardingAssistantNameInput, onboardingNameInput]) {
+      input?.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') {
+          return;
+        }
 
-      event.preventDefault();
-      handleOnboardingContinue();
-    });
+        event.preventDefault();
+        handleOnboardingContinue();
+      });
+    }
 
     for (const item of settingsNavItems) {
       item.addEventListener('click', () => {
@@ -9643,6 +11238,70 @@ export function initPanelApp() {
     systemVariablesList?.addEventListener('change', () => {
       scheduleSystemVariablesAutosave({
         delayMs: 280
+      });
+    });
+
+    settingsIntegrationsSaveBtn?.addEventListener('click', () => {
+      clearIntegrationsAutosaveTimer();
+      integrationsAutosaveToken += 1;
+      void saveAppsIntegrationsFromScreen({ autosave: false });
+    });
+
+    const integrationInputs = [
+      settingsSmtpRelayUrlInput,
+      settingsSmtpHostInput,
+      settingsSmtpPortInput,
+      settingsSmtpSecureSelect,
+      settingsSmtpUsernameInput,
+      settingsSmtpPasswordInput,
+      settingsSmtpFromInput,
+      settingsMapsApiKeyInput,
+      settingsMapsNearbyTypeSelect
+    ];
+    for (const input of integrationInputs) {
+      input?.addEventListener('input', () => {
+        scheduleIntegrationsAutosave({
+          delayMs: 760
+        });
+      });
+      input?.addEventListener('change', () => {
+        scheduleIntegrationsAutosave({
+          delayMs: 320
+        });
+      });
+    }
+
+    settingsCustomToolsSchemaInput?.addEventListener('input', () => {
+      scheduleIntegrationsAutosave({
+        delayMs: 900
+      });
+    });
+
+    settingsPermissionLocationBtn?.addEventListener('click', () => {
+      setStatus(settingsIntegrationsStatus, 'Solicitando acceso a ubicacion...', false, { loading: true });
+      void requestLocationPermissionAndSync({ refreshNearby: true }).catch((error) => {
+        const message = error instanceof Error ? error.message : 'No se pudo obtener ubicacion.';
+        setStatus(settingsIntegrationsStatus, message, true);
+      });
+    });
+
+    settingsMapsNearbyRefreshBtn?.addEventListener('click', () => {
+      setStatus(settingsIntegrationsStatus, 'Actualizando lugares cercanos...', false, { loading: true });
+      void refreshNearbyPlacesFromStoredLocation()
+        .then(() => {
+          setStatus(settingsIntegrationsStatus, 'Lugares cercanos actualizados.');
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : 'No se pudieron actualizar lugares cercanos.';
+          setStatus(settingsIntegrationsStatus, message, true);
+        });
+    });
+
+    settingsPermissionMicBtn?.addEventListener('click', () => {
+      setStatus(settingsIntegrationsStatus, 'Solicitando acceso a microfono...', false, { loading: true });
+      void requestMicrophonePermissionAndSync().catch((error) => {
+        const message = error instanceof Error ? error.message : 'No se pudo obtener permiso de microfono.';
+        setStatus(settingsIntegrationsStatus, message, true);
       });
     });
 
@@ -9808,6 +11467,16 @@ export function initPanelApp() {
 
     chatToolMenu?.addEventListener('click', (event) => {
       event.stopPropagation();
+      const actionItem = event.target.closest('[data-chat-action]');
+      if (actionItem) {
+        const action = String(actionItem.dataset.chatAction || '').trim();
+        if (action === 'attach_files') {
+          closeToolMenu();
+          chatAttachmentInput?.click();
+        }
+        return;
+      }
+
       const option = event.target.closest('[data-chat-tool]');
       if (!option) {
         return;
@@ -9816,6 +11485,22 @@ export function initPanelApp() {
       setChatTool(option.dataset.chatTool || DEFAULT_CHAT_TOOL);
       closeToolMenu();
       requestChatAutofocus(6, 60);
+    });
+
+    chatAttachmentInput?.addEventListener('change', (event) => {
+      const files = event?.target?.files || [];
+      void queueChatAttachmentsFromFiles(files);
+      if (chatAttachmentInput) {
+        chatAttachmentInput.value = '';
+      }
+    });
+
+    chatAttachmentsBar?.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-attachment-remove]');
+      if (!button) {
+        return;
+      }
+      removePendingConversationAttachment(button.dataset.attachmentRemove || '');
     });
 
     document.addEventListener('click', (event) => {
@@ -9857,12 +11542,10 @@ export function initPanelApp() {
     dynamicSuggestionsList?.addEventListener('click', (event) => {
       void handleDynamicSuggestionsListClick(event);
     });
-    dynamicSuggestionsList?.addEventListener('wheel', handleDynamicAreaWheel, { passive: false });
 
     dynamicRelationsList?.addEventListener('click', (event) => {
       handleDynamicRelationsListClick(event);
     });
-    dynamicRelationsList?.addEventListener('wheel', handleDynamicAreaWheel, { passive: false });
 
     dynamicRelationsList?.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' && event.key !== ' ') {
@@ -10036,6 +11719,7 @@ export function initPanelApp() {
     };
     settingsScreenController = createSettingsScreenController({
       elements: {
+        onboardingAssistantNameInput,
         onboardingNameInput,
         onboardingStatus,
         settingsNameInput,
@@ -10062,9 +11746,11 @@ export function initPanelApp() {
     });
 
     setStageTransitionEnabled(false);
+    renderAssistantBranding();
     wireEvents();
     observeStageSizeChanges();
     setChatTool(DEFAULT_CHAT_TOOL);
+    renderPendingConversationAttachments();
     closeToolMenu();
     updateChatInputSize();
     renderImageQueue();
@@ -10109,7 +11795,7 @@ export function initPanelApp() {
     if (initialScreen === 'home') {
       requestChatAutofocus(10, 80);
     } else {
-      onboardingNameInput?.focus();
+      onboardingAssistantNameInput?.focus();
     }
 
     scheduleStageStabilization(initialScreen);

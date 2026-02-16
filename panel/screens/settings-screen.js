@@ -17,6 +17,7 @@ export function createSettingsScreenController({
   onAfterHydrate
 }) {
   const {
+    onboardingAssistantNameInput,
     onboardingNameInput,
     onboardingStatus,
     settingsNameInput,
@@ -60,6 +61,10 @@ export function createSettingsScreenController({
 
   function applyPanelSettingsToUi() {
     const panelSettings = getPanelSettings();
+
+    if (onboardingAssistantNameInput) {
+      onboardingAssistantNameInput.value = panelSettings.assistantName || defaults.panelSettingsDefaults.assistantName || '';
+    }
 
     if (onboardingNameInput) {
       onboardingNameInput.value = panelSettings.displayName || '';
@@ -120,6 +125,10 @@ export function createSettingsScreenController({
     const merged = { ...defaults.panelSettingsDefaults, ...stored };
     const language = normalizeAssistantLanguage(merged.language);
 
+    merged.assistantName = String(merged.assistantName || defaults.panelSettingsDefaults.assistantName || '').trim();
+    if (!merged.assistantName) {
+      merged.assistantName = String(defaults.panelSettingsDefaults.assistantName || 'Assistant').trim();
+    }
     merged.displayName = String(merged.displayName || '').trim();
     merged.birthday = String(merged.birthday || '').trim();
     merged.language = language;
@@ -139,7 +148,14 @@ export function createSettingsScreenController({
 
   async function handleOnboardingContinue({ setScreen, requestChatAutofocus }) {
     const panelSettings = getPanelSettings();
+    const assistantName = String(onboardingAssistantNameInput?.value || '').trim();
     const name = String(onboardingNameInput?.value || '').trim();
+
+    if (!assistantName) {
+      setStatus(onboardingStatus, 'Escribe el nombre de tu asistente para continuar.', true);
+      onboardingAssistantNameInput?.focus();
+      return;
+    }
 
     if (!name) {
       setStatus(onboardingStatus, 'Escribe tu nombre para continuar.', true);
@@ -149,6 +165,7 @@ export function createSettingsScreenController({
 
     const nextSettings = {
       ...panelSettings,
+      assistantName,
       displayName: name,
       onboardingDone: true
     };

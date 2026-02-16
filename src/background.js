@@ -10,7 +10,8 @@
     TAB_CONTEXT_UPDATED: 'GREENSTUDIO_TAB_CONTEXT_UPDATED',
     SITE_ACTION_IN_TAB: 'GREENSTUDIO_SITE_ACTION_IN_TAB',
     SITE_ACTION: 'GREENSTUDIO_SITE_ACTION',
-    BROWSER_ACTION: 'GREENSTUDIO_BROWSER_ACTION'
+    BROWSER_ACTION: 'GREENSTUDIO_BROWSER_ACTION',
+    LOCATION_CONTEXT_UPDATE: 'GREENSTUDIO_LOCATION_CONTEXT_UPDATE'
   });
 
   const EXTERNAL_MESSAGE_TYPES = Object.freeze({
@@ -49,6 +50,20 @@
   const OLDEST_HISTORY_DEFAULT_CHUNKS = 10;
   const OLDEST_HISTORY_MAX_CHUNKS = 30;
   const whatsappContextLogByTab = new Map();
+  let runtimeContextState = {
+    updatedAt: 0,
+    reason: 'init',
+    permissions: {
+      microphone: 'prompt',
+      location: 'prompt'
+    },
+    maps: {
+      hasApiKey: false,
+      nearbyType: 'restaurant'
+    },
+    location: null,
+    nearbyPlaces: []
+  };
   let activeTabId = -1;
 
   function logDebug(message, payload) {
@@ -141,6 +156,66 @@
     }
 
     return text.slice(0, limit);
+  }
+
+  function normalizePermissionState(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    if (token === 'granted' || token === 'denied' || token === 'prompt') {
+      return token;
+    }
+    return 'prompt';
+  }
+
+  function normalizeRuntimeContextPayload(payload) {
+    const source = payload && typeof payload === 'object' ? payload : {};
+    const permissions = source.permissions && typeof source.permissions === 'object' ? source.permissions : {};
+    const maps = source.maps && typeof source.maps === 'object' ? source.maps : {};
+    const location = source.location && typeof source.location === 'object' ? source.location : null;
+    const latitude = Number(location?.latitude);
+    const longitude = Number(location?.longitude);
+    const safeLocation =
+      Number.isFinite(latitude) && Number.isFinite(longitude)
+        ? {
+            latitude,
+            longitude,
+            accuracy: Math.max(0, Number(location?.accuracy) || 0),
+            capturedAt: Math.max(0, Number(location?.capturedAt) || 0)
+          }
+        : null;
+    const nearbyPlaces = (Array.isArray(source.nearbyPlaces) ? source.nearbyPlaces : [])
+      .slice(0, 12)
+      .map((item) => {
+        const entry = item && typeof item === 'object' ? item : {};
+        const name = toSafeText(entry.name || '', 140);
+        if (!name) {
+          return null;
+        }
+        return {
+          name,
+          address: toSafeText(entry.address || '', 220),
+          rating: Number.isFinite(Number(entry.rating)) ? Number(entry.rating) : 0,
+          userRatingCount: Math.max(0, Number(entry.userRatingCount) || 0),
+          primaryType: toSafeText(entry.primaryType || '', 80)
+        };
+      })
+      .filter(Boolean);
+
+    return {
+      reason: toSafeText(source.reason || 'panel_sync', 80) || 'panel_sync',
+      updatedAt: Math.max(0, Number(source.updatedAt) || Date.now()),
+      permissions: {
+        microphone: normalizePermissionState(permissions.microphone),
+        location: normalizePermissionState(permissions.location)
+      },
+      maps: {
+        hasApiKey: Boolean(maps.hasApiKey),
+        nearbyType: toSafeText(maps.nearbyType || 'restaurant', 40) || 'restaurant'
+      },
+      location: safeLocation,
+      nearbyPlaces
+    };
   }
 
   function parseSafeUrl(value) {
@@ -846,10 +921,34 @@
       .filter((item) => item && typeof item.tabId === 'number' && item.tabId >= 0)
       .sort((a, b) => a.tabId - b.tabId);
 
+    const runtimeContext = runtimeContextState && typeof runtimeContextState === 'object' ? runtimeContextState : {};
+    const runtimeLocation = runtimeContext.location && typeof runtimeContext.location === 'object' ? runtimeContext.location : null;
+
     return {
       reason,
       activeTabId,
       history: buildRecentHistory(60),
+      runtimeContext: {
+        reason: toSafeText(runtimeContext.reason || '', 80),
+        updatedAt: Math.max(0, Number(runtimeContext.updatedAt) || 0),
+        permissions: {
+          microphone: normalizePermissionState(runtimeContext?.permissions?.microphone),
+          location: normalizePermissionState(runtimeContext?.permissions?.location)
+        },
+        maps: {
+          hasApiKey: Boolean(runtimeContext?.maps?.hasApiKey),
+          nearbyType: toSafeText(runtimeContext?.maps?.nearbyType || 'restaurant', 40) || 'restaurant'
+        },
+        location: runtimeLocation
+          ? {
+              latitude: Number(runtimeLocation.latitude) || 0,
+              longitude: Number(runtimeLocation.longitude) || 0,
+              accuracy: Math.max(0, Number(runtimeLocation.accuracy) || 0),
+              capturedAt: Math.max(0, Number(runtimeLocation.capturedAt) || 0)
+            }
+          : null,
+        nearbyPlaces: (Array.isArray(runtimeContext.nearbyPlaces) ? runtimeContext.nearbyPlaces : []).slice(0, 12)
+      },
       tabs,
       updatedAt: Date.now()
     };
@@ -1501,6 +1600,22 @@
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || typeof message !== 'object') {
+      return false;
+    }
+
+    if (message.type === MESSAGE_TYPES.LOCATION_CONTEXT_UPDATE) {
+      runtimeContextState = normalizeRuntimeContextPayload(message.payload);
+      logDebug('runtime_context:update', {
+        senderTabId: Number(sender?.tab?.id) || -1,
+        reason: runtimeContextState.reason,
+        hasLocation: Boolean(runtimeContextState.location),
+        nearbyPlaces: Array.isArray(runtimeContextState.nearbyPlaces) ? runtimeContextState.nearbyPlaces.length : 0
+      });
+      broadcastSnapshot('runtime_context_update');
+      sendResponse({
+        ok: true,
+        runtimeContext: runtimeContextState
+      });
       return false;
     }
 

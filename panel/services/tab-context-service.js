@@ -48,6 +48,8 @@ function normalizeTabRecord(item) {
 function normalizeSnapshot(rawSnapshot) {
   const snapshot = rawSnapshot && typeof rawSnapshot === 'object' ? rawSnapshot : {};
   const tabs = Array.isArray(snapshot.tabs) ? snapshot.tabs.map(normalizeTabRecord).filter((item) => item.tabId >= 0) : [];
+  const runtimeContext = snapshot.runtimeContext && typeof snapshot.runtimeContext === 'object' ? snapshot.runtimeContext : {};
+  const runtimeLocation = runtimeContext.location && typeof runtimeContext.location === 'object' ? runtimeContext.location : null;
   const history = Array.isArray(snapshot.history)
     ? snapshot.history
         .map((item) => {
@@ -67,6 +69,22 @@ function normalizeSnapshot(rawSnapshot) {
     reason: String(snapshot.reason || 'snapshot'),
     activeTabId: toNumber(snapshot.activeTabId, -1),
     updatedAt: toNumber(snapshot.updatedAt, Date.now()),
+    runtimeContext: {
+      reason: String(runtimeContext.reason || ''),
+      updatedAt: toNumber(runtimeContext.updatedAt, 0),
+      permissions: runtimeContext.permissions && typeof runtimeContext.permissions === 'object' ? runtimeContext.permissions : {},
+      maps: runtimeContext.maps && typeof runtimeContext.maps === 'object' ? runtimeContext.maps : {},
+      location:
+        runtimeLocation && Number.isFinite(Number(runtimeLocation.latitude)) && Number.isFinite(Number(runtimeLocation.longitude))
+          ? {
+              latitude: Number(runtimeLocation.latitude),
+              longitude: Number(runtimeLocation.longitude),
+              accuracy: Math.max(0, Number(runtimeLocation.accuracy) || 0),
+              capturedAt: toNumber(runtimeLocation.capturedAt, 0)
+            }
+          : null,
+      nearbyPlaces: Array.isArray(runtimeContext.nearbyPlaces) ? runtimeContext.nearbyPlaces : []
+    },
     history,
     tabs
   };
