@@ -12,7 +12,8 @@
     SITE_ACTION: 'GREENSTUDIO_SITE_ACTION',
     BROWSER_ACTION: 'GREENSTUDIO_BROWSER_ACTION',
     LOCATION_CONTEXT_UPDATE: 'GREENSTUDIO_LOCATION_CONTEXT_UPDATE',
-    SMTP_SEND: 'GREENSTUDIO_SMTP_SEND'
+    SMTP_SEND: 'GREENSTUDIO_SMTP_SEND',
+    NATIVE_HOST_PING: 'GREENSTUDIO_NATIVE_HOST_PING'
   });
 
   const EXTERNAL_MESSAGE_TYPES = Object.freeze({
@@ -375,6 +376,46 @@
         reject(error instanceof Error ? error : new Error('Error ejecutando Native Host.'));
       }
     });
+  }
+
+  async function runNativeHostPing(rawPayload = {}) {
+    const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
+    const nativeHostName =
+      toSafeText(payload.nativeHostName || DEFAULT_SMTP_NATIVE_HOST_NAME, 180) || DEFAULT_SMTP_NATIVE_HOST_NAME;
+
+    logDebug('native_host_ping:attempt', {
+      nativeHostName
+    });
+
+    const nativeResponse = await sendNativeMessageToHost(nativeHostName, {
+      type: 'PING',
+      source: 'greenstudio-ext/background',
+      requestedAt: Date.now()
+    });
+
+    if (!nativeResponse || nativeResponse.ok !== true) {
+      const errorMessage = String(nativeResponse?.error || nativeResponse?.message || 'Native host ping error.').trim();
+      logWarn('native_host_ping:error', {
+        nativeHostName,
+        error: toSafeText(errorMessage, 220)
+      });
+      throw new Error(errorMessage || 'Native host ping error.');
+    }
+
+    const result = nativeResponse.result && typeof nativeResponse.result === 'object' ? nativeResponse.result : {};
+    const capabilities = Array.isArray(result.capabilities)
+      ? result.capabilities.map((item) => toSafeText(item, 80)).filter(Boolean).slice(0, 20)
+      : [];
+
+    const pingResult = {
+      pong: result.pong !== false,
+      version: toSafeText(result.version || '', 60),
+      capabilities,
+      hostName: nativeHostName
+    };
+
+    logDebug('native_host_ping:success', pingResult);
+    return pingResult;
   }
 
   function buildHttpAgentConnectionHint(endpoint, errorMessage = '') {
@@ -1966,6 +2007,36 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || typeof message !== 'object') {
       return false;
+    }
+
+    if (message.type === MESSAGE_TYPES.NATIVE_HOST_PING) {
+      const payload = message.payload && typeof message.payload === 'object' ? message.payload : {};
+      const nativeHostName = toSafeText(payload.nativeHostName || DEFAULT_SMTP_NATIVE_HOST_NAME, 180);
+      logDebug('onMessage:NATIVE_HOST_PING:received', {
+        senderTabId: Number(sender?.tab?.id) || -1,
+        nativeHostName
+      });
+
+      Promise.resolve(runNativeHostPing(payload))
+        .then((result) => {
+          sendResponse({
+            ok: true,
+            result
+          });
+        })
+        .catch((error) => {
+          const messageText = error instanceof Error ? error.message : 'Error ejecutando ping de Native Host.';
+          logWarn('onMessage:NATIVE_HOST_PING:error', {
+            nativeHostName,
+            error: messageText
+          });
+          sendResponse({
+            ok: false,
+            error: messageText
+          });
+        });
+
+      return true;
     }
 
     if (message.type === MESSAGE_TYPES.SMTP_SEND) {

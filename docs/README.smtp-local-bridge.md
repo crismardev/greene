@@ -13,6 +13,7 @@ Esta extension envia `smtp.sendMail` mediante el `background` (`GREENSTUDIO_SMTP
 - La extension usa `chrome.runtime.sendNativeMessage()` hacia un host nativo.
 - Debes instalar un proceso local y registrar su manifest de Native Messaging.
 - Si no esta instalado, veras `Native host '<name>' no encontrado...`.
+- Soporte inicial del instalador integrado: solo macOS.
 
 ## Donde configurar en la extension
 
@@ -21,6 +22,8 @@ En `Settings > Apps & Integrations > SMTP`:
 - `Native Host Name`: nombre registrado del host nativo (si usas `native_host`).
 - `SMTP Agent URL`: URL del servicio HTTP (si usas `http_agent`).
 - `SMTP Host`, `Port`, `Secure`, `Username`, `Password`, `Default From`.
+- `Descargar complemento (macOS)`: descarga instalador local generado por la extension.
+- `Ping complemento`: valida conexion con Native Host y habilita/deshabilita tools dependientes.
 
 ## Notas para Gmail SMTP
 

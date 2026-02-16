@@ -49,7 +49,8 @@ export function initPanelApp() {
     CRM_ERP_DATABASE: 'crm_erp_database',
     TABS: 'tabs',
     SYSTEM_VARIABLES: 'system_variables',
-    APPS_INTEGRATIONS: 'apps_integrations'
+    APPS_INTEGRATIONS: 'apps_integrations',
+    LOCAL_CONNECTOR: 'local_connector'
   });
   const SETTINGS_PAGE_TITLES = Object.freeze({
     [SETTINGS_PAGES.HOME]: 'Settings',
@@ -59,7 +60,8 @@ export function initPanelApp() {
     [SETTINGS_PAGES.CRM_ERP_DATABASE]: 'CRM/ERP Database',
     [SETTINGS_PAGES.TABS]: 'Tabs',
     [SETTINGS_PAGES.SYSTEM_VARIABLES]: 'System Variables',
-    [SETTINGS_PAGES.APPS_INTEGRATIONS]: 'Apps & Integrations'
+    [SETTINGS_PAGES.APPS_INTEGRATIONS]: 'Apps & Integrations',
+    [SETTINGS_PAGES.LOCAL_CONNECTOR]: 'Local Connector'
   });
   const PIN_MODAL_MODES = Object.freeze({
     SETUP: 'setup',
@@ -76,6 +78,7 @@ export function initPanelApp() {
   });
   const BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE = 'GREENSTUDIO_LOCATION_CONTEXT_UPDATE';
   const BACKGROUND_SMTP_SEND_TYPE = 'GREENSTUDIO_SMTP_SEND';
+  const BACKGROUND_NATIVE_HOST_PING_TYPE = 'GREENSTUDIO_NATIVE_HOST_PING';
   const DEFAULT_CHAT_SYSTEM_PROMPT = buildDefaultChatSystemPrompt(DEFAULT_ASSISTANT_LANGUAGE);
   const DEFAULT_ASSISTANT_DISPLAY_NAME = 'Grenne';
   const DEFAULT_WRITE_EMAIL_SYSTEM_PROMPT = [
@@ -148,12 +151,14 @@ export function initPanelApp() {
 
   const DEFAULT_CHAT_TOOL = 'chat';
   const MAX_CHAT_INPUT_ROWS = 8;
+  const CHAT_STREAM_BOTTOM_RESERVE_PX = 300;
   const MAX_CHAT_CONTEXT_MESSAGES = 20;
   const MAX_CHAT_HISTORY_MESSAGES = 160;
   const MAX_CHAT_HISTORY_STORAGE_LIMIT = 600;
   const MAX_LOCAL_TOOL_CALLS = 3;
   const MAX_TOOL_ERROR_LOG_ITEMS = 12;
   const TOOL_ERROR_LOG_MAX_AGE_MS = 1000 * 60 * 60 * 24;
+  const NATIVE_HOST_PING_STALE_MS = 1000 * 60 * 10;
   const MAX_CHAT_ATTACHMENTS_PER_TURN = 8;
   const MAX_CHAT_ATTACHMENT_TEXT_CHARS = 3200;
   const MAX_IMAGE_FILES = 10;
@@ -327,6 +332,8 @@ export function initPanelApp() {
   const brandHomeBtn = document.getElementById('brandHomeBtn');
   const brandRoleLabel = document.getElementById('brandRoleLabel');
   const brandNameText = document.getElementById('brandNameText');
+  const nativeConnectorStatusBtn = document.getElementById('nativeConnectorStatusBtn');
+  const nativeConnectorStatusDot = document.getElementById('nativeConnectorStatusDot');
   const toolsScreen = document.getElementById('toolsScreen');
   const openToolsBtn = document.getElementById('openToolsBtn');
   const openSettingsBtn = document.getElementById('openSettingsBtn');
@@ -334,6 +341,7 @@ export function initPanelApp() {
   const closeSettingsBtn = document.getElementById('closeSettingsBtn');
   const settingsTitle = document.getElementById('settingsTitle');
   const settingsShell = document.getElementById('settingsShell');
+  const settingsBody = settingsShell?.querySelector('.settings-body');
   const settingsPages = Array.from(document.querySelectorAll('.settings-page'));
   const settingsNavItems = Array.from(document.querySelectorAll('[data-settings-target]'));
   const toolTabs = Array.from(document.querySelectorAll('.tool-tab'));
@@ -438,6 +446,15 @@ export function initPanelApp() {
   const settingsSmtpFromInput = document.getElementById('settingsSmtpFromInput');
   const settingsSmtpBridgeGuideBtn = document.getElementById('settingsSmtpBridgeGuideBtn');
   const settingsSmtpBridgePackagingBtn = document.getElementById('settingsSmtpBridgePackagingBtn');
+  const settingsOpenConnectorDetailBtn = document.getElementById('settingsOpenConnectorDetailBtn');
+  const settingsNativeHostPlatformMeta = document.getElementById('settingsNativeHostPlatformMeta');
+  const settingsNativeHostInstallMd = document.getElementById('settingsNativeHostInstallMd');
+  const settingsNativeHostDownloadBtn = document.getElementById('settingsNativeHostDownloadBtn');
+  const settingsNativeHostPingBtn = document.getElementById('settingsNativeHostPingBtn');
+  const settingsNativeHostHeaderMeta = document.getElementById('settingsNativeHostHeaderMeta');
+  const settingsNativeHostStatus = document.getElementById('settingsNativeHostStatus');
+  const settingsNativeHostToolsDependencyMeta = document.getElementById('settingsNativeHostToolsDependencyMeta');
+  const settingsNativeConnectorNavDot = document.getElementById('settingsNativeConnectorNavDot');
   const settingsMapsApiKeyInput = document.getElementById('settingsMapsApiKeyInput');
   const settingsMapsNearbyTypeSelect = document.getElementById('settingsMapsNearbyTypeSelect');
   const settingsPermissionMicBtn = document.getElementById('settingsPermissionMicBtn');
@@ -530,8 +547,19 @@ export function initPanelApp() {
   let pinModalRequest = null;
   let isGeneratingChat = false;
   let pendingChatRenderRaf = 0;
+  let pendingChatRenderAllowAutoScroll = true;
+  let chatStreamBottomReservePx = 0;
   let modelWarmupPromise = null;
   let localToolErrorLog = [];
+  let nativeHostDiagnostics = {
+    ok: false,
+    hostName: '',
+    checkedAt: 0,
+    message: '',
+    version: '',
+    capabilities: []
+  };
+  let nativeHostPingInFlight = false;
   let settingsScreenController = null;
   let settingsScreenState = null;
   let tabContextSnapshot = { activeTabId: -1, tabs: [], history: [], runtimeContext: {}, updatedAt: Date.now(), reason: 'init' };
@@ -1736,59 +1764,108 @@ export function initPanelApp() {
     return JSON.stringify(safeTools, null, 2);
   }
 
+  function isSettingsScreenActive() {
+    return String(app?.dataset?.screen || '').trim() === 'settings';
+  }
+
+  function shouldPreserveIntegrationsScroll() {
+    if (!settingsBody || !isSettingsScreenActive()) {
+      return false;
+    }
+
+    const currentPage = getCurrentSettingsPage();
+    return currentPage === SETTINGS_PAGES.APPS_INTEGRATIONS || currentPage === SETTINGS_PAGES.LOCAL_CONNECTOR;
+  }
+
+  function runWithSettingsScrollPreserved(task, options = {}) {
+    const callback = typeof task === 'function' ? task : null;
+    if (!callback) {
+      return;
+    }
+
+    const enabled = options.enabled !== false && shouldPreserveIntegrationsScroll();
+    if (!enabled) {
+      callback();
+      return;
+    }
+
+    const previousScrollTop = settingsBody.scrollTop;
+    callback();
+    settingsBody.scrollTop = previousScrollTop;
+  }
+
   function renderAppsIntegrationsSettings(options = {}) {
     const syncInput = options.syncInput !== false;
     const integrations = getIntegrationsConfig();
     const smtp = integrations.smtp || {};
     const maps = integrations.maps || {};
+    runWithSettingsScrollPreserved(
+      () => {
+        if (syncInput) {
+          if (settingsSmtpTransportSelect) {
+            settingsSmtpTransportSelect.value = ['http_agent', 'native_host'].includes(String(smtp.transport || ''))
+              ? String(smtp.transport || 'http_agent')
+              : 'http_agent';
+          }
+          if (settingsSmtpNativeHostInput) {
+            settingsSmtpNativeHostInput.value = String(smtp.nativeHostName || '');
+          }
+          if (settingsSmtpAgentUrlInput) {
+            settingsSmtpAgentUrlInput.value = String(smtp.agentUrl || '');
+          }
+          if (settingsSmtpHostInput) {
+            settingsSmtpHostInput.value = String(smtp.host || '');
+          }
+          if (settingsSmtpPortInput) {
+            settingsSmtpPortInput.value = String(smtp.port || 587);
+          }
+          if (settingsSmtpSecureSelect) {
+            settingsSmtpSecureSelect.value = ['auto', 'true', 'false'].includes(String(smtp.secure || ''))
+              ? String(smtp.secure || 'auto')
+              : 'auto';
+          }
+          if (settingsSmtpUsernameInput) {
+            settingsSmtpUsernameInput.value = String(smtp.username || '');
+          }
+          if (settingsSmtpPasswordInput) {
+            settingsSmtpPasswordInput.value = String(smtp.password || '');
+          }
+          if (settingsSmtpFromInput) {
+            settingsSmtpFromInput.value = String(smtp.from || '');
+          }
+          if (settingsMapsApiKeyInput) {
+            settingsMapsApiKeyInput.value = String(maps.apiKey || '');
+          }
+          if (settingsMapsNearbyTypeSelect) {
+            settingsMapsNearbyTypeSelect.value = String(maps.nearbyType || 'restaurant') || 'restaurant';
+          }
+          if (settingsCustomToolsSchemaInput) {
+            settingsCustomToolsSchemaInput.value = buildCustomToolsSchemaText(integrations.customTools);
+          }
+        }
 
-    if (syncInput) {
-      if (settingsSmtpTransportSelect) {
-        settingsSmtpTransportSelect.value = ['http_agent', 'native_host'].includes(String(smtp.transport || ''))
-          ? String(smtp.transport || 'http_agent')
-          : 'http_agent';
+        if (settingsLocationMeta) {
+          settingsLocationMeta.textContent = buildLocationMetaText(maps.lastKnownLocation, maps.nearbyPlaces);
+        }
+        renderToolErrorsLog();
+      },
+      {
+        enabled: options.preserveScroll !== false
       }
-      if (settingsSmtpNativeHostInput) {
-        settingsSmtpNativeHostInput.value = String(smtp.nativeHostName || '');
-      }
-      if (settingsSmtpAgentUrlInput) {
-        settingsSmtpAgentUrlInput.value = String(smtp.agentUrl || '');
-      }
-      if (settingsSmtpHostInput) {
-        settingsSmtpHostInput.value = String(smtp.host || '');
-      }
-      if (settingsSmtpPortInput) {
-        settingsSmtpPortInput.value = String(smtp.port || 587);
-      }
-      if (settingsSmtpSecureSelect) {
-        settingsSmtpSecureSelect.value = ['auto', 'true', 'false'].includes(String(smtp.secure || ''))
-          ? String(smtp.secure || 'auto')
-          : 'auto';
-      }
-      if (settingsSmtpUsernameInput) {
-        settingsSmtpUsernameInput.value = String(smtp.username || '');
-      }
-      if (settingsSmtpPasswordInput) {
-        settingsSmtpPasswordInput.value = String(smtp.password || '');
-      }
-      if (settingsSmtpFromInput) {
-        settingsSmtpFromInput.value = String(smtp.from || '');
-      }
-      if (settingsMapsApiKeyInput) {
-        settingsMapsApiKeyInput.value = String(maps.apiKey || '');
-      }
-      if (settingsMapsNearbyTypeSelect) {
-        settingsMapsNearbyTypeSelect.value = String(maps.nearbyType || 'restaurant') || 'restaurant';
-      }
-      if (settingsCustomToolsSchemaInput) {
-        settingsCustomToolsSchemaInput.value = buildCustomToolsSchemaText(integrations.customTools);
-      }
-    }
+    );
 
-    if (settingsLocationMeta) {
-      settingsLocationMeta.textContent = buildLocationMetaText(maps.lastKnownLocation, maps.nearbyPlaces);
+    renderNativeHostBridgeSection({
+      preserveScroll: options.preserveScroll !== false
+    });
+
+    const platform = detectHostPlatform();
+    const shouldTryAutoPing = smtp.transport === 'native_host' && platform.supported && !nativeHostPingInFlight;
+    const expectedHost = String(smtp.nativeHostName || '').trim();
+    const sameHost = expectedHost && expectedHost === nativeHostDiagnostics.hostName;
+    const stalePing = Date.now() - Math.max(0, Number(nativeHostDiagnostics.checkedAt) || 0) > NATIVE_HOST_PING_STALE_MS;
+    if (shouldTryAutoPing && expectedHost && (!sameHost || stalePing || !nativeHostDiagnostics.ok)) {
+      void pingNativeHostBridge({ silent: true, hostName: expectedHost });
     }
-    renderToolErrorsLog();
   }
 
   function collectAppsIntegrationsSettingsFromScreen() {
@@ -3379,9 +3456,10 @@ export function initPanelApp() {
     setScreen('tools');
   }
 
-  function openSettings() {
+  function openSettings(nextPage = SETTINGS_PAGES.HOME) {
+    const safePage = normalizeSettingsPage(nextPage);
     populateSettingsForm();
-    setSettingsPage(SETTINGS_PAGES.HOME);
+    setSettingsPage(safePage);
     renderAiModelsSettings();
     renderCrmErpDatabaseSettings({ syncInput: true });
     renderAppsIntegrationsSettings({ syncInput: true });
@@ -3519,6 +3597,10 @@ export function initPanelApp() {
     }
 
     if (safePage === SETTINGS_PAGES.APPS_INTEGRATIONS) {
+      renderAppsIntegrationsSettings({ syncInput: true });
+    }
+
+    if (safePage === SETTINGS_PAGES.LOCAL_CONNECTOR) {
       renderAppsIntegrationsSettings({ syncInput: true });
     }
 
@@ -5302,7 +5384,17 @@ export function initPanelApp() {
     chatBody.scrollTop = chatBody.scrollHeight;
   }
 
-  function renderChatMessages() {
+  function normalizeChatStreamBottomReserve(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      return 0;
+    }
+
+    return Math.max(0, Math.min(720, Math.round(numeric)));
+  }
+
+  function renderChatMessages(options = {}) {
+    const allowAutoScroll = options.allowAutoScroll !== false;
     const nearBottom = chatBody.scrollHeight - chatBody.scrollTop - chatBody.clientHeight < 70;
     chatMessagesEl.textContent = '';
 
@@ -5318,20 +5410,40 @@ export function initPanelApp() {
       chatMessagesEl.appendChild(createChatMessageNode(message));
     }
 
-    if (nearBottom) {
+    const reservePx = normalizeChatStreamBottomReserve(chatStreamBottomReservePx);
+    if (reservePx > 0) {
+      const reserve = document.createElement('div');
+      reserve.className = 'chat-stream-reserve';
+      reserve.style.height = `${reservePx}px`;
+      reserve.setAttribute('aria-hidden', 'true');
+      chatMessagesEl.appendChild(reserve);
+    }
+
+    if (allowAutoScroll && nearBottom) {
       scrollChatToBottom();
     }
   }
 
-  function scheduleChatRender() {
+  function scheduleChatRender(options = {}) {
+    const allowAutoScroll = options.allowAutoScroll !== false;
+
     if (pendingChatRenderRaf) {
+      pendingChatRenderAllowAutoScroll = pendingChatRenderAllowAutoScroll && allowAutoScroll;
       return;
     }
 
+    pendingChatRenderAllowAutoScroll = allowAutoScroll;
+
     pendingChatRenderRaf = requestAnimationFrame(() => {
+      const shouldAutoScroll = pendingChatRenderAllowAutoScroll;
       pendingChatRenderRaf = 0;
-      renderChatMessages();
-      scrollChatToBottom();
+      pendingChatRenderAllowAutoScroll = true;
+      renderChatMessages({
+        allowAutoScroll: shouldAutoScroll
+      });
+      if (shouldAutoScroll) {
+        scrollChatToBottom();
+      }
     });
   }
 
@@ -5435,6 +5547,7 @@ export function initPanelApp() {
 
   async function resetChatHistory() {
     chatHistory = [];
+    chatStreamBottomReservePx = 0;
     clearPendingConversationAttachments();
     renderChatMessages();
     await saveChatHistory();
@@ -5581,6 +5694,278 @@ export function initPanelApp() {
       `Maps: apiKey=${hasMapsApiKey ? 'configurada' : 'no_configurada'}, nearbyTypeDefault=${nearbyType}.`,
       locationMeta
     ].join('\n');
+  }
+
+  function detectHostPlatform() {
+    const rawPlatform = String(
+      navigator?.userAgentData?.platform || navigator?.platform || navigator?.userAgent || ''
+    )
+      .trim()
+      .toLowerCase();
+
+    if (/(mac|darwin)/.test(rawPlatform)) {
+      return {
+        id: 'macos',
+        label: 'macOS',
+        supported: true
+      };
+    }
+
+    if (/win/.test(rawPlatform)) {
+      return {
+        id: 'windows',
+        label: 'Windows',
+        supported: false
+      };
+    }
+
+    if (/linux/.test(rawPlatform)) {
+      return {
+        id: 'linux',
+        label: 'Linux',
+        supported: false
+      };
+    }
+
+    return {
+      id: 'unknown',
+      label: 'Desconocido',
+      supported: false
+    };
+  }
+
+  function normalizeSmtpTransport(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    return token === 'native_host' ? 'native_host' : 'http_agent';
+  }
+
+  function getSmtpDraftConfigFromScreen() {
+    const savedSmtp = getIntegrationsConfig().smtp || {};
+    return {
+      transport: normalizeSmtpTransport(settingsSmtpTransportSelect?.value || savedSmtp.transport || 'http_agent'),
+      nativeHostName: String(settingsSmtpNativeHostInput?.value || savedSmtp.nativeHostName || '').trim(),
+      agentUrl: String(settingsSmtpAgentUrlInput?.value || savedSmtp.agentUrl || '').trim(),
+      host: String(settingsSmtpHostInput?.value || savedSmtp.host || '').trim(),
+      port: Math.max(1, Math.min(65535, Number(settingsSmtpPortInput?.value || savedSmtp.port || 587))),
+      secure: ['auto', 'true', 'false'].includes(String(settingsSmtpSecureSelect?.value || savedSmtp.secure || '').trim())
+        ? String(settingsSmtpSecureSelect?.value || savedSmtp.secure || 'auto').trim()
+        : 'auto',
+      username: String(settingsSmtpUsernameInput?.value || savedSmtp.username || '').trim(),
+      password: String(settingsSmtpPasswordInput?.value || savedSmtp.password || '').trim(),
+      from: String(settingsSmtpFromInput?.value || savedSmtp.from || '').trim()
+    };
+  }
+
+  function getSmtpToolAvailability() {
+    const smtp = getSmtpDraftConfigFromScreen();
+    const platform = detectHostPlatform();
+    const hasConfig = Boolean(smtp.host && smtp.username && smtp.password);
+    if (!hasConfig) {
+      return {
+        enabled: false,
+        reason: 'Faltan SMTP host/username/password.',
+        transport: smtp.transport
+      };
+    }
+
+    if (smtp.transport === 'native_host') {
+      if (!platform.supported) {
+        return {
+          enabled: false,
+          reason: `native_host solo soportado en macOS (actual: ${platform.label}).`,
+          transport: smtp.transport
+        };
+      }
+
+      const expectedHostName = String(smtp.nativeHostName || '').trim();
+      const checkedSameHost = expectedHostName && nativeHostDiagnostics.hostName === expectedHostName;
+      const hasRecentPing = Date.now() - Math.max(0, Number(nativeHostDiagnostics.checkedAt) || 0) <= NATIVE_HOST_PING_STALE_MS;
+      if (!(nativeHostDiagnostics.ok && checkedSameHost && hasRecentPing)) {
+        return {
+          enabled: false,
+          reason: 'Complemento local no conectado. Ejecuta Ping complemento.',
+          transport: smtp.transport
+        };
+      }
+    }
+
+    return {
+      enabled: true,
+      reason: '',
+      transport: smtp.transport
+    };
+  }
+
+  function buildNativeHostInstallMarkdown() {
+    const platform = detectHostPlatform();
+    const smtp = getSmtpDraftConfigFromScreen();
+    const extensionId = String(chrome?.runtime?.id || '').trim() || '[extension_id]';
+    const hostName = String(smtp.nativeHostName || 'com.greenstudio.smtp_bridge').trim();
+    const supportLabel = platform.supported ? 'soportado' : 'no_soportado';
+
+    return [
+      `SO detectado: ${platform.label} (${supportLabel})`,
+      'Instalacion corta:',
+      '1) Descargar complemento macOS.',
+      '2) Ejecutar script en Terminal.',
+      '3) Regresar y usar Ping complemento.',
+      `Host: ${hostName}`,
+      `Ext: ${extensionId}`
+    ].join('\n');
+  }
+
+  function buildNativeHostDependencyLabel() {
+    const availability = getSmtpToolAvailability();
+    if (availability.enabled) {
+      return 'Dependencias locales: smtp.sendMail habilitada.';
+    }
+
+    return `Dependencias locales: smtp.sendMail deshabilitada (${availability.reason})`;
+  }
+
+  function getNativeHostIndicatorState() {
+    const platform = detectHostPlatform();
+    const smtp = getSmtpDraftConfigFromScreen();
+    const expectedHost = sanitizeNativeHostNameToken(smtp.nativeHostName || '', '');
+    const checkedAt = Math.max(0, Number(nativeHostDiagnostics.checkedAt) || 0);
+    const hasRecentPing = checkedAt > 0 && Date.now() - checkedAt <= NATIVE_HOST_PING_STALE_MS;
+    const hasExpectedHost = Boolean(expectedHost);
+    const hostMatches = hasExpectedHost
+      ? nativeHostDiagnostics.hostName === expectedHost
+      : Boolean(String(nativeHostDiagnostics.hostName || '').trim());
+    const online = platform.supported && nativeHostDiagnostics.ok && hasRecentPing && hostMatches;
+
+    let reason = '';
+    if (!platform.supported) {
+      reason = `No soportado en ${platform.label}.`;
+    } else if (nativeHostPingInFlight) {
+      reason = 'Verificando complemento local...';
+    } else if (!hasExpectedHost) {
+      reason = 'Configura Native Host Name.';
+    } else if (!checkedAt) {
+      reason = 'Sin ping reciente.';
+    } else if (!nativeHostDiagnostics.ok) {
+      reason = String(nativeHostDiagnostics.message || 'Sin conexion al complemento local.').trim();
+    } else if (!hostMatches) {
+      reason = `Ping registrado en otro host (${nativeHostDiagnostics.hostName || 'desconocido'}).`;
+    } else if (!hasRecentPing) {
+      reason = 'Ultimo ping vencido.';
+    } else {
+      reason = `Conectado a ${nativeHostDiagnostics.hostName || expectedHost}.`;
+    }
+
+    return {
+      online,
+      reason,
+      checkedAt
+    };
+  }
+
+  function applyNativeHostDotState(dotElement, online) {
+    if (!dotElement) {
+      return;
+    }
+
+    dotElement.classList.toggle('is-online', online);
+    dotElement.classList.toggle('is-offline', !online);
+  }
+
+  function renderNativeHostStatusIndicators() {
+    const indicator = getNativeHostIndicatorState();
+    const stateLabel = indicator.online ? 'conectado' : 'desconectado';
+    const stamp = indicator.checkedAt
+      ? formatDateTime(indicator.checkedAt) || new Date(indicator.checkedAt).toISOString()
+      : '';
+    const detail = stamp ? `${indicator.reason} Ultimo ping: ${stamp}.` : indicator.reason;
+
+    applyNativeHostDotState(nativeConnectorStatusDot, indicator.online);
+    applyNativeHostDotState(settingsNativeConnectorNavDot, indicator.online);
+
+    if (nativeConnectorStatusBtn) {
+      const title = `Estado complemento local: ${stateLabel}. ${detail}`.trim();
+      nativeConnectorStatusBtn.setAttribute('title', title);
+      nativeConnectorStatusBtn.setAttribute('aria-label', title);
+    }
+
+    if (settingsNativeHostHeaderMeta) {
+      settingsNativeHostHeaderMeta.textContent = `Estado header: ${stateLabel}. ${detail}`;
+    }
+  }
+
+  function renderNativeHostBridgeSection(options = {}) {
+    runWithSettingsScrollPreserved(
+      () => {
+        const platform = detectHostPlatform();
+        const smtp = getSmtpDraftConfigFromScreen();
+
+        if (settingsNativeHostPlatformMeta) {
+          const supportText = platform.supported ? 'soportado' : 'no soportado';
+          settingsNativeHostPlatformMeta.textContent = `SO detectado: ${platform.label} (${supportText}).`;
+        }
+
+        if (settingsNativeHostInstallMd) {
+          settingsNativeHostInstallMd.textContent = buildNativeHostInstallMarkdown();
+        }
+
+        if (settingsNativeHostDownloadBtn) {
+          settingsNativeHostDownloadBtn.disabled = !platform.supported;
+          settingsNativeHostDownloadBtn.title = platform.supported
+            ? ''
+            : 'Complemento local descargable solo para macOS por ahora.';
+        }
+
+        if (settingsNativeHostPingBtn) {
+          settingsNativeHostPingBtn.disabled = !platform.supported || nativeHostPingInFlight;
+        }
+
+        if (settingsNativeHostToolsDependencyMeta) {
+          settingsNativeHostToolsDependencyMeta.textContent = buildNativeHostDependencyLabel();
+        }
+
+        if (!settingsNativeHostStatus) {
+          return;
+        }
+
+        if (!platform.supported) {
+          setStatus(
+            settingsNativeHostStatus,
+            'Este sistema operativo no esta soportado para Local Connector. Soporte actual: macOS.',
+            true
+          );
+          return;
+        }
+
+        if (nativeHostPingInFlight) {
+          setStatus(settingsNativeHostStatus, 'Verificando complemento local...', false, { loading: true });
+          return;
+        }
+
+        if (!nativeHostDiagnostics.checkedAt) {
+          setStatus(settingsNativeHostStatus, 'Sin ping reciente. Ejecuta Ping complemento.');
+          return;
+        }
+
+        const stamp = formatDateTime(nativeHostDiagnostics.checkedAt) || new Date(nativeHostDiagnostics.checkedAt).toISOString();
+        if (nativeHostDiagnostics.ok) {
+          const versionPart = nativeHostDiagnostics.version ? ` v${nativeHostDiagnostics.version}` : '';
+          setStatus(
+            settingsNativeHostStatus,
+            `Conectado con ${nativeHostDiagnostics.hostName || smtp.nativeHostName}${versionPart}. Ultimo ping: ${stamp}.`
+          );
+          return;
+        }
+
+        const message = String(nativeHostDiagnostics.message || 'Sin conexion al complemento local.').trim();
+        setStatus(settingsNativeHostStatus, `${message} Ultimo ping: ${stamp}.`, true);
+      },
+      {
+        enabled: options.preserveScroll !== false
+      }
+    );
+
+    renderNativeHostStatusIndicators();
   }
 
   function openExtensionDocInNewTab(relativePath = '') {
@@ -5789,10 +6174,7 @@ export function initPanelApp() {
     const hasWhatsappTab = Boolean(getPreferredWhatsappTab());
     const hasCrmErpDbConnection = Boolean(getCrmErpDatabaseConnectionUrl());
     const integrations = getIntegrationsConfig();
-    const smtp = integrations.smtp || {};
-    const hasSmtpConfig = Boolean(
-      String(smtp.host || '').trim() && String(smtp.username || '').trim() && String(smtp.password || '').trim()
-    );
+    const smtpAvailability = getSmtpToolAvailability();
     const hasMapsApiKey = Boolean(String(integrations.maps?.apiKey || '').trim());
     const hasCustomTools = normalizeCustomIntegrationTools(integrations.customTools).length > 0;
     return [
@@ -5830,11 +6212,11 @@ export function initPanelApp() {
             '- db.queryWrite (args: sql, params opcional array, maxRows opcional; solo INSERT/UPDATE/DELETE)'
           ]
         : ['- db.* requiere configurar la URL de PostgreSQL en Settings > CRM/ERP Database.']),
-      ...(hasSmtpConfig
+      ...(smtpAvailability.enabled
         ? [
             '- smtp.sendMail (args: to, subject, text|html, cc opcional, bcc opcional, from opcional; envia por SMTP configurado)'
           ]
-        : ['- smtp.sendMail requiere SMTP host/username/password en Settings > Apps & Integrations.']),
+        : [`- smtp.sendMail deshabilitada temporalmente: ${smtpAvailability.reason}`]),
       ...(hasMapsApiKey
         ? [
             '- maps.getCurrentLocation (sin args; devuelve coordenadas guardadas)',
@@ -5854,6 +6236,7 @@ export function initPanelApp() {
       'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
       'Para preguntas de CRM/ERP, usa db.refreshSchema si falta contexto y luego db.queryRead/db.queryWrite segun corresponda.',
       'smtp.sendMail usa bridge interno en background y transporte SMTP configurable (http_agent o native_host).',
+      `Estado actual smtp.sendMail: ${smtpAvailability.enabled ? 'habilitada' : `deshabilitada (${smtpAvailability.reason})`}.`,
       'Para "donde estamos", usa maps.getCurrentLocation y maps.reverseGeocode cuando haya API key.',
       'Para consultas cercanas por rubro o texto (ej. "inmobiliarias cerca"), usa maps.searchPlaces con args.query.',
       'Antes de repetir una tool que ya fallo, revisa el bloque de errores recientes y corrige args/configuracion.',
@@ -6130,6 +6513,432 @@ export function initPanelApp() {
       .trim();
   }
 
+  function sanitizeNativeHostNameToken(value, fallback = 'com.greenstudio.smtp_bridge') {
+    const normalized = String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '')
+      .slice(0, 180);
+    if (!normalized) {
+      return fallback;
+    }
+    return normalized;
+  }
+
+  function buildMacNativeHostInstallerScript({ extensionId = '', hostName = '' } = {}) {
+    const safeExtensionId = String(extensionId || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '')
+      .slice(0, 64);
+    const safeHostName = sanitizeNativeHostNameToken(hostName, 'com.greenstudio.smtp_bridge');
+
+    return [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      '',
+      `HOST_NAME="${safeHostName}"`,
+      `EXTENSION_ID="${safeExtensionId}"`,
+      '',
+      'if [[ "$(uname -s)" != "Darwin" ]]; then',
+      '  echo "Este instalador solo soporta macOS."',
+      '  exit 1',
+      'fi',
+      '',
+      'if [[ -z "$EXTENSION_ID" ]]; then',
+      '  echo "Extension ID invalido."',
+      '  exit 1',
+      'fi',
+      '',
+      'if ! command -v python3 >/dev/null 2>&1; then',
+      '  echo "python3 no encontrado. Instala Python 3 y vuelve a intentar."',
+      '  exit 1',
+      'fi',
+      '',
+      'BASE_DIR="$HOME/.greenstudio/native-host/$HOST_NAME"',
+      'MANIFEST_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"',
+      'HOST_PY="$BASE_DIR/host.py"',
+      'LAUNCHER="$BASE_DIR/host.sh"',
+      'MANIFEST_FILE="$MANIFEST_DIR/${HOST_NAME}.json"',
+      '',
+      'mkdir -p "$BASE_DIR" "$MANIFEST_DIR"',
+      '',
+      "cat > \"$HOST_PY\" <<'PYEOF'",
+      '#!/usr/bin/env python3',
+      'import json',
+      'import re',
+      'import smtplib',
+      'import ssl',
+      'import struct',
+      'import sys',
+      'from email.message import EmailMessage',
+      '',
+      "HOST_VERSION = '0.1.0'",
+      '',
+      'def read_message():',
+      '    raw_len = sys.stdin.buffer.read(4)',
+      '    if len(raw_len) == 0:',
+      '        return None',
+      '    if len(raw_len) < 4:',
+      '        return None',
+      "    msg_len = struct.unpack('<I', raw_len)[0]",
+      '    payload = sys.stdin.buffer.read(msg_len)',
+      '    if len(payload) < msg_len:',
+      '        return None',
+      "    return json.loads(payload.decode('utf-8'))",
+      '',
+      'def write_message(message):',
+      "    encoded = json.dumps(message, ensure_ascii=False).encode('utf-8')",
+      "    sys.stdout.buffer.write(struct.pack('<I', len(encoded)))",
+      '    sys.stdout.buffer.write(encoded)',
+      '    sys.stdout.buffer.flush()',
+      '',
+      'def normalize_list(value, limit):',
+      '    if isinstance(value, list):',
+      '        source = value',
+      '    else:',
+      "        source = re.split(r'[;,]', str(value or ''))",
+      '    cleaned = []',
+      '    seen = set()',
+      '    for item in source:',
+      "        email = str(item or '').strip()[:220]",
+      "        if not email or '@' not in email:",
+      '            continue',
+      '        key = email.lower()',
+      '        if key in seen:',
+      '            continue',
+      '        seen.add(key)',
+      '        cleaned.append(email)',
+      '        if len(cleaned) >= limit:',
+      '            break',
+      '    return cleaned',
+      '',
+      'def html_to_text(html):',
+      "    text = str(html or '')",
+      "    text = re.sub(r'<style[\\s\\S]*?</style>', ' ', text, flags=re.IGNORECASE)",
+      "    text = re.sub(r'<script[\\s\\S]*?</script>', ' ', text, flags=re.IGNORECASE)",
+      "    text = re.sub(r'<br\\s*/?>', '\\n', text, flags=re.IGNORECASE)",
+      "    text = re.sub(r'</p>', '\\n\\n', text, flags=re.IGNORECASE)",
+      "    text = re.sub(r'</div>', '\\n', text, flags=re.IGNORECASE)",
+      "    text = re.sub(r'<[^>]+>', ' ', text)",
+      "    text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')",
+      "    text = text.replace('&quot;', '\"').replace('&#39;', \"'\")",
+      "    text = re.sub(r'\\r\\n', '\\n', text)",
+      "    text = re.sub(r'[ \\t]+\\n', '\\n', text)",
+      "    text = re.sub(r'\\n{3,}', '\\n\\n', text)",
+      '    return text.strip()',
+      '',
+      'def open_smtp_client(host, port, secure_mode):',
+      "    mode = str(secure_mode or 'auto').strip().lower()",
+      "    if mode == 'true':",
+      '        try:',
+      '            client = smtplib.SMTP_SSL(host=host, port=port, timeout=30)',
+      '            client.ehlo()',
+      '            return client',
+      '        except ssl.SSLError as exc:',
+      "            if 'wrong version number' not in str(exc).lower() or int(port) != 587:",
+      '                raise',
+      '    client = smtplib.SMTP(host=host, port=port, timeout=30)',
+      '    client.ehlo()',
+      "    wants_tls = mode in ('auto', 'false', 'true')",
+      "    if wants_tls and client.has_extn('starttls'):",
+      '        context = ssl.create_default_context()',
+      '        client.starttls(context=context)',
+      '        client.ehlo()',
+      '    return client',
+      '',
+      'def handle_smtp_send(message):',
+      "    smtp = message.get('smtp') if isinstance(message.get('smtp'), dict) else {}",
+      "    mail = message.get('mail') if isinstance(message.get('mail'), dict) else {}",
+      '',
+      "    host = str(smtp.get('host') or '').strip()[:220]",
+      "    port = int(smtp.get('port') or 587)",
+      "    secure = str(smtp.get('secure') or 'auto').strip()[:12]",
+      "    username = str(smtp.get('username') or '').strip()[:220]",
+      "    password = str(smtp.get('password') or '').strip()[:220]",
+      "    from_addr = str(smtp.get('from') or username).strip()[:220]",
+      '',
+      "    to_list = normalize_list(mail.get('to'), 20)",
+      "    cc_list = normalize_list(mail.get('cc'), 10)",
+      "    bcc_list = normalize_list(mail.get('bcc'), 10)",
+      "    subject = str(mail.get('subject') or '').strip()[:220]",
+      "    text_body = str(mail.get('text') or '').strip()[:4000]",
+      "    html_body = str(mail.get('html') or '').strip()[:12000]",
+      "    fallback_text = html_to_text(html_body)[:2500]",
+      "    body_text = text_body or fallback_text",
+      '',
+      '    if not host or not username or not password:',
+      "        return {'ok': False, 'error': 'Faltan credenciales SMTP (host/username/password).'}",
+      '    if not to_list:',
+      "        return {'ok': False, 'error': 'Falta destinatario (to).'}",
+      '    if not subject:',
+      "        return {'ok': False, 'error': 'Falta asunto (subject).'}",
+      '    if not body_text and not html_body:',
+      "        return {'ok': False, 'error': 'Falta cuerpo (text/html).'}",
+      '',
+      '    recipients = to_list + cc_list + bcc_list',
+      '    client = None',
+      '    try:',
+      '        client = open_smtp_client(host, port, secure)',
+      '        client.login(username, password)',
+      '',
+      '        msg = EmailMessage()',
+      "        msg['From'] = from_addr",
+      "        msg['To'] = ', '.join(to_list)",
+      '        if cc_list:',
+      "            msg['Cc'] = ', '.join(cc_list)",
+      "        msg['Subject'] = subject",
+      '',
+      '        if body_text:',
+      '            msg.set_content(body_text)',
+      '            if html_body:',
+      "                msg.add_alternative(html_body, subtype='html')",
+      '        else:',
+      "            msg.set_content('[Sin contenido de texto]')",
+      "            msg.add_alternative(html_body, subtype='html')",
+      '',
+      '        client.send_message(msg, from_addr=from_addr, to_addrs=recipients)',
+      "        return {'ok': True, 'result': {'sent': True, 'toCount': len(to_list), 'ccCount': len(cc_list), 'bccCount': len(bcc_list), 'subject': subject}}",
+      '    except ssl.SSLError as exc:',
+      '        message = str(exc)',
+      "        if 'wrong version number' in message.lower():",
+      "            return {'ok': False, 'error': 'TLS mismatch: usa secure=auto/false con puerto 587, o secure=true con puerto 465.'}",
+      "        return {'ok': False, 'error': message}",
+      '    except Exception as exc:',
+      "        return {'ok': False, 'error': str(exc)}",
+      '    finally:',
+      '        if client is not None:',
+      '            try:',
+      '                client.quit()',
+      '            except Exception:',
+      '                pass',
+      '',
+      'def handle_ping(message):',
+      '    return {',
+      "        'ok': True,",
+      "        'result': {",
+      "            'pong': True,",
+      "            'version': HOST_VERSION,",
+      "            'capabilities': ['ping', 'smtp.send']",
+      '        }',
+      '    }',
+      '',
+      'def handle_message(message):',
+      "    msg_type = str(message.get('type') or '').strip().upper()",
+      "    if msg_type == 'PING':",
+      '        return handle_ping(message)',
+      "    if msg_type == 'GREENSTUDIO_SMTP_SEND':",
+      '        return handle_smtp_send(message)',
+      "    return {'ok': False, 'error': f'Tipo no soportado: {msg_type}'}",
+      '',
+      'def main():',
+      '    while True:',
+      '        message = read_message()',
+      '        if message is None:',
+      '            break',
+      '        try:',
+      '            response = handle_message(message)',
+      '        except Exception as exc:',
+      "            response = {'ok': False, 'error': str(exc)}",
+      '        write_message(response)',
+      '',
+      "if __name__ == '__main__':",
+      '    main()',
+      'PYEOF',
+      '',
+      'chmod +x "$HOST_PY"',
+      '',
+      "cat > \"$LAUNCHER\" <<'SHEOF'",
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"',
+      'exec /usr/bin/env python3 "$SCRIPT_DIR/host.py"',
+      'SHEOF',
+      '',
+      'chmod +x "$LAUNCHER"',
+      '',
+      'cat > "$MANIFEST_FILE" <<JSONEOF',
+      '{',
+      `  "name": "${safeHostName}",`,
+      '  "description": "GreenStudio Native SMTP Host",',
+      '  "path": "$LAUNCHER",',
+      '  "type": "stdio",',
+      `  "allowed_origins": ["chrome-extension://${safeExtensionId}/"]`,
+      '}',
+      'JSONEOF',
+      '',
+      'echo "Instalacion completada: $HOST_NAME"',
+      'echo "Manifest: $MANIFEST_FILE"',
+      'echo "Regresa a la extension y ejecuta Ping complemento."'
+    ].join('\n');
+  }
+
+  function triggerTextFileDownload(filename, content, mimeType = 'text/plain') {
+    const safeName = String(filename || '').trim();
+    if (!safeName) {
+      throw new Error('Nombre de archivo invalido para descarga.');
+    }
+
+    const blob = new Blob([String(content || '')], {
+      type: String(mimeType || 'text/plain')
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = safeName;
+      anchor.rel = 'noopener';
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } finally {
+      setTimeout(() => {
+        URL.revokeObjectURL(objectUrl);
+      }, 1200);
+    }
+  }
+
+  function downloadMacNativeHostInstaller() {
+    const platform = detectHostPlatform();
+    if (!platform.supported) {
+      throw new Error('Complemento local descargable solo para macOS por ahora.');
+    }
+
+    const draftSmtp = getSmtpDraftConfigFromScreen();
+    const hostName = sanitizeNativeHostNameToken(draftSmtp.nativeHostName || 'com.greenstudio.smtp_bridge');
+    const extensionId = String(chrome?.runtime?.id || '').trim();
+    const script = buildMacNativeHostInstallerScript({
+      extensionId,
+      hostName
+    });
+    triggerTextFileDownload('greenstudio-native-host-macos.sh', script, 'application/x-sh');
+  }
+
+  async function sendNativeHostPingWithBackground(hostName = '') {
+    if (!chrome?.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+      throw new Error('Bridge native host no disponible: runtime de extension no accesible.');
+    }
+
+    const safeHostName = sanitizeNativeHostNameToken(hostName, '');
+    if (!safeHostName) {
+      throw new Error('Native Host Name invalido.');
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(
+          {
+            type: BACKGROUND_NATIVE_HOST_PING_TYPE,
+            payload: {
+              nativeHostName: safeHostName
+            }
+          },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message || 'Error comunicando ping de Native Host.'));
+              return;
+            }
+
+            const safeResponse = response && typeof response === 'object' ? response : null;
+            if (!safeResponse || safeResponse.ok !== true) {
+              const errorMessage = String(safeResponse?.error || 'Ping de Native Host sin respuesta valida.').trim();
+              reject(new Error(errorMessage));
+              return;
+            }
+
+            resolve(safeResponse.result && typeof safeResponse.result === 'object' ? safeResponse.result : {});
+          }
+        );
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error('Error ejecutando ping de Native Host.'));
+      }
+    });
+  }
+
+  async function pingNativeHostBridge(options = {}) {
+    const silent = options.silent === true;
+    const platform = detectHostPlatform();
+    if (!platform.supported) {
+      nativeHostDiagnostics = {
+        ok: false,
+        hostName: '',
+        checkedAt: Date.now(),
+        message: 'native_host no soportado en este sistema operativo.',
+        version: '',
+        capabilities: []
+      };
+      renderNativeHostBridgeSection();
+      if (!silent) {
+        setStatus(settingsIntegrationsStatus, nativeHostDiagnostics.message, true);
+      }
+      return false;
+    }
+
+    const draftSmtp = getSmtpDraftConfigFromScreen();
+    const hostName = sanitizeNativeHostNameToken(options.hostName || draftSmtp.nativeHostName || '', '');
+    if (!hostName) {
+      const message = 'Configura Native Host Name antes de ejecutar Ping complemento.';
+      nativeHostDiagnostics = {
+        ok: false,
+        hostName: '',
+        checkedAt: Date.now(),
+        message,
+        version: '',
+        capabilities: []
+      };
+      renderNativeHostBridgeSection();
+      if (!silent) {
+        setStatus(settingsIntegrationsStatus, message, true);
+      }
+      return false;
+    }
+
+    if (nativeHostPingInFlight) {
+      return nativeHostDiagnostics.ok;
+    }
+
+    nativeHostPingInFlight = true;
+    renderNativeHostBridgeSection();
+    try {
+      const result = await sendNativeHostPingWithBackground(hostName);
+      nativeHostDiagnostics = {
+        ok: true,
+        hostName,
+        checkedAt: Date.now(),
+        message: '',
+        version: String(result.version || '').trim().slice(0, 60),
+        capabilities: Array.isArray(result.capabilities)
+          ? result.capabilities.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 20)
+          : []
+      };
+      renderNativeHostBridgeSection();
+      if (!silent) {
+        const versionLabel = nativeHostDiagnostics.version ? ` v${nativeHostDiagnostics.version}` : '';
+        setStatus(settingsIntegrationsStatus, `Complemento local conectado (${hostName}${versionLabel}).`);
+      }
+      return true;
+    } catch (error) {
+      const message = sanitizeSensitiveMessage(error instanceof Error ? error.message : 'Ping de Native Host fallo.');
+      nativeHostDiagnostics = {
+        ok: false,
+        hostName,
+        checkedAt: Date.now(),
+        message,
+        version: '',
+        capabilities: []
+      };
+      renderNativeHostBridgeSection();
+      if (!silent) {
+        setStatus(settingsIntegrationsStatus, `Ping complemento fallo: ${message}`, true);
+      }
+      return false;
+    } finally {
+      nativeHostPingInFlight = false;
+      renderNativeHostBridgeSection();
+    }
+  }
+
   function buildSmtpBridgeRequestSummary(payload = {}) {
     const safePayload = payload && typeof payload === 'object' ? payload : {};
     const smtp = safePayload.smtp && typeof safePayload.smtp === 'object' ? safePayload.smtp : {};
@@ -6230,9 +7039,11 @@ export function initPanelApp() {
     const username = String(smtp.username || '').trim();
     const password = String(smtp.password || '').trim();
     const port = Math.max(1, Math.min(65535, Number(smtp.port) || 587));
-    const secure = ['auto', 'true', 'false'].includes(String(smtp.secure || ''))
+    const configuredSecure = ['auto', 'true', 'false'].includes(String(smtp.secure || ''))
       ? String(smtp.secure || 'auto')
       : 'auto';
+    const shouldForceStartTlsForGmail = /gmail\.com/i.test(host) && port === 587 && configuredSecure === 'true';
+    const secure = shouldForceStartTlsForGmail ? 'auto' : configuredSecure;
 
     if (!to.length) {
       throw new Error('smtp.sendMail requiere args.to.');
@@ -6254,13 +7065,20 @@ export function initPanelApp() {
     if (transport === 'native_host' && !nativeHostName) {
       throw new Error('Configura Native Host Name en Settings > Apps & Integrations.');
     }
+    if (transport === 'native_host') {
+      const platform = detectHostPlatform();
+      if (!platform.supported) {
+        throw new Error(`native_host no soportado en ${platform.label}. Soporte actual: macOS.`);
+      }
+    }
 
-    if (/gmail\.com/i.test(host) && port === 587 && secure === 'true') {
+    if (shouldForceStartTlsForGmail) {
       logWarn('smtp_bridge:config_warning', {
-        warning: 'Para Gmail en puerto 587 normalmente se usa secure=auto o secure=false (STARTTLS).',
+        warning: 'Ajuste automatico aplicado: Gmail puerto 587 usa STARTTLS (secure=auto) en lugar de SSL implicito.',
         host,
         port,
-        secure
+        configuredSecure,
+        appliedSecure: secure
       });
     }
 
@@ -6536,6 +7354,16 @@ export function initPanelApp() {
               tool,
               ok: false,
               error: 'Accion smtp.* no soportada.'
+            });
+            continue;
+          }
+
+          const smtpAvailability = getSmtpToolAvailability();
+          if (!smtpAvailability.enabled) {
+            results.push({
+              tool,
+              ok: false,
+              error: `smtp.sendMail deshabilitada: ${smtpAvailability.reason}`
             });
             continue;
           }
@@ -6999,7 +7827,14 @@ export function initPanelApp() {
         createdAt: Date.now()
       };
       chatHistory.push(assistantMessage);
-      renderChatMessages();
+      if (selectedChatTool !== 'create_image') {
+        chatStreamBottomReservePx = CHAT_STREAM_BOTTOM_RESERVE_PX;
+      } else {
+        chatStreamBottomReservePx = 0;
+      }
+      renderChatMessages({
+        allowAutoScroll: false
+      });
       scrollChatToBottom();
 
       if (selectedChatTool === 'create_image') {
@@ -7058,7 +7893,9 @@ export function initPanelApp() {
         assistantMessage.pending = false;
         assistantMessage.content += chunk;
         setStatus(chatStatus, 'Escribiendo respuesta...', false, { loading: true });
-        scheduleChatRender();
+        scheduleChatRender({
+          allowAutoScroll: false
+        });
       });
 
       const output = String(streamPayload?.output || '').trim();
@@ -7084,7 +7921,9 @@ export function initPanelApp() {
         setStatus(chatStatus, 'Ejecutando acciones locales del navegador...', false, { loading: true });
         assistantMessage.pending = true;
         assistantMessage.content = 'Ejecutando tools locales...';
-        scheduleChatRender();
+        scheduleChatRender({
+          allowAutoScroll: false
+        });
 
         const toolResults = await executeLocalToolCalls(detectedToolCalls);
         const followupPrompt = buildToolResultsFollowupPrompt(toolResults);
@@ -7095,7 +7934,9 @@ export function initPanelApp() {
 
         assistantMessage.content = '';
         assistantMessage.pending = true;
-        scheduleChatRender();
+        scheduleChatRender({
+          allowAutoScroll: false
+        });
 
         const finalStream = await streamChatResponse(
           contentForModel || content,
@@ -7107,7 +7948,9 @@ export function initPanelApp() {
             assistantMessage.pending = false;
             assistantMessage.content += chunk;
             setStatus(chatStatus, 'Generando respuesta final...', false, { loading: true });
-            scheduleChatRender();
+            scheduleChatRender({
+              allowAutoScroll: false
+            });
           },
           {
             additionalMessages: [
@@ -7155,15 +7998,23 @@ export function initPanelApp() {
         startRandomEmotionCycle({ immediate: true });
       }
 
-      renderChatMessages();
-      scrollChatToBottom();
+      chatStreamBottomReservePx = 0;
+      renderChatMessages({
+        allowAutoScroll: false
+      });
       await saveChatHistory();
       setStatus(chatStatus, `Respuesta generada con ${activeModel}.`);
     } catch (error) {
+      chatStreamBottomReservePx = 0;
       if (assistantMessage && !assistantMessage.content.trim()) {
         chatHistory = chatHistory.filter((msg) => msg.id !== assistantMessage.id);
-        renderChatMessages();
+        renderChatMessages({
+          allowAutoScroll: false
+        });
       } else if (assistantMessage && assistantMessage.content.trim()) {
+        renderChatMessages({
+          allowAutoScroll: false
+        });
         await saveChatHistory();
       }
 
@@ -11729,6 +12580,15 @@ export function initPanelApp() {
       openSettings();
     });
 
+    nativeConnectorStatusBtn?.addEventListener('click', () => {
+      if (isSettingsScreenActive()) {
+        setSettingsPage(SETTINGS_PAGES.LOCAL_CONNECTOR);
+        return;
+      }
+
+      openSettings(SETTINGS_PAGES.LOCAL_CONNECTOR);
+    });
+
     goHomeBtn?.addEventListener('click', () => {
       blinkBrandEmotion({ force: true, preserveRandom: true });
       goToPrimaryScreen();
@@ -11894,6 +12754,19 @@ export function initPanelApp() {
       void saveAppsIntegrationsFromScreen({ autosave: false });
     });
 
+    settingsOpenConnectorDetailBtn?.addEventListener('click', () => {
+      setSettingsPage(SETTINGS_PAGES.LOCAL_CONNECTOR);
+    });
+
+    settingsSmtpPortInput?.addEventListener('input', () => {
+      const digits = String(settingsSmtpPortInput.value || '')
+        .replace(/[^0-9]/g, '')
+        .slice(0, 5);
+      if (settingsSmtpPortInput.value !== digits) {
+        settingsSmtpPortInput.value = digits;
+      }
+    });
+
     const integrationInputs = [
       settingsSmtpTransportSelect,
       settingsSmtpNativeHostInput,
@@ -11912,13 +12785,36 @@ export function initPanelApp() {
         scheduleIntegrationsAutosave({
           delayMs: 760
         });
+        renderNativeHostBridgeSection();
       });
       input?.addEventListener('change', () => {
         scheduleIntegrationsAutosave({
           delayMs: 320
         });
+        renderNativeHostBridgeSection();
       });
     }
+
+    settingsSmtpNativeHostInput?.addEventListener('change', () => {
+      const expectedHost = sanitizeNativeHostNameToken(settingsSmtpNativeHostInput.value || '', '');
+      if (!expectedHost || expectedHost !== nativeHostDiagnostics.hostName) {
+        nativeHostDiagnostics = {
+          ok: false,
+          hostName: expectedHost,
+          checkedAt: 0,
+          message: '',
+          version: '',
+          capabilities: []
+        };
+        renderNativeHostBridgeSection();
+      }
+    });
+
+    settingsSmtpTransportSelect?.addEventListener('change', () => {
+      if (normalizeSmtpTransport(settingsSmtpTransportSelect.value) === 'native_host') {
+        void pingNativeHostBridge({ silent: true });
+      }
+    });
 
     settingsCustomToolsSchemaInput?.addEventListener('input', () => {
       scheduleIntegrationsAutosave({
@@ -11949,6 +12845,20 @@ export function initPanelApp() {
       }
 
       setStatus(settingsIntegrationsStatus, 'Guia de empaquetado abierta en una nueva pestana.');
+    });
+
+    settingsNativeHostDownloadBtn?.addEventListener('click', () => {
+      try {
+        downloadMacNativeHostInstaller();
+        setStatus(settingsIntegrationsStatus, 'Descarga iniciada: greenstudio-native-host-macos.sh');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'No se pudo descargar complemento local.';
+        setStatus(settingsIntegrationsStatus, message, true);
+      }
+    });
+
+    settingsNativeHostPingBtn?.addEventListener('click', () => {
+      void pingNativeHostBridge({ silent: false });
     });
 
     settingsPermissionLocationBtn?.addEventListener('click', () => {

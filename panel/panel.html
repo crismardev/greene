@@ -29,6 +29,10 @@
         </div>
       </button>
       <div class="topbar__actions">
+        <button id="nativeConnectorStatusBtn" class="icon-btn icon-btn--ghost connector-status-btn" type="button"
+          aria-label="Estado de complemento local: sin conexion" title="Estado de complemento local: sin conexion">
+          <span id="nativeConnectorStatusDot" class="connector-status-dot is-offline" aria-hidden="true"></span>
+        </button>
         <button id="openSettingsBtn" class="icon-btn icon-btn--ghost" type="button" aria-label="Abrir settings" title="Settings">
           <svg xmlns="http://www.w3.org/2000/svg" id="Outline" viewBox="0 0 24 24" width="512" height="512"><path fill="currentColor" d="M12,8a4,4,0,1,0,4,4A4,4,0,0,0,12,8Zm0,6a2,2,0,1,1,2-2A2,2,0,0,1,12,14Z"/><path fill="currentColor" d="M21.294,13.9l-.444-.256a9.1,9.1,0,0,0,0-3.29l.444-.256a3,3,0,1,0-3-5.2l-.445.257A8.977,8.977,0,0,0,15,3.513V3A3,3,0,0,0,9,3v.513A8.977,8.977,0,0,0,6.152,5.159L5.705,4.9a3,3,0,0,0-3,5.2l.444.256a9.1,9.1,0,0,0,0,3.29l-.444.256a3,3,0,1,0,3,5.2l.445-.257A8.977,8.977,0,0,0,9,20.487V21a3,3,0,0,0,6,0v-.513a8.977,8.977,0,0,0,2.848-1.646l.447.258a3,3,0,0,0,3-5.2Zm-2.548-3.776a7.048,7.048,0,0,1,0,3.75,1,1,0,0,0,.464,1.133l1.084.626a1,1,0,0,1-1,1.733l-1.086-.628a1,1,0,0,0-1.215.165,6.984,6.984,0,0,1-3.243,1.875,1,1,0,0,0-.751.969V21a1,1,0,0,1-2,0V19.748a1,1,0,0,0-.751-.969A6.984,6.984,0,0,1,7.006,16.9a1,1,0,0,0-1.215-.165l-1.084.627a1,1,0,1,1-1-1.732l1.084-.626a1,1,0,0,0,.464-1.133,7.048,7.048,0,0,1,0-3.75A1,1,0,0,0,4.79,8.992L3.706,8.366a1,1,0,0,1,1-1.733l1.086.628A1,1,0,0,0,7.006,7.1a6.984,6.984,0,0,1,3.243-1.875A1,1,0,0,0,11,4.252V3a1,1,0,0,1,2,0V4.252a1,1,0,0,0,.751.969A6.984,6.984,0,0,1,16.994,7.1a1,1,0,0,0,1.215.165l1.084-.627a1,1,0,1,1,1,1.732l-1.084.626A1,1,0,0,0,18.746,10.125Z"/></svg>
         </button>
@@ -305,6 +309,16 @@
                         stroke-linejoin="round"></path>
                     </svg>
                   </button>
+                  <button type="button" class="settings-nav-item settings-nav-item--connector" data-settings-target="local_connector">
+                    <span>Local Connector</span>
+                    <span class="settings-nav-item__meta" aria-hidden="true">
+                      <span id="settingsNativeConnectorNavDot" class="settings-nav-dot is-offline"></span>
+                      <svg viewBox="0 0 24 24" focusable="false">
+                        <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                          stroke-linejoin="round"></path>
+                      </svg>
+                    </span>
+                  </button>
                 </nav>
               </article>
 
@@ -512,7 +526,7 @@
                 <section class="settings-security">
                   <div class="settings-card__head">
                     <h3>SMTP</h3>
-                    <p class="tool-copy">Envio SMTP por bridge interno de la extension (background) con transporte HTTP local o Native Host.</p>
+                    <p class="tool-copy">Envio SMTP por bridge interno (background) con transporte HTTP local o Local Connector.</p>
                   </div>
                   <label class="field">
                     <span>SMTP Transport</span>
@@ -520,10 +534,6 @@
                       <option value="http_agent">HTTP Agent (localhost/API)</option>
                       <option value="native_host">Native Host (proceso local)</option>
                     </select>
-                  </label>
-                  <label class="field">
-                    <span>Native Host Name</span>
-                    <input id="settingsSmtpNativeHostInput" type="text" placeholder="com.greenstudio.smtp_bridge" autocomplete="off" />
                   </label>
                   <label class="field">
                     <span>SMTP Agent URL (local)</span>
@@ -535,7 +545,7 @@
                   </label>
                   <label class="field">
                     <span>SMTP Port</span>
-                    <input id="settingsSmtpPortInput" type="number" min="1" max="65535" placeholder="587" autocomplete="off" />
+                    <input id="settingsSmtpPortInput" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="587" autocomplete="off" />
                   </label>
                   <label class="field">
                     <span>SMTP Secure</span>
@@ -558,6 +568,7 @@
                     <input id="settingsSmtpFromInput" type="email" placeholder="no-reply@empresa.com" autocomplete="off" />
                   </label>
                   <div class="actions actions--tight">
+                    <button id="settingsOpenConnectorDetailBtn" class="btn btn--ghost" type="button">Abrir Local Connector</button>
                     <button id="settingsSmtpBridgeGuideBtn" class="btn btn--ghost" type="button">Guia local bridge</button>
                     <button id="settingsSmtpBridgePackagingBtn" class="btn btn--ghost" type="button">Guia empaquetado</button>
                   </div>
@@ -626,6 +637,36 @@
                   <button id="settingsIntegrationsSaveBtn" class="btn" type="button">Guardar integraciones</button>
                 </div>
                 <p id="settingsIntegrationsStatus" class="status" role="status"></p>
+              </article>
+
+              <article class="tool-card settings-card settings-page" data-settings-page="local_connector">
+                <div class="settings-card__head">
+                  <h3>Local Connector</h3>
+                  <p class="tool-copy">Conector local para integrar herramientas del sistema mas alla de SMTP.</p>
+                </div>
+
+                <section class="settings-security">
+                  <div class="settings-card__head">
+                    <h3>Native Host Bridge</h3>
+                    <p class="tool-copy">Administra instalacion, host objetivo y estado de conexion del complemento local.</p>
+                  </div>
+                  <label class="field">
+                    <span>Native Host Name</span>
+                    <input id="settingsSmtpNativeHostInput" type="text" placeholder="com.greenstudio.smtp_bridge" autocomplete="off" />
+                  </label>
+                  <p id="settingsNativeHostPlatformMeta" class="tool-copy">SO detectado: desconocido.</p>
+                  <pre id="settingsNativeHostInstallMd" class="tabs-context-json">Instalacion (macOS):
+1) Descarga el complemento.
+2) Ejecuta el script en Terminal.
+3) Vuelve y haz Ping.</pre>
+                  <div class="actions actions--tight">
+                    <button id="settingsNativeHostDownloadBtn" class="btn btn--ghost" type="button">Descargar complemento (macOS)</button>
+                    <button id="settingsNativeHostPingBtn" class="btn btn--ghost" type="button">Ping complemento</button>
+                  </div>
+                  <p id="settingsNativeHostHeaderMeta" class="tool-copy">Estado header: desconectado.</p>
+                  <p id="settingsNativeHostStatus" class="status" role="status"></p>
+                  <p id="settingsNativeHostToolsDependencyMeta" class="tool-copy">Dependencias locales: sin verificar.</p>
+                </section>
               </article>
             </section>
           </article>
