@@ -40,8 +40,8 @@
     </header>
 
     <section class="stage" aria-live="polite">
-      <div class="stage__track" id="stageTrack" style="--stage-index: 0;">
-        <section class="screen screen--onboarding" id="onboardingScreen" aria-label="Onboarding">
+      <div class="stage__track" id="stageTrack">
+        <section class="screen screen--onboarding" id="onboardingScreen" data-screen-name="onboarding" aria-label="Onboarding">
           <article class="onboarding-shell">
             <div class="onboarding-card">
               <div class="onboarding-emotion" id="onboardingEmotion" role="img" aria-label="Greene emotion neutral">
@@ -69,7 +69,7 @@
           </article>
         </section>
 
-        <section class="screen screen--home" aria-label="Home Chat">
+        <section class="screen screen--home" id="homeScreen" data-screen-name="home" aria-label="Home Chat">
           <article class="chat-shell">
             <section class="chat-body" id="chatBody">
               <div class="chat-messages" id="chatMessages"></div>
@@ -164,7 +164,7 @@
           </article>
         </section>
 
-        <section class="screen screen--tools" id="toolsScreen" data-tool="image" style="--tool-index: 0; --tool-count: 2"
+        <section class="screen screen--tools" id="toolsScreen" data-screen-name="tools" data-tool="image" style="--tool-index: 0; --tool-count: 2"
           aria-label="Tools">
           <article class="tools-shell">
             <header class="tools-head">
@@ -237,7 +237,7 @@
           </article>
         </section>
 
-        <section class="screen screen--settings" id="settingsScreen" aria-label="Settings">
+        <section class="screen screen--settings" id="settingsScreen" data-screen-name="settings" aria-label="Settings">
           <article class="settings-shell" id="settingsShell" data-settings-page="home">
             <header class="tools-head">
               <button id="closeSettingsBtn" class="icon-btn icon-btn--ghost icon-btn--back" type="button"
@@ -512,36 +512,8 @@
                 <section class="settings-security">
                   <div class="settings-card__head">
                     <h3>SMTP</h3>
-                    <p class="tool-copy">El envio usa relay HTTP (webhook) para no exponer sockets SMTP en navegador.</p>
+                    <p class="tool-copy">Envio local directo: `smtp.sendMail` abre un borrador listo en tu cliente de correo (mailto).</p>
                   </div>
-                  <label class="field">
-                    <span>Relay URL (webhook)</span>
-                    <input id="settingsSmtpRelayUrlInput" type="url" placeholder="https://tu-api.com/send-mail" autocomplete="off" />
-                  </label>
-                  <label class="field">
-                    <span>SMTP Host</span>
-                    <input id="settingsSmtpHostInput" type="text" placeholder="smtp.example.com" autocomplete="off" />
-                  </label>
-                  <label class="field">
-                    <span>SMTP Port</span>
-                    <input id="settingsSmtpPortInput" type="number" min="1" max="65535" placeholder="587" autocomplete="off" />
-                  </label>
-                  <label class="field">
-                    <span>SMTP Secure</span>
-                    <select id="settingsSmtpSecureSelect">
-                      <option value="auto">Auto</option>
-                      <option value="true">TLS/SSL</option>
-                      <option value="false">STARTTLS/Plain</option>
-                    </select>
-                  </label>
-                  <label class="field">
-                    <span>SMTP Username</span>
-                    <input id="settingsSmtpUsernameInput" type="text" autocomplete="off" />
-                  </label>
-                  <label class="field">
-                    <span>SMTP Password</span>
-                    <input id="settingsSmtpPasswordInput" type="password" autocomplete="off" />
-                  </label>
                   <label class="field">
                     <span>Default From</span>
                     <input id="settingsSmtpFromInput" type="email" placeholder="no-reply@empresa.com" autocomplete="off" />
@@ -551,20 +523,21 @@
                 <section class="settings-security">
                   <div class="settings-card__head">
                     <h3>Google Maps</h3>
-                    <p class="tool-copy">Usado por tools de lugares cercanos y tiempos de ruta.</p>
+                    <p class="tool-copy">Usado por tools de ubicacion, geocoding, busquedas cercanas (por texto/tipo) y tiempos de ruta.</p>
                   </div>
                   <label class="field">
                     <span>Maps API Key</span>
                     <input id="settingsMapsApiKeyInput" type="password" autocomplete="off" />
                   </label>
                   <label class="field">
-                    <span>Nearby Place Type</span>
+                    <span>Default Nearby Place Type</span>
                     <select id="settingsMapsNearbyTypeSelect">
                       <option value="restaurant">Restaurant</option>
                       <option value="cafe">Cafe</option>
                       <option value="bar">Bar</option>
                       <option value="hotel">Hotel</option>
                       <option value="pharmacy">Pharmacy</option>
+                      <option value="real_estate_agency">Real estate agency</option>
                     </select>
                   </label>
                   <div class="actions actions--tight">

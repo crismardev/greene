@@ -74,7 +74,6 @@ export function initPanelApp() {
     tools: 2,
     settings: 3
   });
-  const STAGE_SCREEN_COUNT = Object.keys(SCREEN_INDEX).length;
   const BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE = 'GREENSTUDIO_LOCATION_CONTEXT_UPDATE';
   const DEFAULT_CHAT_SYSTEM_PROMPT = buildDefaultChatSystemPrompt(DEFAULT_ASSISTANT_LANGUAGE);
   const DEFAULT_ASSISTANT_DISPLAY_NAME = 'Grenne';
@@ -268,7 +267,6 @@ export function initPanelApp() {
   function createDefaultIntegrationsConfig() {
     return {
       smtp: {
-        relayUrl: '',
         host: '',
         port: 587,
         secure: 'auto',
@@ -319,6 +317,7 @@ export function initPanelApp() {
 
   const app = document.getElementById('app');
   const stageTrack = document.getElementById('stageTrack');
+  const stageScreens = Array.from(document.querySelectorAll('.screen[data-screen-name]'));
   const brandHomeBtn = document.getElementById('brandHomeBtn');
   const brandRoleLabel = document.getElementById('brandRoleLabel');
   const brandNameText = document.getElementById('brandNameText');
@@ -422,12 +421,6 @@ export function initPanelApp() {
   const settingsCrmErpDbSchemaSummary = document.getElementById('settingsCrmErpDbSchemaSummary');
   const settingsIntegrationsSaveBtn = document.getElementById('settingsIntegrationsSaveBtn');
   const settingsIntegrationsStatus = document.getElementById('settingsIntegrationsStatus');
-  const settingsSmtpRelayUrlInput = document.getElementById('settingsSmtpRelayUrlInput');
-  const settingsSmtpHostInput = document.getElementById('settingsSmtpHostInput');
-  const settingsSmtpPortInput = document.getElementById('settingsSmtpPortInput');
-  const settingsSmtpSecureSelect = document.getElementById('settingsSmtpSecureSelect');
-  const settingsSmtpUsernameInput = document.getElementById('settingsSmtpUsernameInput');
-  const settingsSmtpPasswordInput = document.getElementById('settingsSmtpPasswordInput');
   const settingsSmtpFromInput = document.getElementById('settingsSmtpFromInput');
   const settingsMapsApiKeyInput = document.getElementById('settingsMapsApiKeyInput');
   const settingsMapsNearbyTypeSelect = document.getElementById('settingsMapsNearbyTypeSelect');
@@ -520,7 +513,6 @@ export function initPanelApp() {
   let isGeneratingChat = false;
   let pendingChatRenderRaf = 0;
   let modelWarmupPromise = null;
-  let stageResizeObserver = null;
   let settingsScreenController = null;
   let settingsScreenState = null;
   let tabContextSnapshot = { activeTabId: -1, tabs: [], history: [], runtimeContext: {}, updatedAt: Date.now(), reason: 'init' };
@@ -1253,7 +1245,6 @@ export function initPanelApp() {
 
     return {
       smtp: {
-        relayUrl: String(rawSmtp.relayUrl || '').trim().slice(0, 500),
         host: String(rawSmtp.host || '').trim().slice(0, 200),
         port: Math.max(1, Math.min(65535, Number(rawSmtp.port) || defaults.smtp.port)),
         secure: ['auto', 'true', 'false'].includes(String(rawSmtp.secure || '').trim()) ? String(rawSmtp.secure || '').trim() : 'auto',
@@ -1728,26 +1719,6 @@ export function initPanelApp() {
     const maps = integrations.maps || {};
 
     if (syncInput) {
-      if (settingsSmtpRelayUrlInput) {
-        settingsSmtpRelayUrlInput.value = String(smtp.relayUrl || '');
-      }
-      if (settingsSmtpHostInput) {
-        settingsSmtpHostInput.value = String(smtp.host || '');
-      }
-      if (settingsSmtpPortInput) {
-        settingsSmtpPortInput.value = String(smtp.port || 587);
-      }
-      if (settingsSmtpSecureSelect) {
-        settingsSmtpSecureSelect.value = ['auto', 'true', 'false'].includes(String(smtp.secure || ''))
-          ? String(smtp.secure || 'auto')
-          : 'auto';
-      }
-      if (settingsSmtpUsernameInput) {
-        settingsSmtpUsernameInput.value = String(smtp.username || '');
-      }
-      if (settingsSmtpPasswordInput) {
-        settingsSmtpPasswordInput.value = String(smtp.password || '');
-      }
       if (settingsSmtpFromInput) {
         settingsSmtpFromInput.value = String(smtp.from || '');
       }
@@ -1779,12 +1750,7 @@ export function initPanelApp() {
     const nextIntegrations = normalizeIntegrationsConfig({
       ...getIntegrationsConfig(),
       smtp: {
-        relayUrl: String(settingsSmtpRelayUrlInput?.value || ''),
-        host: String(settingsSmtpHostInput?.value || ''),
-        port: Number(settingsSmtpPortInput?.value || 587),
-        secure: String(settingsSmtpSecureSelect?.value || 'auto'),
-        username: String(settingsSmtpUsernameInput?.value || ''),
-        password: String(settingsSmtpPasswordInput?.value || ''),
+        ...getIntegrationsConfig().smtp,
         from: String(settingsSmtpFromInput?.value || '')
       },
       maps: {
@@ -1824,6 +1790,225 @@ export function initPanelApp() {
     return true;
   }
 
+  function normalizeMapsToken(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  }
+
+  function normalizeNearbyPlaceType(rawType, fallbackType = 'restaurant') {
+    const aliases = {
+      restaurant: 'restaurant',
+      restaurantes: 'restaurant',
+      restaurante: 'restaurant',
+      cafe: 'cafe',
+      cafeteria: 'cafe',
+      cafeterias: 'cafe',
+      bar: 'bar',
+      hotel: 'hotel',
+      pharmacy: 'pharmacy',
+      farmacia: 'pharmacy',
+      farmacias: 'pharmacy',
+      real_estate_agency: 'real_estate_agency',
+      real_estate: 'real_estate_agency',
+      realestate: 'real_estate_agency',
+      inmobiliaria: 'real_estate_agency',
+      inmobiliarias: 'real_estate_agency',
+      bienes_raices: 'real_estate_agency',
+      bank: 'bank',
+      banco: 'bank',
+      bancos: 'bank',
+      supermarket: 'supermarket',
+      supermercado: 'supermarket',
+      supermercados: 'supermarket',
+      hospital: 'hospital',
+      hospitals: 'hospital',
+      gas_station: 'gas_station',
+      gasolinera: 'gas_station',
+      gasolineras: 'gas_station',
+      gym: 'gym',
+      gimnasio: 'gym',
+      gimnasios: 'gym'
+    };
+    const token = normalizeMapsToken(rawType);
+    const fallbackToken = normalizeMapsToken(fallbackType || 'restaurant');
+    const safeFallback = aliases[fallbackToken] || (/^[a-z_]{3,60}$/.test(fallbackToken) ? fallbackToken : 'restaurant');
+
+    if (!token) {
+      return safeFallback;
+    }
+
+    if (aliases[token]) {
+      return aliases[token];
+    }
+
+    if (/^[a-z_]{3,60}$/.test(token)) {
+      return token;
+    }
+
+    return safeFallback;
+  }
+
+  function buildMapsUrlForCoordinates(location) {
+    const latitude = Number(location?.latitude);
+    const longitude = Number(location?.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return '';
+    }
+
+    return `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`;
+  }
+
+  function normalizeGooglePlaceRecord(rawPlace) {
+    const place = rawPlace && typeof rawPlace === 'object' ? rawPlace : {};
+    const name = String(place?.displayName?.text || place?.name || '').trim().slice(0, 140);
+    if (!name) {
+      return null;
+    }
+
+    const latitude = Number(place?.location?.latitude);
+    const longitude = Number(place?.location?.longitude);
+    const mapsUrl = String(place?.googleMapsUri || '').trim().slice(0, 320);
+
+    return {
+      name,
+      address: String(place?.formattedAddress || '').trim().slice(0, 220),
+      rating: Number.isFinite(Number(place?.rating)) ? Number(place.rating) : 0,
+      userRatingCount: Math.max(0, Number(place?.userRatingCount) || 0),
+      primaryType: String(place?.primaryType || '').trim().slice(0, 80),
+      placeId: String(place?.id || '').trim().slice(0, 120),
+      mapsUrl: mapsUrl || buildMapsUrlForCoordinates({ latitude, longitude }),
+      latitude: Number.isFinite(latitude) ? latitude : 0,
+      longitude: Number.isFinite(longitude) ? longitude : 0
+    };
+  }
+
+  async function reverseGeocodeLocation(rawArgs = {}) {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
+    const integrations = getIntegrationsConfig();
+    const mapsApiKey = String(integrations.maps?.apiKey || '').trim();
+    if (!mapsApiKey) {
+      throw new Error('Configura Maps API Key para geocoding.');
+    }
+
+    const location = resolveLocationFromArgs(args);
+    if (!location) {
+      throw new Error('No hay ubicacion disponible para geocoding.');
+    }
+
+    const latitude = Number(location.latitude);
+    const longitude = Number(location.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      throw new Error('No hay coordenadas validas para geocoding.');
+    }
+
+    const languageCode = String(args.languageCode || args.language || 'es').trim().slice(0, 12) || 'es';
+    const endpoint = new URL('https://maps.googleapis.com/maps/api/geocode/json');
+    endpoint.searchParams.set('latlng', `${latitude},${longitude}`);
+    endpoint.searchParams.set('language', languageCode);
+    endpoint.searchParams.set('key', mapsApiKey);
+
+    const response = await fetch(endpoint.toString());
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const errorText = String(payload?.error_message || payload?.status || `HTTP ${response.status}`).trim();
+      throw new Error(`Maps geocode error: ${errorText}`);
+    }
+
+    const status = String(payload?.status || '').trim();
+    if (status && status !== 'OK' && status !== 'ZERO_RESULTS') {
+      const errorText = String(payload?.error_message || status || 'geocode_failed').trim();
+      throw new Error(`Maps geocode error: ${errorText}`);
+    }
+
+    const firstResult = Array.isArray(payload?.results) ? payload.results[0] : null;
+    return {
+      location: {
+        latitude,
+        longitude
+      },
+      address: String(firstResult?.formatted_address || '').trim().slice(0, 260),
+      placeId: String(firstResult?.place_id || '').trim().slice(0, 120),
+      types: Array.isArray(firstResult?.types) ? firstResult.types.slice(0, 10) : [],
+      mapsUrl: buildMapsUrlForCoordinates({ latitude, longitude })
+    };
+  }
+
+  async function searchPlacesByTextForLocation(location, options = {}) {
+    const safeLocation = location && typeof location === 'object' ? location : null;
+    const latitude = Number(safeLocation?.latitude);
+    const longitude = Number(safeLocation?.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      throw new Error('No hay coordenadas validas para buscar lugares.');
+    }
+
+    const integrations = getIntegrationsConfig();
+    const mapsApiKey = String(integrations.maps?.apiKey || '').trim();
+    if (!mapsApiKey) {
+      throw new Error('Configura Maps API Key para buscar lugares.');
+    }
+
+    const query = String(options.query || options.text || '').trim().slice(0, 180);
+    if (!query) {
+      throw new Error('maps.searchPlaces requiere args.query.');
+    }
+
+    const radiusMeters = Math.max(100, Math.min(50000, Number(options.radiusMeters) || 2500));
+    const maxResultCount = Math.max(1, Math.min(20, Number(options.maxResultCount) || 8));
+    const languageCode = String(options.languageCode || options.language || 'es').trim().slice(0, 12) || 'es';
+
+    const response = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': mapsApiKey,
+        'X-Goog-FieldMask':
+          'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType,places.googleMapsUri,places.location'
+      },
+      body: JSON.stringify({
+        textQuery: query,
+        pageSize: maxResultCount,
+        languageCode,
+        locationBias: {
+          circle: {
+            center: {
+              latitude,
+              longitude
+            },
+            radius: radiusMeters
+          }
+        }
+      })
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const errorText = String(payload?.error?.message || payload?.message || `HTTP ${response.status}`).trim();
+      throw new Error(`Maps search error: ${errorText}`);
+    }
+
+    return (Array.isArray(payload?.places) ? payload.places : [])
+      .map((item) => normalizeGooglePlaceRecord(item))
+      .filter(Boolean)
+      .slice(0, maxResultCount);
+  }
+
   async function fetchNearbyPlacesForLocation(location, options = {}) {
     const safeLocation = location && typeof location === 'object' ? location : null;
     const latitude = Number(safeLocation?.latitude);
@@ -1838,9 +2023,8 @@ export function initPanelApp() {
       throw new Error('Configura Maps API Key para consultar lugares cercanos.');
     }
 
-    const nearbyType = String(options.nearbyType || integrations.maps?.nearbyType || 'restaurant')
-      .trim()
-      .toLowerCase();
+    const fallbackType = integrations.maps?.nearbyType || 'restaurant';
+    const nearbyType = normalizeNearbyPlaceType(options.nearbyType || options.type || fallbackType, fallbackType);
     const radiusMeters = Math.max(100, Math.min(50000, Number(options.radiusMeters) || 1500));
     const maxResultCount = Math.max(1, Math.min(20, Number(options.maxResultCount) || 6));
 
@@ -1850,7 +2034,7 @@ export function initPanelApp() {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': mapsApiKey,
         'X-Goog-FieldMask':
-          'places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType'
+          'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType,places.googleMapsUri,places.location'
       },
       body: JSON.stringify({
         includedTypes: [nearbyType],
@@ -1879,24 +2063,40 @@ export function initPanelApp() {
       throw new Error(`Maps error: ${errorText}`);
     }
 
-    const places = (Array.isArray(payload?.places) ? payload.places : [])
-      .map((item) => {
-        const name = String(item?.displayName?.text || '').trim().slice(0, 140);
-        if (!name) {
-          return null;
-        }
-        return {
-          name,
-          address: String(item?.formattedAddress || '').trim().slice(0, 220),
-          rating: Number.isFinite(Number(item?.rating)) ? Number(item.rating) : 0,
-          userRatingCount: Math.max(0, Number(item?.userRatingCount) || 0),
-          primaryType: String(item?.primaryType || '').trim().slice(0, 80)
-        };
-      })
+    return (Array.isArray(payload?.places) ? payload.places : [])
+      .map((item) => normalizeGooglePlaceRecord(item))
       .filter(Boolean)
       .slice(0, maxResultCount);
+  }
 
-    return places;
+  async function persistMapsLocationSnapshot(location, places = []) {
+    const safeLocation = location && typeof location === 'object' ? location : null;
+    const latitude = Number(safeLocation?.latitude);
+    const longitude = Number(safeLocation?.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return false;
+    }
+
+    const integrations = getIntegrationsConfig();
+    const nextIntegrations = normalizeIntegrationsConfig({
+      ...integrations,
+      maps: {
+        ...integrations.maps,
+        lastKnownLocation: {
+          ...(integrations.maps?.lastKnownLocation || {}),
+          latitude,
+          longitude,
+          capturedAt: Date.now()
+        },
+        nearbyPlaces: Array.isArray(places) ? places : []
+      }
+    });
+
+    const ok = await savePanelSettings({ integrations: nextIntegrations });
+    if (ok) {
+      renderAppsIntegrationsSettings({ syncInput: false });
+    }
+    return ok;
   }
 
   async function requestLocationPermissionAndSync(options = {}) {
@@ -1938,7 +2138,7 @@ export function initPanelApp() {
           nearbyType: integrations.maps?.nearbyType || 'restaurant'
         });
       } catch (error) {
-        setStatus(settingsIntegrationsStatus, error instanceof Error ? error.message : 'No se pudo actualizar nearby places.', true);
+        setStatus(settingsIntegrationsStatus, error instanceof Error ? error.message : 'No se pudieron actualizar lugares cercanos.', true);
       }
     }
 
@@ -2026,7 +2226,7 @@ export function initPanelApp() {
 
     const ok = await savePanelSettings({ integrations: nextIntegrations });
     if (!ok) {
-      throw new Error('No se pudieron guardar nearby places.');
+      throw new Error('No se pudieron guardar lugares cercanos.');
     }
 
     renderAppsIntegrationsSettings({ syncInput: false });
@@ -3027,6 +3227,22 @@ export function initPanelApp() {
     return storageService.saveSettings(patch);
   }
 
+  function syncActiveScreenState(activeScreen) {
+    if (!stageScreens.length) {
+      return;
+    }
+
+    for (const screenElement of stageScreens) {
+      const screenName = String(screenElement.dataset.screenName || '').trim();
+      const isActive = screenName === activeScreen;
+      screenElement.classList.toggle('is-active', isActive);
+      screenElement.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+      if ('inert' in screenElement) {
+        screenElement.inert = !isActive;
+      }
+    }
+  }
+
   function setScreen(screen) {
     const safeScreen = Object.prototype.hasOwnProperty.call(SCREEN_INDEX, screen) ? screen : 'home';
 
@@ -3034,10 +3250,7 @@ export function initPanelApp() {
       app.dataset.screen = safeScreen;
     }
 
-    if (stageTrack) {
-      stageTrack.style.setProperty('--stage-index', String(SCREEN_INDEX[safeScreen]));
-      stageTrack.style.setProperty('--stage-count', String(STAGE_SCREEN_COUNT));
-    }
+    syncActiveScreenState(safeScreen);
 
     if (safeScreen !== 'tools') {
       setDropUi(false);
@@ -3049,12 +3262,7 @@ export function initPanelApp() {
       return;
     }
 
-    if (enabled) {
-      stageTrack.style.removeProperty('transition');
-      return;
-    }
-
-    stageTrack.style.setProperty('transition', 'none');
+    stageTrack.classList.toggle('is-transitions-enabled', enabled === true);
   }
 
   function realignStageToScreen(screenName = '') {
@@ -3065,17 +3273,7 @@ export function initPanelApp() {
         ? fromDom
         : 'onboarding';
 
-    setStageTransitionEnabled(false);
     setScreen(candidate);
-
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => {
-        setStageTransitionEnabled(true);
-      });
-      return;
-    }
-
-    setStageTransitionEnabled(true);
   }
 
   function scheduleStageStabilization(screenName = '') {
@@ -3091,33 +3289,8 @@ export function initPanelApp() {
     if (typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(() => {
         realignStageToScreen(safeScreen);
-        requestAnimationFrame(() => {
-          realignStageToScreen(safeScreen);
-        });
       });
     }
-
-    window.setTimeout(() => {
-      realignStageToScreen(safeScreen);
-    }, 120);
-  }
-
-  function observeStageSizeChanges() {
-    if (!stageTrack || typeof ResizeObserver !== 'function' || stageResizeObserver) {
-      return;
-    }
-
-    const viewport = stageTrack.parentElement;
-    if (!viewport) {
-      return;
-    }
-
-    stageResizeObserver = new ResizeObserver(() => {
-      const current = app && app.dataset ? app.dataset.screen : '';
-      realignStageToScreen(current || 'onboarding');
-    });
-
-    stageResizeObserver.observe(viewport);
   }
 
   function setActiveTool(toolName) {
@@ -5337,11 +5510,14 @@ export function initPanelApp() {
     const permissions = integrations.permissions || {};
     const maps = integrations.maps || {};
     const locationMeta = buildLocationMetaText(maps.lastKnownLocation, maps.nearbyPlaces || []);
+    const hasMapsApiKey = Boolean(String(maps.apiKey || '').trim());
+    const nearbyType = normalizeNearbyPlaceType(maps.nearbyType || 'restaurant', 'restaurant');
     const micState = normalizeIntegrationPermissionState(permissions.microphone);
     const locState = normalizeIntegrationPermissionState(permissions.location);
 
     return [
       `Permisos locales: microfono=${micState}, ubicacion=${locState}.`,
+      `Maps: apiKey=${hasMapsApiKey ? 'configurada' : 'no_configurada'}, nearbyTypeDefault=${nearbyType}.`,
       locationMeta
     ].join('\n');
   }
@@ -5366,7 +5542,7 @@ export function initPanelApp() {
     const hasWhatsappTab = Boolean(getPreferredWhatsappTab());
     const hasCrmErpDbConnection = Boolean(getCrmErpDatabaseConnectionUrl());
     const integrations = getIntegrationsConfig();
-    const hasSmtpRelay = Boolean(String(integrations.smtp?.relayUrl || '').trim());
+    const canUseLocalMailto = Boolean(chrome?.tabs && typeof chrome.tabs.create === 'function');
     const hasMapsApiKey = Boolean(String(integrations.maps?.apiKey || '').trim());
     const hasCustomTools = normalizeCustomIntegrationTools(integrations.customTools).length > 0;
     return [
@@ -5404,23 +5580,31 @@ export function initPanelApp() {
             '- db.queryWrite (args: sql, params opcional array, maxRows opcional; solo INSERT/UPDATE/DELETE)'
           ]
         : ['- db.* requiere configurar la URL de PostgreSQL en Settings > CRM/ERP Database.']),
-      ...(hasSmtpRelay
-        ? ['- smtp.sendMail (args: to, subject, text|html, from opcional; usa relay SMTP configurado)']
-        : ['- smtp.sendMail requiere configurar Relay URL en Settings > Apps & Integrations.']),
+      ...(canUseLocalMailto
+        ? [
+            '- smtp.sendMail (args: to, subject, text|html, cc opcional, bcc opcional, from opcional; abre envio local directo en cliente de correo)'
+          ]
+        : ['- smtp.sendMail no disponible en este navegador.']),
       ...(hasMapsApiKey
         ? [
             '- maps.getCurrentLocation (sin args; devuelve coordenadas guardadas)',
-            '- maps.getNearbyPlaces (args: type opcional, radiusMeters opcional, maxResults opcional)',
+            '- maps.reverseGeocode (args: lat/lng opcional; devuelve direccion de coordenadas)',
+            '- maps.getNearbyPlaces (args: type opcional, query opcional, radiusMeters opcional, maxResults opcional)',
+            '- maps.searchPlaces (args: query requerido, radiusMeters opcional, maxResults opcional)',
             '- maps.getDirectionsTime (args: destination requerido, origin opcional, travelMode opcional)'
           ]
-        : ['- maps.* requiere configurar Maps API Key en Settings > Apps & Integrations.']),
+        : [
+            '- maps.getCurrentLocation (sin args; devuelve coordenadas guardadas)',
+            '- maps.reverseGeocode/maps.getNearbyPlaces/maps.searchPlaces/maps.getDirectionsTime requieren Maps API Key en Settings.'
+          ]),
       ...(hasCustomTools
         ? ['- integration.call (args: name requerido, input objeto opcional)']
         : ['- integration.call requiere registrar Custom Tools Schema en Settings > Apps & Integrations.']),
       'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
       'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
       'Para preguntas de CRM/ERP, usa db.refreshSchema si falta contexto y luego db.queryRead/db.queryWrite segun corresponda.',
-      'Para consultas cercanas (restaurantes/cafes/lugares), usa maps.getNearbyPlaces con la ubicacion guardada.',
+      'Para "donde estamos", usa maps.getCurrentLocation y maps.reverseGeocode cuando haya API key.',
+      'Para consultas cercanas por rubro o texto (ej. "inmobiliarias cerca"), usa maps.searchPlaces con args.query.',
       'En db.queryRead agrega LIMIT razonable (<= 100) para evitar respuestas gigantes.',
       'No inventes tools fuera de esta lista.',
       buildActiveTabsSystemContext(),
@@ -5508,6 +5692,14 @@ export function initPanelApp() {
       'maps.get_locations_places': 'maps.getNearbyPlaces',
       'maps.getLocationsPlaces': 'maps.getNearbyPlaces',
       'maps.get_places': 'maps.getNearbyPlaces',
+      'maps.search_places': 'maps.searchPlaces',
+      'maps.searchPlaces': 'maps.searchPlaces',
+      'maps.search_nearby': 'maps.searchPlaces',
+      'maps.find_places': 'maps.searchPlaces',
+      'maps.reverse_geocode': 'maps.reverseGeocode',
+      'maps.reverseGeocode': 'maps.reverseGeocode',
+      'maps.get_current_address': 'maps.reverseGeocode',
+      'maps.getCurrentAddress': 'maps.reverseGeocode',
       'maps.get_directions_time': 'maps.getDirectionsTime',
       'maps.getDirectionsTime': 'maps.getDirectionsTime',
       'maps.get_directions_duration': 'maps.getDirectionsTime',
@@ -5639,22 +5831,160 @@ export function initPanelApp() {
     };
   }
 
+  function normalizeEmailList(rawValue, limit = 20) {
+    const source = Array.isArray(rawValue) ? rawValue : String(rawValue || '').split(/[;,]/);
+    const cleaned = [];
+    const seen = new Set();
+
+    for (const item of source) {
+      const email = String(item || '').trim().slice(0, 220);
+      if (!email || !email.includes('@') || seen.has(email.toLowerCase())) {
+        continue;
+      }
+      seen.add(email.toLowerCase());
+      cleaned.push(email);
+      if (cleaned.length >= limit) {
+        break;
+      }
+    }
+
+    return cleaned;
+  }
+
+  function htmlToPlainText(rawHtml) {
+    const source = String(rawHtml || '').trim();
+    if (!source) {
+      return '';
+    }
+
+    return source
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n\n')
+      .replace(/<\/div>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/\r\n/g, '\n')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n[ \t]+/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function buildMailtoUrl({ to, cc, bcc, subject, body }) {
+    const primaryTo = Array.isArray(to) ? to.join(',') : '';
+    const params = new URLSearchParams();
+    const safeSubject = String(subject || '').trim();
+    const safeBody = String(body || '').trim();
+    const safeCc = Array.isArray(cc) ? cc.join(',') : '';
+    const safeBcc = Array.isArray(bcc) ? bcc.join(',') : '';
+
+    if (safeSubject) {
+      params.set('subject', safeSubject);
+    }
+    if (safeBody) {
+      params.set('body', safeBody);
+    }
+    if (safeCc) {
+      params.set('cc', safeCc);
+    }
+    if (safeBcc) {
+      params.set('bcc', safeBcc);
+    }
+
+    const query = params.toString();
+    return query ? `mailto:${primaryTo}?${query}` : `mailto:${primaryTo}`;
+  }
+
+  function tryOpenMailtoWithWindow(mailtoUrl) {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    try {
+      if (typeof window.open === 'function') {
+        const win = window.open(mailtoUrl, '_blank', 'noopener');
+        if (win) {
+          return true;
+        }
+      }
+    } catch (_) {
+      // Ignore popup blockers and fallback to location.href.
+    }
+
+    try {
+      window.location.href = mailtoUrl;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function openMailtoDraft(mailtoUrl) {
+    const safeUrl = String(mailtoUrl || '').trim();
+    if (!safeUrl.startsWith('mailto:')) {
+      throw new Error('URL mailto invalida.');
+    }
+
+    if (chrome?.tabs && typeof chrome.tabs.create === 'function') {
+      return new Promise((resolve, reject) => {
+        chrome.tabs.create(
+          {
+            url: safeUrl,
+            active: true
+          },
+          (tab) => {
+            if (!chrome.runtime?.lastError && tab) {
+              resolve({
+                opened: true,
+                tabId: Number(tab.id) || -1,
+                windowId: Number(tab.windowId) || -1
+              });
+              return;
+            }
+
+            if (tryOpenMailtoWithWindow(safeUrl)) {
+              resolve({
+                opened: true,
+                tabId: -1,
+                windowId: -1
+              });
+              return;
+            }
+
+            reject(new Error(chrome.runtime?.lastError?.message || 'No se pudo abrir el cliente de correo local.'));
+          }
+        );
+      });
+    }
+
+    if (tryOpenMailtoWithWindow(safeUrl)) {
+      return {
+        opened: true,
+        tabId: -1,
+        windowId: -1
+      };
+    }
+
+    throw new Error('No se pudo abrir el cliente de correo local.');
+  }
+
   async function sendMailViaConfiguredSmtp(args = {}) {
     const integrations = getIntegrationsConfig();
     const smtp = integrations.smtp || {};
-    const relayUrl = String(smtp.relayUrl || '').trim();
-    if (!relayUrl) {
-      throw new Error('Configura SMTP Relay URL en Settings > Apps & Integrations.');
-    }
-
-    const toRaw = Array.isArray(args.to) ? args.to : [args.to];
-    const to = toRaw
-      .map((item) => String(item || '').trim())
-      .filter(Boolean)
-      .slice(0, 20);
+    const to = normalizeEmailList(args.to, 20);
+    const cc = normalizeEmailList(args.cc, 10);
+    const bcc = normalizeEmailList(args.bcc, 10);
     const subject = String(args.subject || '').trim().slice(0, 220);
-    const text = String(args.text || '').trim().slice(0, 12000);
-    const html = String(args.html || '').trim().slice(0, 18000);
+    const text = String(args.text || '').trim().slice(0, 4000);
+    const html = String(args.html || '').trim().slice(0, 12000);
+    const body = (text || htmlToPlainText(html)).slice(0, 2500);
     const from = String(args.from || smtp.from || '').trim().slice(0, 220);
 
     if (!to.length) {
@@ -5663,48 +5993,30 @@ export function initPanelApp() {
     if (!subject) {
       throw new Error('smtp.sendMail requiere args.subject.');
     }
-    if (!text && !html) {
+    if (!body) {
       throw new Error('smtp.sendMail requiere args.text o args.html.');
     }
 
-    const response = await fetch(relayUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        smtp: {
-          host: String(smtp.host || '').trim(),
-          port: Math.max(1, Math.min(65535, Number(smtp.port) || 587)),
-          secure: String(smtp.secure || 'auto'),
-          username: String(smtp.username || '').trim(),
-          password: String(smtp.password || '').trim(),
-          from
-        },
-        mail: {
-          to,
-          subject,
-          text,
-          html
-        }
-      })
+    const mailtoUrl = buildMailtoUrl({
+      to,
+      cc,
+      bcc,
+      subject,
+      body
     });
+    const openResult = await openMailtoDraft(mailtoUrl);
 
-    let payload = null;
-    try {
-      payload = await response.json();
-    } catch (_) {
-      payload = null;
-    }
-
-    if (!response.ok) {
-      const errorText = String(payload?.error || payload?.message || `HTTP ${response.status}`).trim();
-      throw new Error(`SMTP relay error: ${errorText}`);
-    }
-
-    return payload || {
+    return {
       ok: true,
-      queued: true
+      mode: 'local_mailto',
+      opened: openResult.opened === true,
+      to,
+      cc,
+      bcc,
+      from,
+      subject,
+      bodyPreview: body.slice(0, 260),
+      bodyLength: body.length
     };
   }
 
@@ -5713,9 +6025,13 @@ export function initPanelApp() {
     const lat = Number(args.latitude ?? args.lat);
     const lng = Number(args.longitude ?? args.lng ?? args.lon);
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      const accuracy = Math.max(0, Number(args.accuracy) || 0);
+      const capturedAt = Math.max(0, Number(args.capturedAt) || 0);
       return {
         latitude: lat,
-        longitude: lng
+        longitude: lng,
+        accuracy,
+        capturedAt
       };
     }
 
@@ -5723,7 +6039,9 @@ export function initPanelApp() {
     if (stored && Number.isFinite(Number(stored.latitude)) && Number.isFinite(Number(stored.longitude))) {
       return {
         latitude: Number(stored.latitude),
-        longitude: Number(stored.longitude)
+        longitude: Number(stored.longitude),
+        accuracy: Math.max(0, Number(stored.accuracy) || 0),
+        capturedAt: Math.max(0, Number(stored.capturedAt) || 0)
       };
     }
 
@@ -5966,54 +6284,93 @@ export function initPanelApp() {
                 error: 'No hay ubicacion guardada.'
               });
             } else {
+              const locationResult = {
+                ...location,
+                mapsUrl: buildMapsUrlForCoordinates(location)
+              };
+              const hasMapsApiKey = Boolean(String(getIntegrationsConfig().maps?.apiKey || '').trim());
+              if (hasMapsApiKey) {
+                try {
+                  const geocode = await reverseGeocodeLocation(location);
+                  if (geocode?.address) {
+                    locationResult.address = geocode.address;
+                  }
+                  if (geocode?.placeId) {
+                    locationResult.placeId = geocode.placeId;
+                  }
+                } catch (_) {
+                  // Keep location tool resilient even if geocoding fails.
+                }
+              }
+
+              await persistMapsLocationSnapshot(location, getIntegrationsConfig().maps?.nearbyPlaces || []);
               results.push({
                 tool,
                 ok: true,
-                result: location
+                result: locationResult
               });
             }
             continue;
           }
 
-          if (mapsAction === 'getNearbyPlaces') {
+          if (mapsAction === 'reverseGeocode') {
+            const geocode = await reverseGeocodeLocation(args);
+            await persistMapsLocationSnapshot(geocode.location, getIntegrationsConfig().maps?.nearbyPlaces || []);
+            results.push({
+              tool,
+              ok: true,
+              result: geocode
+            });
+            continue;
+          }
+
+          if (mapsAction === 'getNearbyPlaces' || mapsAction === 'searchPlaces') {
             const location = resolveLocationFromArgs(args);
             if (!location) {
               results.push({
                 tool,
                 ok: false,
-                error: 'No hay ubicacion disponible para nearby places.'
+                error: 'No hay ubicacion disponible para buscar lugares.'
               });
               continue;
             }
 
-            const places = await fetchNearbyPlacesForLocation(location, {
-              nearbyType: args.type || args.nearbyType,
-              radiusMeters: args.radiusMeters,
-              maxResultCount: args.maxResults || args.limit
-            });
+            const query = String(args.query || args.text || '').trim().slice(0, 180);
+            if (mapsAction === 'searchPlaces' && !query) {
+              results.push({
+                tool,
+                ok: false,
+                error: 'maps.searchPlaces requiere args.query.'
+              });
+              continue;
+            }
 
-            const integrations = getIntegrationsConfig();
-            const nextIntegrations = normalizeIntegrationsConfig({
-              ...integrations,
-              maps: {
-                ...integrations.maps,
-                lastKnownLocation: {
-                  ...integrations.maps?.lastKnownLocation,
-                  latitude: Number(location.latitude),
-                  longitude: Number(location.longitude),
-                  capturedAt: Date.now()
-                },
-                nearbyPlaces: places
-              }
-            });
-            await savePanelSettings({ integrations: nextIntegrations });
-            renderAppsIntegrationsSettings({ syncInput: false });
+            const places = query
+              ? await searchPlacesByTextForLocation(location, {
+                  query,
+                  radiusMeters: args.radiusMeters,
+                  maxResultCount: args.maxResults || args.limit,
+                  languageCode: args.languageCode || args.language
+                })
+              : await fetchNearbyPlacesForLocation(location, {
+                  nearbyType: args.type || args.nearbyType,
+                  radiusMeters: args.radiusMeters,
+                  maxResultCount: args.maxResults || args.limit
+                });
+            await persistMapsLocationSnapshot(location, places);
+            const defaultNearbyType = getIntegrationsConfig().maps?.nearbyType || 'restaurant';
+            const requestedType = String(args.type || args.nearbyType || defaultNearbyType).trim();
+            const normalizedType = normalizeNearbyPlaceType(requestedType, defaultNearbyType);
 
             results.push({
               tool,
               ok: true,
               result: {
                 location,
+                mode: query ? 'text_search' : 'nearby_type',
+                query,
+                requestedType,
+                normalizedType,
                 places
               }
             });
@@ -11248,12 +11605,6 @@ export function initPanelApp() {
     });
 
     const integrationInputs = [
-      settingsSmtpRelayUrlInput,
-      settingsSmtpHostInput,
-      settingsSmtpPortInput,
-      settingsSmtpSecureSelect,
-      settingsSmtpUsernameInput,
-      settingsSmtpPasswordInput,
       settingsSmtpFromInput,
       settingsMapsApiKeyInput,
       settingsMapsNearbyTypeSelect
@@ -11689,15 +12040,6 @@ export function initPanelApp() {
       for (const item of imageQueue) {
         releaseQueueItem(item);
       }
-
-      if (stageResizeObserver) {
-        stageResizeObserver.disconnect();
-        stageResizeObserver = null;
-      }
-    });
-
-    window.addEventListener('resize', () => {
-      realignStageToScreen();
     });
 
     window.addEventListener('focus', () => {
@@ -11746,9 +12088,9 @@ export function initPanelApp() {
     });
 
     setStageTransitionEnabled(false);
+    realignStageToScreen(app?.dataset?.screen || 'onboarding');
     renderAssistantBranding();
     wireEvents();
-    observeStageSizeChanges();
     setChatTool(DEFAULT_CHAT_TOOL);
     renderPendingConversationAttachments();
     closeToolMenu();
@@ -11768,10 +12110,7 @@ export function initPanelApp() {
     setScreen(initialScreen);
     if (typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(() => {
-        setScreen(initialScreen);
-        requestAnimationFrame(() => {
-          setStageTransitionEnabled(true);
-        });
+        setStageTransitionEnabled(true);
       });
     } else {
       setStageTransitionEnabled(true);
