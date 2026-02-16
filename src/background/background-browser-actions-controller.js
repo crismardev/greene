@@ -387,6 +387,49 @@
         };
       }
 
+      if (safeAction === 'navigateTab') {
+        const targetUrl = toSafeUrl(safeArgs.url);
+        if (!targetUrl) {
+          return { ok: false, error: 'URL invalida para navigateTab.' };
+        }
+
+        const tabId = Number(safeArgs.tabId);
+        let selected = null;
+        if (Number.isFinite(tabId) && tabId >= 0) {
+          selected = await getTabById(tabId);
+        }
+
+        if (!selected) {
+          const tabs = await queryTabs({});
+          const urlContains = String(safeArgs.urlContains || '').toLowerCase().trim();
+          const titleContains = String(safeArgs.titleContains || '').toLowerCase().trim();
+          const query = String(safeArgs.query || '').toLowerCase().trim();
+          selected =
+            tabs.find((tab) => {
+              const title = String(tab?.title || '').toLowerCase();
+              const url = String(tab?.url || '').toLowerCase();
+              const byUrl = urlContains ? url.includes(urlContains) : true;
+              const byTitle = titleContains ? title.includes(titleContains) : true;
+              const byQuery = query ? title.includes(query) || url.includes(query) : true;
+              return byUrl && byTitle && byQuery;
+            }) || null;
+        }
+
+        if (!selected || typeof selected.id !== 'number') {
+          return { ok: false, error: 'No se encontro pestana para navegar.' };
+        }
+
+        const updated = await updateTab(selected.id, {
+          url: targetUrl,
+          active: safeArgs.active !== false
+        });
+        setActiveTab(updated.id);
+        return {
+          ok: true,
+          result: normalizeTabForTool(updated)
+        };
+      }
+
       if (safeAction === 'focusTab') {
         const tabId = Number(safeArgs.tabId);
         let selected = null;

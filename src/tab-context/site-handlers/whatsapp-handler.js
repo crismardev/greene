@@ -1102,6 +1102,107 @@
     return source || '';
   }
 
+  function matchesPhoneDigits(leftValue, rightValue) {
+    const left = normalizeDigitsToken(leftValue);
+    const right = normalizeDigitsToken(rightValue);
+    if (!left || !right) {
+      return false;
+    }
+
+    return left === right || left.endsWith(right) || right.endsWith(left);
+  }
+
+  function getRequestedPhoneFromArgs(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const candidates = [
+      safeArgs.phone,
+      safeArgs.chatPhone,
+      safeArgs.to,
+      safeArgs.number,
+      safeArgs.telefono,
+      safeArgs.tel,
+      safeArgs.mobile,
+      safeArgs.movil,
+      safeArgs.cel,
+      safeArgs.whatsapp,
+      safeArgs.whatsappNumber,
+      safeArgs.contactPhone,
+      safeArgs.contact_phone
+    ];
+
+    for (const value of candidates) {
+      const phone = normalizePhone(value || '');
+      if (phone) {
+        return phone;
+      }
+    }
+
+    return '';
+  }
+
+  function getRequestedPhoneDigitsFromArgs(args = {}) {
+    return normalizeDigitsToken(getRequestedPhoneFromArgs(args));
+  }
+
+  function getCurrentChatPhoneForVerification() {
+    const direct = getCurrentChatPhone();
+    if (direct) {
+      return direct;
+    }
+
+    const title = getCurrentChatTitle();
+    const messages = getConversationMessages({ limit: 6 });
+    const channelId = buildChatChannelId({
+      chatPhone: '',
+      chatTitle: title,
+      messages
+    });
+    return extractPhoneFromChatChannelId(channelId);
+  }
+
+  async function waitForCurrentChatPhoneMatch(expectedPhoneDigits, timeoutMs = 2200, intervalMs = 90) {
+    const expectedDigits = normalizeDigitsToken(expectedPhoneDigits);
+    if (!expectedDigits) {
+      return {
+        ok: true,
+        expectedPhoneDigits: '',
+        currentPhone: '',
+        currentPhoneDigits: ''
+      };
+    }
+
+    const deadline = Date.now() + Math.max(400, Number(timeoutMs) || 2200);
+    const waitMs = Math.max(50, Number(intervalMs) || 90);
+    let currentPhone = '';
+    let currentDigits = '';
+
+    while (Date.now() < deadline) {
+      currentPhone = getCurrentChatPhoneForVerification();
+      currentDigits = normalizeDigitsToken(currentPhone);
+      if (matchesPhoneDigits(expectedDigits, currentDigits)) {
+        return {
+          ok: true,
+          expectedPhoneDigits: expectedDigits,
+          currentPhone: normalizePhone(currentPhone || '') || currentPhone,
+          currentPhoneDigits: currentDigits
+        };
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, waitMs);
+      });
+    }
+
+    currentPhone = getCurrentChatPhoneForVerification();
+    currentDigits = normalizeDigitsToken(currentPhone);
+    return {
+      ok: matchesPhoneDigits(expectedDigits, currentDigits),
+      expectedPhoneDigits: expectedDigits,
+      currentPhone: normalizePhone(currentPhone || '') || currentPhone,
+      currentPhoneDigits: currentDigits
+    };
+  }
+
   function toStringArray(value, limit = 24) {
     if (Array.isArray(value)) {
       return value
@@ -1430,13 +1531,35 @@
     return hasRecentOutgoingMessage(text);
   }
 
-  async function sendMessageToCurrentChat(text) {
+  async function sendMessageToCurrentChat(text, options = {}) {
     const message = String(text || '').trim();
     if (!message) {
       return {
         ok: false,
         error: 'Texto vacio.'
       };
+    }
+
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const expectedPhoneDigits = normalizeDigitsToken(safeOptions.expectedPhone || safeOptions.phone || '');
+    if (expectedPhoneDigits) {
+      const targetCheck = await waitForCurrentChatPhoneMatch(expectedPhoneDigits, Number(safeOptions.verifyTimeoutMs) || 2400, 90);
+      if (!targetCheck.ok) {
+        const currentChatTitle = getCurrentChatTitle();
+        return {
+          ok: false,
+          error: 'El chat activo no coincide con el numero solicitado. Se cancelo el envio.',
+          result: {
+            sent: false,
+            confirmed: false,
+            expectedPhoneDigits,
+            currentPhoneDigits: targetCheck.currentPhoneDigits || '',
+            currentPhone: toSafeText(targetCheck.currentPhone || '', 48),
+            currentChatTitle: toSafeText(currentChatTitle || '', 180),
+            reason: targetCheck.currentPhoneDigits ? 'phone_mismatch' : 'phone_not_detected'
+          }
+        };
+      }
     }
 
     const now = Date.now();
@@ -1660,11 +1783,33 @@
     add(safeArgs.name);
     add(safeArgs.title);
     add(safeArgs.search);
+    add(safeArgs.contact);
+    add(safeArgs.recipient);
+    add(safeArgs.destinatario);
+    add(safeArgs.person);
+    add(safeArgs.persona);
+    add(safeArgs.client);
+    add(safeArgs.cliente);
     for (const item of toStringArray(safeArgs.queries, 20)) {
       add(item);
     }
 
     return Array.from(set);
+  }
+
+  function buildOpenChatDiagnostics(entries, args = {}) {
+    const list = Array.isArray(entries) ? entries : [];
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const chatIndex = Math.round(Number(safeArgs.chatIndex));
+    const searchLimit = Math.max(20, Math.min(260, Number(safeArgs.searchLimit) || 120));
+    return {
+      searchLimit,
+      inboxCount: list.length,
+      requestedChatIndex: Number.isFinite(chatIndex) ? chatIndex : -1,
+      queries: getOpenChatQueries(safeArgs),
+      phoneDigits: getRequestedPhoneDigitsFromArgs(safeArgs),
+      candidates: list.slice(0, 12).map((item) => sanitizeInboxEntry(item))
+    };
   }
 
   function scoreInboxEntryForQuery(entry, query, phoneDigits, options = {}) {
@@ -1745,7 +1890,7 @@
       return list[chatIndex - 1];
     }
 
-    const phoneDigits = normalizeDigitsToken(safeArgs.phone || safeArgs.chatPhone || '');
+    const phoneDigits = getRequestedPhoneDigitsFromArgs(safeArgs);
     const queries = getOpenChatQueries(safeArgs);
     const preferToken = normalizeLookupToken(safeArgs.prefer || safeArgs.scope || '');
     const preferGroups = Boolean(safeArgs.preferGroups || preferToken === 'groups' || preferToken === 'group');
@@ -1798,13 +1943,8 @@
 
     while (Date.now() < deadline) {
       const currentTitle = normalizeLookupToken(getCurrentChatTitle());
-      const currentPhone = normalizeDigitsToken(getCurrentChatPhone());
-
-      const phoneMatch = Boolean(
-        expectedPhone &&
-          currentPhone &&
-          (expectedPhone === currentPhone || expectedPhone.endsWith(currentPhone) || currentPhone.endsWith(expectedPhone))
-      );
+      const currentPhone = normalizeDigitsToken(getCurrentChatPhoneForVerification());
+      const phoneMatch = matchesPhoneDigits(expectedPhone, currentPhone);
       const titleMatch = Boolean(
         expectedTitle &&
           currentTitle &&
@@ -1826,11 +1966,14 @@
   async function openChatByQuery(args = {}) {
     const safeArgs = args && typeof args === 'object' ? args : {};
     const searchLimit = Math.max(20, Math.min(260, Number(safeArgs.searchLimit) || 120));
+    const requestedPhoneDigits = getRequestedPhoneDigitsFromArgs(safeArgs);
     const entries = getInboxEntries({ limit: searchLimit, includeNode: true });
+    const diagnostics = buildOpenChatDiagnostics(entries, safeArgs);
     if (!entries.length) {
       return {
         ok: false,
-        error: 'No se pudo leer la lista de chats en WhatsApp.'
+        error: 'No se pudo leer la lista de chats en WhatsApp.',
+        result: diagnostics
       };
     }
 
@@ -1840,7 +1983,23 @@
         ok: false,
         error: 'No se encontro un chat que coincida con la busqueda.',
         result: {
-          available: entries.slice(0, 12).map((item) => sanitizeInboxEntry(item))
+          ...diagnostics,
+          selected: null,
+          available: diagnostics.candidates
+        }
+      };
+    }
+
+    const selectedPhoneDigits = normalizeDigitsToken(selected.phoneDigits || selected.phone || '');
+    if (requestedPhoneDigits && selectedPhoneDigits && !matchesPhoneDigits(requestedPhoneDigits, selectedPhoneDigits)) {
+      return {
+        ok: false,
+        error: 'El chat seleccionado no coincide con el numero solicitado.',
+        result: {
+          ...diagnostics,
+          selected: sanitizeInboxEntry(selected),
+          requestedPhoneDigits,
+          selectedPhoneDigits
         }
       };
     }
@@ -1852,6 +2011,7 @@
         ok: false,
         error: 'No se pudo abrir el chat seleccionado.',
         result: {
+          ...diagnostics,
           selected: sanitizeInboxEntry(selected)
         }
       };
@@ -1864,7 +2024,8 @@
         opened: true,
         confirmed,
         selected: sanitizeInboxEntry(selected),
-        query: getOpenChatQueries(safeArgs)
+        query: getOpenChatQueries(safeArgs),
+        diagnostics
       }
     };
   }
@@ -2238,6 +2399,7 @@
   async function openChatAndSendMessage(args = {}) {
     const safeArgs = args && typeof args === 'object' ? args : {};
     const text = String(safeArgs.text || safeArgs.message || '').trim().slice(0, 1800);
+    const requestedPhoneDigits = getRequestedPhoneDigitsFromArgs(safeArgs);
     if (!text) {
       return {
         ok: false,
@@ -2260,7 +2422,10 @@
       };
     }
 
-    const sent = await sendMessageToCurrentChat(text);
+    const sent = await sendMessageToCurrentChat(text, {
+      expectedPhone: requestedPhoneDigits,
+      verifyTimeoutMs: Number(safeArgs.verifyTimeoutMs) || 2400
+    });
     return {
       ...sent,
       result: {
@@ -2457,7 +2622,10 @@
     }
 
     if (action === 'sendMessage') {
-      return sendMessageToCurrentChat(args.text || '');
+      return sendMessageToCurrentChat(args.text || args.message || '', {
+        expectedPhone: getRequestedPhoneDigitsFromArgs(args),
+        verifyTimeoutMs: Number(args.verifyTimeoutMs) || 2400
+      });
     }
 
     if (action === 'openChat' || action === 'openChatByQuery') {

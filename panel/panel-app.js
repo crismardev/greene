@@ -17,6 +17,15 @@ import { createBrandEmotionController } from './controllers/brand-emotion-contro
 import { createSystemVariablesController } from './controllers/system-variables-controller.js';
 import { createDynamicUiSortShowController } from './controllers/dynamic-ui-sort-show-controller.js';
 import { buildTabSummaryPrompt, toJsonTabRecord } from './services/site-context/generic-site-context.js';
+import { createDynamicRelationsService } from './services/dynamic-relations-service.js';
+import { extractToolCallsFromText } from './services/local-tool-call-parser-service.js';
+import {
+  buildMacNativeHostInstallerScript,
+  htmlToPlainText,
+  normalizeEmailList,
+  sanitizeNativeHostNameToken,
+  triggerTextFileDownload
+} from './services/smtp-native-host-utils.js';
 import {
   buildWhatsappMetaLabel,
   buildWhatsappReplyPrompt,
@@ -152,6 +161,9 @@ export function initPanelApp() {
   const DEFAULT_CHAT_TOOL = 'chat';
   const MAX_CHAT_INPUT_ROWS = 8;
   const CHAT_STREAM_BOTTOM_RESERVE_PX = 300;
+  const CHAT_IDLE_BOTTOM_RESERVE_PX = CHAT_STREAM_BOTTOM_RESERVE_PX;
+  const WHATSAPP_WEB_BASE_URL = 'https://web.whatsapp.com/';
+  const WHATSAPP_WEB_URL_HINT = 'web.whatsapp.com';
   const MAX_CHAT_CONTEXT_MESSAGES = 20;
   const MAX_CHAT_HISTORY_MESSAGES = 160;
   const MAX_CHAT_HISTORY_STORAGE_LIMIT = 600;
@@ -161,6 +173,7 @@ export function initPanelApp() {
   const NATIVE_HOST_PING_STALE_MS = 1000 * 60 * 10;
   const MAX_CHAT_ATTACHMENTS_PER_TURN = 8;
   const MAX_CHAT_ATTACHMENT_TEXT_CHARS = 3200;
+  const MAX_CHAT_IMAGE_DATA_URL_CHARS = 8 * 1024 * 1024;
   const MAX_IMAGE_FILES = 10;
   const MAX_TABS_FOR_AI_SUMMARY = 20;
   const TAB_SUMMARY_MAX_CHARS = 160;
@@ -327,6 +340,7 @@ export function initPanelApp() {
   ]);
 
   const app = document.getElementById('app');
+  const appBootstrapMask = document.getElementById('appBootstrapMask');
   const stageTrack = document.getElementById('stageTrack');
   const stageScreens = Array.from(document.querySelectorAll('.screen[data-screen-name]'));
   const brandHomeBtn = document.getElementById('brandHomeBtn');
@@ -548,6 +562,7 @@ export function initPanelApp() {
   let isGeneratingChat = false;
   let pendingChatRenderRaf = 0;
   let pendingChatRenderAllowAutoScroll = true;
+  let chatBottomAlignToken = 0;
   let chatStreamBottomReservePx = 0;
   let modelWarmupPromise = null;
   let localToolErrorLog = [];
@@ -688,6 +703,29 @@ export function initPanelApp() {
     }
     return text.slice(0, limit);
   }
+
+  const dynamicRelationsService = createDynamicRelationsService({
+    isWhatsappContext,
+    isLikelyUserTableName,
+    isCrmErpMeProfileComplete,
+    splitQualifiedTableName,
+    getCrmErpDatabaseConnectionUrl,
+    getCrmErpDatabaseSchemaSnapshot,
+    getCrmErpDatabaseMeProfile,
+    postgresService,
+    logDebug,
+    toSafeLogText
+  });
+  const {
+    buildDynamicRelationsSignalKey,
+    buildRelationSimpleColumns,
+    collectDynamicSignalsFromTab,
+    fetchDynamicRelationCards,
+    fetchDynamicRelationGroups,
+    isEmailColumnName,
+    isLabelColumnName,
+    isLikelyIdColumnName
+  } = dynamicRelationsService;
 
   function formatSystemVariableValue(value) {
     return systemVariablesController.formatValue(value);
@@ -3166,6 +3204,23 @@ export function initPanelApp() {
     return app && app.dataset.screen === 'home' && !isGeneratingChat;
   }
 
+  function setAppBootstrapState(isReady) {
+    if (!app) {
+      return;
+    }
+
+    app.dataset.bootstrap = isReady ? 'ready' : 'loading';
+    if (isReady && appBootstrapMask) {
+      appBootstrapMask.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function waitForMs(durationMs = 0) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, Math.max(0, Number(durationMs) || 0));
+    });
+  }
+
   function requestChatAutofocus(attempts = 8, delayMs = 80) {
     let attempt = 0;
 
@@ -3191,6 +3246,52 @@ export function initPanelApp() {
       if (attempt < attempts) {
         window.setTimeout(run, delayMs);
       }
+    };
+
+    run();
+  }
+
+  function cancelChatBottomAlign() {
+    chatBottomAlignToken += 1;
+  }
+
+  function requestChatBottomAlign(attempts = 10, delayMs = 70) {
+    const maxAttempts = Math.max(1, Number(attempts) || 10);
+    const token = ++chatBottomAlignToken;
+    let attempt = 0;
+
+    const run = () => {
+      if (token !== chatBottomAlignToken) {
+        return;
+      }
+
+      if (!app || app.dataset.screen !== 'home' || !chatBody) {
+        return;
+      }
+
+      scrollChatToBottom();
+      const remaining = chatBody.scrollHeight - chatBody.scrollTop - chatBody.clientHeight;
+      if (remaining <= 2) {
+        return;
+      }
+
+      attempt += 1;
+      if (attempt >= maxAttempts) {
+        return;
+      }
+
+      window.setTimeout(() => {
+        if (token !== chatBottomAlignToken) {
+          return;
+        }
+
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(run);
+          return;
+        }
+
+        run();
+      }, Math.max(30, Number(delayMs) || 70));
     };
 
     run();
@@ -3389,6 +3490,11 @@ export function initPanelApp() {
     }
 
     syncActiveScreenState(safeScreen);
+
+    if (safeScreen === 'home') {
+      scrollChatToBottom();
+      requestChatBottomAlign(16, 70);
+    }
 
     if (safeScreen !== 'tools') {
       setDropUi(false);
@@ -3677,6 +3783,47 @@ export function initPanelApp() {
       return false;
     }
 
+    return true;
+  }
+
+  function buildChatModelReadinessWarnings() {
+    const profile = getActiveModelProfile();
+    if (!profile) {
+      return ['No hay modelo activo. Configuralo en Settings > AI Models.'];
+    }
+
+    const warnings = [];
+    if (profile.provider === AI_PROVIDER_IDS.OLLAMA) {
+      if (!Array.isArray(localOllamaModels) || !localOllamaModels.length) {
+        warnings.push('No se detectaron modelos locales en Ollama. Inicia `ollama serve` o abre la app Ollama.');
+      } else {
+        const activeModel = String(profile.model || '').trim().toLowerCase();
+        const knownModels = localOllamaModels.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean);
+        if (activeModel && !knownModels.includes(activeModel)) {
+          warnings.push(`El modelo local activo (${profile.model}) no aparece en Ollama local.`);
+        }
+      }
+    }
+
+    if (aiProviderService.requiresApiKey(profile.provider) && !profile.hasApiKey) {
+      warnings.push(`El modelo activo (${profile.name}) requiere API key. Configurala en Settings > AI Models.`);
+    }
+
+    return warnings;
+  }
+
+  function applyChatModelReadinessStatus(options = {}) {
+    const force = Boolean(options.force);
+    const warnings = buildChatModelReadinessWarnings();
+    if (!warnings.length) {
+      return false;
+    }
+
+    if (chatHistory.length > 0 && !force) {
+      return true;
+    }
+
+    setStatus(chatStatus, `Checklist AI: ${warnings.join(' ')}`, true);
     return true;
   }
 
@@ -4570,6 +4717,7 @@ export function initPanelApp() {
     setScreen(nextScreen);
 
     if (nextScreen === 'home') {
+      requestChatBottomAlign(12, 70);
       requestChatAutofocus(8, 80);
       return;
     }
@@ -4632,6 +4780,7 @@ export function initPanelApp() {
     syncModelSelectors();
     renderAiModelsSettings();
     setStatus(chatStatus, `Modelo activo: ${profile.model}.`);
+    applyChatModelReadinessStatus({ force: true });
     warmupPrimaryModel();
   }
 
@@ -4674,6 +4823,24 @@ export function initPanelApp() {
     return modelWarmupPromise;
   }
 
+  function normalizeGeneratedImageDataUrl(value, maxLength = MAX_CHAT_IMAGE_DATA_URL_CHARS) {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!raw) {
+      return '';
+    }
+
+    const compact = raw.replace(/\s+/g, '');
+    if (!compact.toLowerCase().startsWith('data:image/')) {
+      return '';
+    }
+
+    if (compact.length > Math.max(1024, Number(maxLength) || MAX_CHAT_IMAGE_DATA_URL_CHARS)) {
+      return '';
+    }
+
+    return compact;
+  }
+
   async function readChatHistory() {
     return storageService.readChatHistory();
   }
@@ -4685,12 +4852,18 @@ export function initPanelApp() {
         ? source.generated_images
             .map((image) => {
               const imageUrl = String(image?.url || '').trim();
-              if (!imageUrl) {
+              const imageDataUrl = normalizeGeneratedImageDataUrl(image?.dataUrl || image?.data_url || '');
+              if (!imageUrl && !imageDataUrl) {
                 return null;
               }
+              const width = Math.max(0, Number(image?.width || image?.imageWidth) || 0);
+              const height = Math.max(0, Number(image?.height || image?.imageHeight) || 0);
               return {
                 url: imageUrl,
-                alt: String(image?.alt || '').trim().slice(0, 220)
+                dataUrl: imageDataUrl,
+                alt: String(image?.alt || '').trim().slice(0, 220),
+                width,
+                height
               };
             })
             .filter(Boolean)
@@ -5360,16 +5533,73 @@ export function initPanelApp() {
       const imageWrap = document.createElement('div');
       imageWrap.className = 'chat-generated-images';
 
-      for (const image of generatedImages.slice(0, 4)) {
-        const src = String(image?.url || image?.dataUrl || '').trim();
+      for (const [imageIndex, image] of generatedImages.slice(0, 4).entries()) {
+        const src = String(image?.dataUrl || image?.url || '').trim();
         if (!src) {
           continue;
         }
+
+        const card = document.createElement('div');
+        card.className = 'chat-generated-image';
+
+        const frame = document.createElement('div');
+        frame.className = 'chat-generated-image__frame is-loading';
+        const widthHint = Math.max(0, Number(image?.width || image?.imageWidth) || 0);
+        const heightHint = Math.max(0, Number(image?.height || image?.imageHeight) || 0);
+        if (widthHint > 0 && heightHint > 0) {
+          frame.style.setProperty('--chat-generated-image-aspect-ratio', `${widthHint} / ${heightHint}`);
+        }
+
         const img = document.createElement('img');
-        img.src = src;
+        img.className = 'chat-generated-image__preview';
         img.alt = String(image?.alt || 'Generated image').trim() || 'Generated image';
         img.loading = 'lazy';
-        imageWrap.appendChild(img);
+        img.decoding = 'async';
+
+        const finalizeImageFrame = () => {
+          const naturalWidth = Math.max(0, Number(img.naturalWidth) || 0);
+          const naturalHeight = Math.max(0, Number(img.naturalHeight) || 0);
+          if (naturalWidth > 0 && naturalHeight > 0) {
+            frame.style.setProperty('--chat-generated-image-aspect-ratio', `${naturalWidth} / ${naturalHeight}`);
+          }
+          frame.classList.remove('is-loading');
+        };
+        img.addEventListener('load', finalizeImageFrame);
+        img.addEventListener('error', () => {
+          frame.classList.remove('is-loading');
+        });
+        img.src = src;
+        if (img.complete) {
+          finalizeImageFrame();
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'chat-generated-image__actions';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'icon-btn icon-btn--mini chat-generated-image__action';
+        copyBtn.dataset.chatImageAction = 'copy';
+        copyBtn.dataset.chatMessageId = String(message?.id || '').trim();
+        copyBtn.dataset.chatImageIndex = String(imageIndex);
+        copyBtn.title = 'Copiar imagen';
+        copyBtn.setAttribute('aria-label', 'Copiar imagen generada');
+        copyBtn.appendChild(createCopyIcon());
+
+        const downloadBtn = document.createElement('button');
+        downloadBtn.type = 'button';
+        downloadBtn.className = 'icon-btn icon-btn--mini chat-generated-image__action';
+        downloadBtn.dataset.chatImageAction = 'download';
+        downloadBtn.dataset.chatMessageId = String(message?.id || '').trim();
+        downloadBtn.dataset.chatImageIndex = String(imageIndex);
+        downloadBtn.title = 'Descargar imagen';
+        downloadBtn.setAttribute('aria-label', 'Descargar imagen generada');
+        downloadBtn.appendChild(createDownloadIcon());
+
+        actions.append(copyBtn, downloadBtn);
+        frame.appendChild(img);
+        card.append(frame, actions);
+        imageWrap.appendChild(card);
       }
 
       if (imageWrap.childElementCount > 0) {
@@ -5391,6 +5621,15 @@ export function initPanelApp() {
     }
 
     return Math.max(0, Math.min(720, Math.round(numeric)));
+  }
+
+  function syncChatBottomReserve({ streaming = false } = {}) {
+    if (!chatHistory.length) {
+      chatStreamBottomReservePx = 0;
+      return;
+    }
+
+    chatStreamBottomReservePx = streaming ? CHAT_STREAM_BOTTOM_RESERVE_PX : CHAT_IDLE_BOTTOM_RESERVE_PX;
   }
 
   function renderChatMessages(options = {}) {
@@ -5441,9 +5680,6 @@ export function initPanelApp() {
       renderChatMessages({
         allowAutoScroll: shouldAutoScroll
       });
-      if (shouldAutoScroll) {
-        scrollChatToBottom();
-      }
     });
   }
 
@@ -5539,15 +5775,20 @@ export function initPanelApp() {
       chatHistory = chatHistory.slice(-maxHistoryMessages);
     }
 
+    syncChatBottomReserve({
+      streaming: false
+    });
     renderChatMessages();
-    scrollChatToBottom();
+    requestChatBottomAlign(20, 80);
     await saveChatHistory();
     return messageRecord;
   }
 
   async function resetChatHistory() {
     chatHistory = [];
-    chatStreamBottomReservePx = 0;
+    syncChatBottomReserve({
+      streaming: false
+    });
     clearPendingConversationAttachments();
     renderChatMessages();
     await saveChatHistory();
@@ -5627,10 +5868,262 @@ export function initPanelApp() {
     return tabs.find((tab) => isWhatsappContext(tab)) || null;
   }
 
+  function normalizeWhatsappPhoneForUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return '';
+    }
+
+    const digits = raw.replace(/[^\d+]/g, '');
+    if (!digits) {
+      return '';
+    }
+
+    const withoutPlus = digits.startsWith('+') ? digits.slice(1).replace(/[^\d]/g, '') : digits.replace(/[^\d]/g, '');
+    if (!withoutPlus || withoutPlus.length < 7) {
+      return '';
+    }
+
+    return withoutPlus.slice(0, 24);
+  }
+
+  function getWhatsappToolTargetPhone(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const phoneFields = [
+      safeArgs.phone,
+      safeArgs.to,
+      safeArgs.number,
+      safeArgs.chatPhone,
+      safeArgs.telefono,
+      safeArgs.tel,
+      safeArgs.mobile,
+      safeArgs.movil,
+      safeArgs.cel,
+      safeArgs.whatsapp,
+      safeArgs.whatsappNumber,
+      safeArgs.contactPhone,
+      safeArgs.contact_phone
+    ];
+
+    for (const value of phoneFields) {
+      const normalized = normalizeWhatsappPhoneForUrl(value || '');
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    return '';
+  }
+
+  function hasWhatsappChatLookupArgs(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    if (getWhatsappToolTargetPhone(safeArgs)) {
+      return true;
+    }
+
+    const chatIndex = Number(safeArgs.chatIndex);
+    if (Number.isInteger(chatIndex) && chatIndex >= 1) {
+      return true;
+    }
+
+    const scalarFields = [
+      safeArgs.query,
+      safeArgs.name,
+      safeArgs.chat,
+      safeArgs.title,
+      safeArgs.search,
+      safeArgs.contact,
+      safeArgs.recipient,
+      safeArgs.destinatario,
+      safeArgs.person,
+      safeArgs.persona,
+      safeArgs.client,
+      safeArgs.cliente
+    ];
+    if (scalarFields.some((item) => String(item || '').trim())) {
+      return true;
+    }
+
+    return Array.isArray(safeArgs.queries) && safeArgs.queries.some((item) => String(item || '').trim());
+  }
+
+  function buildWhatsappSendUrlForTool(phone) {
+    const params = new URLSearchParams();
+    const safePhone = normalizeWhatsappPhoneForUrl(phone).replace(/^\+/, '');
+    if (safePhone) {
+      params.set('phone', safePhone);
+    }
+    const query = params.toString();
+    return query ? `${WHATSAPP_WEB_BASE_URL}send?${query}` : WHATSAPP_WEB_BASE_URL;
+  }
+
+  async function waitForWhatsappTabContext(preferredTabId = -1, options = {}) {
+    const attempts = Math.max(1, Number(options.attempts) || 18);
+    const delayMs = Math.max(80, Number(options.delayMs) || 160);
+    const requestedTabId = Number(preferredTabId);
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await tabContextService.requestSnapshot();
+      const target = getPreferredWhatsappTab({
+        tabId: Number.isFinite(requestedTabId) ? requestedTabId : -1
+      });
+      if (target && isWhatsappContext(target)) {
+        return target;
+      }
+      if (attempt < attempts - 1) {
+        await waitForMs(delayMs);
+      }
+    }
+
+    return getPreferredWhatsappTab({
+      tabId: Number.isFinite(requestedTabId) ? requestedTabId : -1
+    });
+  }
+
+  function buildWhatsappToolErrorText(fallbackMessage, response = null) {
+    const base = String(fallbackMessage || '').trim() || 'Error ejecutando WhatsApp.';
+    const safeResponse = response && typeof response === 'object' ? response : null;
+    const error = safeResponse ? String(safeResponse.error || '').trim() : '';
+    const diagnostic = safeResponse && safeResponse.result && typeof safeResponse.result === 'object' ? safeResponse.result : null;
+    const diagnosticsJson = diagnostic ? JSON.stringify(diagnostic).slice(0, 460) : '';
+
+    if (error && diagnosticsJson) {
+      return `${base} ${error}. Diagnostico: ${diagnosticsJson}`;
+    }
+
+    if (error) {
+      return `${base} ${error}`;
+    }
+
+    if (diagnosticsJson) {
+      return `${base} Diagnostico: ${diagnosticsJson}`;
+    }
+
+    return base;
+  }
+
+  async function ensureWhatsappTabForTool(args = {}, options = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const requestedTabId = Number(safeArgs.tabId);
+    const phone = getWhatsappToolTargetPhone(safeArgs);
+    const preferPhoneRoute = safeOptions.preferPhoneRoute === true && Boolean(phone);
+    const phoneUrl = preferPhoneRoute ? buildWhatsappSendUrlForTool(phone) : '';
+    let targetTab = getPreferredWhatsappTab(safeArgs);
+    let openedTab = null;
+    let reusedExistingTabByUrl = false;
+    let focusError = '';
+    let navigationError = '';
+
+    if (targetTab && Number.isFinite(Number(targetTab.tabId)) && Number(targetTab.tabId) >= 0) {
+      const focusResult = await tabContextService.runBrowserAction('focusTab', {
+        tabId: Number(targetTab.tabId)
+      });
+      if (focusResult?.ok !== true) {
+        focusError = String(focusResult?.error || '').trim();
+      }
+    } else {
+      const focusResult = await tabContextService.runBrowserAction('focusTab', {
+        tabId: Number.isFinite(requestedTabId) ? requestedTabId : -1,
+        urlContains: WHATSAPP_WEB_URL_HINT
+      });
+      if (focusResult?.ok === true) {
+        await tabContextService.requestSnapshot();
+        targetTab = getPreferredWhatsappTab({
+          tabId: Number.isFinite(requestedTabId) ? requestedTabId : -1
+        });
+      } else {
+        focusError = String(focusResult?.error || '').trim();
+      }
+    }
+
+    if (preferPhoneRoute && targetTab && isWhatsappContext(targetTab)) {
+      const navigateResult = await tabContextService.runBrowserAction('navigateTab', {
+        tabId: Number(targetTab.tabId) || -1,
+        url: phoneUrl || WHATSAPP_WEB_BASE_URL,
+        active: true
+      });
+      if (navigateResult?.ok === true) {
+        openedTab = navigateResult?.result && typeof navigateResult.result === 'object' ? navigateResult.result : null;
+        reusedExistingTabByUrl = true;
+      } else {
+        navigationError = String(navigateResult?.error || '').trim() || 'No se pudo navegar la tab activa de WhatsApp.';
+        return {
+          ok: false,
+          error: `No se pudo abrir el chat en la tab existente de WhatsApp. ${navigationError}`.trim(),
+          diagnostics: {
+            requestedTabId: Number.isFinite(requestedTabId) ? requestedTabId : -1,
+            targetTabId: Number(targetTab?.tabId) || -1,
+            focusError,
+            navigationError,
+            phone,
+            preferPhoneRoute
+          }
+        };
+      }
+    }
+
+    if (!targetTab || !isWhatsappContext(targetTab)) {
+      const openResult = await tabContextService.runBrowserAction('openNewTab', {
+        url: phoneUrl || WHATSAPP_WEB_BASE_URL,
+        active: true
+      });
+      if (openResult?.ok !== true) {
+        return {
+          ok: false,
+          error: buildWhatsappToolErrorText('No se pudo abrir WhatsApp Web.', openResult),
+          diagnostics: {
+            requestedTabId: Number.isFinite(requestedTabId) ? requestedTabId : -1,
+            focusError,
+            phone,
+            preferPhoneRoute
+          }
+        };
+      }
+      openedTab = openResult?.result && typeof openResult.result === 'object' ? openResult.result : null;
+    }
+
+    const preferredTab = openedTab && Number.isFinite(Number(openedTab.id))
+      ? Number(openedTab.id)
+      : Number.isFinite(requestedTabId)
+        ? requestedTabId
+        : Number(targetTab?.tabId) || -1;
+    const resolved = await waitForWhatsappTabContext(preferredTab, {
+      attempts: openedTab ? 32 : 18,
+      delayMs: openedTab ? 220 : 140
+    });
+    if (!resolved || !isWhatsappContext(resolved)) {
+      return {
+        ok: false,
+        error: 'No se pudo confirmar una tab de WhatsApp lista para ejecutar tools.',
+        diagnostics: {
+          requestedTabId: Number.isFinite(requestedTabId) ? requestedTabId : -1,
+          openedTabId: Number(openedTab?.id) || -1,
+          openedUrl: String(openedTab?.url || phoneUrl || WHATSAPP_WEB_BASE_URL),
+          focusError,
+          navigationError,
+          reusedExistingTabByUrl,
+          phone,
+          preferPhoneRoute
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      tab: resolved,
+      openedViaUrl: Boolean(openedTab),
+      openedUrl: String(openedTab?.url || phoneUrl || ''),
+      reusedExistingTabByUrl,
+      phone,
+      focusError
+    };
+  }
+
   function buildWhatsappToolsSystemContext(limit = 24) {
     const whatsappTab = getPreferredWhatsappTab();
     if (!whatsappTab) {
-      return 'Contexto WhatsApp: no hay tab de WhatsApp disponible para ejecutar tools whatsapp.*.';
+      return 'Contexto WhatsApp: no hay tab activa detectada; las tools whatsapp.* intentaran abrir/enfocar WhatsApp Web automaticamente.';
     }
 
     const details = whatsappTab.details && typeof whatsappTab.details === 'object' ? whatsappTab.details : {};
@@ -6171,7 +6664,6 @@ export function initPanelApp() {
   }
 
   function buildLocalToolSystemPrompt() {
-    const hasWhatsappTab = Boolean(getPreferredWhatsappTab());
     const hasCrmErpDbConnection = Boolean(getCrmErpDatabaseConnectionUrl());
     const integrations = getIntegrationsConfig();
     const smtpAvailability = getSmtpToolAvailability();
@@ -6192,24 +6684,22 @@ export function initPanelApp() {
       '- browser.queryHistoryRange (args: preset=today|yesterday|this_week|last_week|last_friday_afternoon o startISO/endISO/startTime/endTime, days, text, limit, sort)',
       '- browser.getOldestHistoryVisit (args: text, chunkSize, maxChunks)',
       '- browser.openNewTab (args: url, active)',
+      '- browser.navigateTab (args: tabId opcional o urlContains/titleContains/query, url requerida, active)',
       '- browser.focusTab (args: tabId o urlContains/titleContains)',
       '- browser.closeTab (args: tabId o url/urlContains/titleContains, preventActive)',
       '- browser.closeNonProductivityTabs (args: dryRun, keepPinned, keepActive, onlyCurrentWindow)',
-      ...(hasWhatsappTab
-        ? [
-            '- whatsapp.getInbox (args: limit)',
-            '- whatsapp.openChat (args: query|name|chat|phone|chatIndex, tabId opcional)',
-            '- whatsapp.sendMessage (args: text, tabId opcional; envia al chat abierto)',
-            '- whatsapp.openChatAndSendMessage (args: query|name|chat|phone + text)',
-            '- whatsapp.archiveChats (args: scope=groups|contacts|all, queries, limit, dryRun)',
-            '- whatsapp.archiveGroups (alias rapido para scope=groups)'
-          ]
-        : ['- whatsapp.* requiere tener una tab de WhatsApp abierta.']),
+      '- whatsapp.getInbox (args: limit)',
+      '- whatsapp.openChat (args: query|name|chat|phone|chatIndex, tabId opcional)',
+      '- whatsapp.sendMessage (args: text, tabId opcional; envia al chat abierto o abre chat objetivo si incluyes query/name/chat/phone; si envias phone valida que el chat activo coincida antes de enviar)',
+      '- whatsapp.openChatAndSendMessage (args: query|name|chat|phone + text)',
+      '- whatsapp.archiveChats (args: scope=groups|contacts|all, queries, limit, dryRun)',
+      '- whatsapp.archiveGroups (alias rapido para scope=groups)',
+      '- Si no hay tab activa de WhatsApp, el sistema intentara abrir/enfocar WhatsApp Web automaticamente.',
       ...(hasCrmErpDbConnection
         ? [
             '- db.refreshSchema (sin args; inspecciona esquemas/tablas/columnas disponibles)',
             '- db.queryRead (args: sql, params opcional array, maxRows opcional; solo SELECT/CTE/SHOW/EXPLAIN)',
-            '- db.queryWrite (args: sql, params opcional array, maxRows opcional; solo INSERT/UPDATE/DELETE)'
+            '- db.queryWrite (args: sql, params opcional array, maxRows opcional; solo INSERT/UPDATE/DELETE y UPDATE/DELETE requieren WHERE)'
           ]
         : ['- db.* requiere configurar la URL de PostgreSQL en Settings > CRM/ERP Database.']),
       ...(smtpAvailability.enabled
@@ -6263,158 +6753,6 @@ export function initPanelApp() {
     );
   }
 
-  function normalizeLocalToolCall(raw) {
-    const source = raw && typeof raw === 'object' ? raw : {};
-    const inputTool = String(source.tool || source.action || '').trim();
-    const aliases = {
-      'browser.list_tabs': 'browser.listTabs',
-      'browser.listTabs': 'browser.listTabs',
-      'browser.get_recent_history': 'browser.getRecentHistory',
-      'browser.getRecentHistory': 'browser.getRecentHistory',
-      'browser.query_history_range': 'browser.queryHistoryRange',
-      'browser.history_range': 'browser.queryHistoryRange',
-      'browser.query_history_by_date_range': 'browser.queryHistoryRange',
-      'browser.queryHistoryByDateRange': 'browser.queryHistoryRange',
-      'browser.historyByRange': 'browser.queryHistoryRange',
-      'browser.queryHistoryRange': 'browser.queryHistoryRange',
-      'browser.get_oldest_history_visit': 'browser.getOldestHistoryVisit',
-      'browser.oldest_history_visit': 'browser.getOldestHistoryVisit',
-      'browser.getOldestHistoryVisit': 'browser.getOldestHistoryVisit',
-      'browser.open_new_tab': 'browser.openNewTab',
-      'browser.openTab': 'browser.openNewTab',
-      'browser.openNewTab': 'browser.openNewTab',
-      'browser.focus_tab': 'browser.focusTab',
-      'browser.focusTab': 'browser.focusTab',
-      'browser.close_tab': 'browser.closeTab',
-      'browser.closeTab': 'browser.closeTab',
-      'browser.close_non_productivity_tabs': 'browser.closeNonProductivityTabs',
-      'browser.closeNonProductivityTabs': 'browser.closeNonProductivityTabs',
-      'whatsapp.get_inbox': 'whatsapp.getInbox',
-      'whatsapp.getListInbox': 'whatsapp.getInbox',
-      'whatsapp.getInbox': 'whatsapp.getInbox',
-      'whatsapp.open_chat': 'whatsapp.openChat',
-      'whatsapp.openChatByQuery': 'whatsapp.openChat',
-      'whatsapp.openChat': 'whatsapp.openChat',
-      'whatsapp.send_message': 'whatsapp.sendMessage',
-      'whatsapp.sendText': 'whatsapp.sendMessage',
-      'whatsapp.sendMessage': 'whatsapp.sendMessage',
-      'whatsapp.open_chat_and_send_message': 'whatsapp.openChatAndSendMessage',
-      'whatsapp.openAndSendMessage': 'whatsapp.openChatAndSendMessage',
-      'whatsapp.openChatAndSendMessage': 'whatsapp.openChatAndSendMessage',
-      'whatsapp.archive_chats': 'whatsapp.archiveChats',
-      'whatsapp.archiveListChats': 'whatsapp.archiveChats',
-      'whatsapp.archiveChats': 'whatsapp.archiveChats',
-      'whatsapp.archive_groups': 'whatsapp.archiveGroups',
-      'whatsapp.archiveGroups': 'whatsapp.archiveGroups',
-      'db.refresh_schema': 'db.refreshSchema',
-      'db.inspect_schema': 'db.refreshSchema',
-      'db.describeSchema': 'db.refreshSchema',
-      'db.refreshSchema': 'db.refreshSchema',
-      'db.query_read': 'db.queryRead',
-      'db.read_query': 'db.queryRead',
-      'db.readQuery': 'db.queryRead',
-      'db.queryRead': 'db.queryRead',
-      'db.query_write': 'db.queryWrite',
-      'db.write_query': 'db.queryWrite',
-      'db.writeQuery': 'db.queryWrite',
-      'db.queryWrite': 'db.queryWrite',
-      'smtp.send_mail': 'smtp.sendMail',
-      'smtp.sendEmail': 'smtp.sendMail',
-      'smtp.sendMail': 'smtp.sendMail',
-      'maps.get_current_location': 'maps.getCurrentLocation',
-      'maps.getCurrentLocation': 'maps.getCurrentLocation',
-      'maps.get_nearby_places': 'maps.getNearbyPlaces',
-      'maps.getNearbyPlaces': 'maps.getNearbyPlaces',
-      'maps.get_locations_places': 'maps.getNearbyPlaces',
-      'maps.getLocationsPlaces': 'maps.getNearbyPlaces',
-      'maps.get_places': 'maps.getNearbyPlaces',
-      'maps.search_places': 'maps.searchPlaces',
-      'maps.searchPlaces': 'maps.searchPlaces',
-      'maps.search_nearby': 'maps.searchPlaces',
-      'maps.find_places': 'maps.searchPlaces',
-      'maps.reverse_geocode': 'maps.reverseGeocode',
-      'maps.reverseGeocode': 'maps.reverseGeocode',
-      'maps.get_current_address': 'maps.reverseGeocode',
-      'maps.getCurrentAddress': 'maps.reverseGeocode',
-      'maps.get_directions_time': 'maps.getDirectionsTime',
-      'maps.getDirectionsTime': 'maps.getDirectionsTime',
-      'maps.get_directions_duration': 'maps.getDirectionsTime',
-      'integration.call': 'integration.call',
-      'integration.invoke': 'integration.call',
-      'integration.run': 'integration.call'
-    };
-    const tool = aliases[inputTool] || '';
-    const args = source.args && typeof source.args === 'object' ? source.args : {};
-
-    if (!tool) {
-      return null;
-    }
-
-    return { tool, args };
-  }
-
-  function extractToolCallsFromText(text) {
-    const source = String(text || '');
-    if (!source) {
-      logDebug('extractToolCallsFromText:empty');
-      return [];
-    }
-
-    const calls = [];
-    const blockRegex = /```(?:tool|json)\s*([\s\S]*?)```/gi;
-    const xmlRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
-    const chunks = [];
-
-    let match = null;
-    while ((match = blockRegex.exec(source))) {
-      if (match[1]) {
-        chunks.push(match[1].trim());
-      }
-    }
-
-    while ((match = xmlRegex.exec(source))) {
-      if (match[1]) {
-        chunks.push(match[1].trim());
-      }
-    }
-
-    for (const chunk of chunks) {
-      if (!chunk) {
-        continue;
-      }
-
-      const normalizedChunk = chunk.replace(/^json\s*/i, '').trim();
-
-      try {
-        const parsed = JSON.parse(normalizedChunk);
-        const list = Array.isArray(parsed) ? parsed : [parsed];
-        for (const item of list) {
-          const normalized = normalizeLocalToolCall(item);
-          if (normalized) {
-            calls.push(normalized);
-          }
-        }
-      } catch (_) {
-        // Ignore invalid blocks.
-        logWarn('extractToolCallsFromText:invalid_block', {
-          chunk: normalizedChunk.slice(0, 360)
-        });
-      }
-
-      const maxLocalToolCalls = getSystemVariableNumber('chat.maxLocalToolCalls', MAX_LOCAL_TOOL_CALLS);
-      if (calls.length >= maxLocalToolCalls) {
-        break;
-      }
-    }
-
-    const parsed = calls.slice(0, getSystemVariableNumber('chat.maxLocalToolCalls', MAX_LOCAL_TOOL_CALLS));
-    logDebug('extractToolCallsFromText:parsed', {
-      parsedCount: parsed.length,
-      parsed
-    });
-    return parsed;
-  }
-
   function getCustomIntegrationToolByName(name) {
     const token = String(name || '')
       .trim()
@@ -6465,338 +6803,6 @@ export function initPanelApp() {
     return payload || {
       ok: true
     };
-  }
-
-  function normalizeEmailList(rawValue, limit = 20) {
-    const source = Array.isArray(rawValue) ? rawValue : String(rawValue || '').split(/[;,]/);
-    const cleaned = [];
-    const seen = new Set();
-
-    for (const item of source) {
-      const email = String(item || '').trim().slice(0, 220);
-      if (!email || !email.includes('@') || seen.has(email.toLowerCase())) {
-        continue;
-      }
-      seen.add(email.toLowerCase());
-      cleaned.push(email);
-      if (cleaned.length >= limit) {
-        break;
-      }
-    }
-
-    return cleaned;
-  }
-
-  function htmlToPlainText(rawHtml) {
-    const source = String(rawHtml || '').trim();
-    if (!source) {
-      return '';
-    }
-
-    return source
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/p>/gi, '\n\n')
-      .replace(/<\/div>/gi, '\n')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/&lt;/gi, '<')
-      .replace(/&gt;/gi, '>')
-      .replace(/&quot;/gi, '"')
-      .replace(/&#39;/gi, "'")
-      .replace(/\r\n/g, '\n')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n[ \t]+/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-  }
-
-  function sanitizeNativeHostNameToken(value, fallback = 'com.greenstudio.smtp_bridge') {
-    const normalized = String(value || '')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, '')
-      .slice(0, 180);
-    if (!normalized) {
-      return fallback;
-    }
-    return normalized;
-  }
-
-  function buildMacNativeHostInstallerScript({ extensionId = '', hostName = '' } = {}) {
-    const safeExtensionId = String(extensionId || '')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '')
-      .slice(0, 64);
-    const safeHostName = sanitizeNativeHostNameToken(hostName, 'com.greenstudio.smtp_bridge');
-
-    return [
-      '#!/usr/bin/env bash',
-      'set -euo pipefail',
-      '',
-      `HOST_NAME="${safeHostName}"`,
-      `EXTENSION_ID="${safeExtensionId}"`,
-      '',
-      'if [[ "$(uname -s)" != "Darwin" ]]; then',
-      '  echo "Este instalador solo soporta macOS."',
-      '  exit 1',
-      'fi',
-      '',
-      'if [[ -z "$EXTENSION_ID" ]]; then',
-      '  echo "Extension ID invalido."',
-      '  exit 1',
-      'fi',
-      '',
-      'if ! command -v python3 >/dev/null 2>&1; then',
-      '  echo "python3 no encontrado. Instala Python 3 y vuelve a intentar."',
-      '  exit 1',
-      'fi',
-      '',
-      'BASE_DIR="$HOME/.greenstudio/native-host/$HOST_NAME"',
-      'MANIFEST_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"',
-      'HOST_PY="$BASE_DIR/host.py"',
-      'LAUNCHER="$BASE_DIR/host.sh"',
-      'MANIFEST_FILE="$MANIFEST_DIR/${HOST_NAME}.json"',
-      '',
-      'mkdir -p "$BASE_DIR" "$MANIFEST_DIR"',
-      '',
-      "cat > \"$HOST_PY\" <<'PYEOF'",
-      '#!/usr/bin/env python3',
-      'import json',
-      'import re',
-      'import smtplib',
-      'import ssl',
-      'import struct',
-      'import sys',
-      'from email.message import EmailMessage',
-      '',
-      "HOST_VERSION = '0.1.0'",
-      '',
-      'def read_message():',
-      '    raw_len = sys.stdin.buffer.read(4)',
-      '    if len(raw_len) == 0:',
-      '        return None',
-      '    if len(raw_len) < 4:',
-      '        return None',
-      "    msg_len = struct.unpack('<I', raw_len)[0]",
-      '    payload = sys.stdin.buffer.read(msg_len)',
-      '    if len(payload) < msg_len:',
-      '        return None',
-      "    return json.loads(payload.decode('utf-8'))",
-      '',
-      'def write_message(message):',
-      "    encoded = json.dumps(message, ensure_ascii=False).encode('utf-8')",
-      "    sys.stdout.buffer.write(struct.pack('<I', len(encoded)))",
-      '    sys.stdout.buffer.write(encoded)',
-      '    sys.stdout.buffer.flush()',
-      '',
-      'def normalize_list(value, limit):',
-      '    if isinstance(value, list):',
-      '        source = value',
-      '    else:',
-      "        source = re.split(r'[;,]', str(value or ''))",
-      '    cleaned = []',
-      '    seen = set()',
-      '    for item in source:',
-      "        email = str(item or '').strip()[:220]",
-      "        if not email or '@' not in email:",
-      '            continue',
-      '        key = email.lower()',
-      '        if key in seen:',
-      '            continue',
-      '        seen.add(key)',
-      '        cleaned.append(email)',
-      '        if len(cleaned) >= limit:',
-      '            break',
-      '    return cleaned',
-      '',
-      'def html_to_text(html):',
-      "    text = str(html or '')",
-      "    text = re.sub(r'<style[\\s\\S]*?</style>', ' ', text, flags=re.IGNORECASE)",
-      "    text = re.sub(r'<script[\\s\\S]*?</script>', ' ', text, flags=re.IGNORECASE)",
-      "    text = re.sub(r'<br\\s*/?>', '\\n', text, flags=re.IGNORECASE)",
-      "    text = re.sub(r'</p>', '\\n\\n', text, flags=re.IGNORECASE)",
-      "    text = re.sub(r'</div>', '\\n', text, flags=re.IGNORECASE)",
-      "    text = re.sub(r'<[^>]+>', ' ', text)",
-      "    text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')",
-      "    text = text.replace('&quot;', '\"').replace('&#39;', \"'\")",
-      "    text = re.sub(r'\\r\\n', '\\n', text)",
-      "    text = re.sub(r'[ \\t]+\\n', '\\n', text)",
-      "    text = re.sub(r'\\n{3,}', '\\n\\n', text)",
-      '    return text.strip()',
-      '',
-      'def open_smtp_client(host, port, secure_mode):',
-      "    mode = str(secure_mode or 'auto').strip().lower()",
-      "    if mode == 'true':",
-      '        try:',
-      '            client = smtplib.SMTP_SSL(host=host, port=port, timeout=30)',
-      '            client.ehlo()',
-      '            return client',
-      '        except ssl.SSLError as exc:',
-      "            if 'wrong version number' not in str(exc).lower() or int(port) != 587:",
-      '                raise',
-      '    client = smtplib.SMTP(host=host, port=port, timeout=30)',
-      '    client.ehlo()',
-      "    wants_tls = mode in ('auto', 'false', 'true')",
-      "    if wants_tls and client.has_extn('starttls'):",
-      '        context = ssl.create_default_context()',
-      '        client.starttls(context=context)',
-      '        client.ehlo()',
-      '    return client',
-      '',
-      'def handle_smtp_send(message):',
-      "    smtp = message.get('smtp') if isinstance(message.get('smtp'), dict) else {}",
-      "    mail = message.get('mail') if isinstance(message.get('mail'), dict) else {}",
-      '',
-      "    host = str(smtp.get('host') or '').strip()[:220]",
-      "    port = int(smtp.get('port') or 587)",
-      "    secure = str(smtp.get('secure') or 'auto').strip()[:12]",
-      "    username = str(smtp.get('username') or '').strip()[:220]",
-      "    password = str(smtp.get('password') or '').strip()[:220]",
-      "    from_addr = str(smtp.get('from') or username).strip()[:220]",
-      '',
-      "    to_list = normalize_list(mail.get('to'), 20)",
-      "    cc_list = normalize_list(mail.get('cc'), 10)",
-      "    bcc_list = normalize_list(mail.get('bcc'), 10)",
-      "    subject = str(mail.get('subject') or '').strip()[:220]",
-      "    text_body = str(mail.get('text') or '').strip()[:4000]",
-      "    html_body = str(mail.get('html') or '').strip()[:12000]",
-      "    fallback_text = html_to_text(html_body)[:2500]",
-      "    body_text = text_body or fallback_text",
-      '',
-      '    if not host or not username or not password:',
-      "        return {'ok': False, 'error': 'Faltan credenciales SMTP (host/username/password).'}",
-      '    if not to_list:',
-      "        return {'ok': False, 'error': 'Falta destinatario (to).'}",
-      '    if not subject:',
-      "        return {'ok': False, 'error': 'Falta asunto (subject).'}",
-      '    if not body_text and not html_body:',
-      "        return {'ok': False, 'error': 'Falta cuerpo (text/html).'}",
-      '',
-      '    recipients = to_list + cc_list + bcc_list',
-      '    client = None',
-      '    try:',
-      '        client = open_smtp_client(host, port, secure)',
-      '        client.login(username, password)',
-      '',
-      '        msg = EmailMessage()',
-      "        msg['From'] = from_addr",
-      "        msg['To'] = ', '.join(to_list)",
-      '        if cc_list:',
-      "            msg['Cc'] = ', '.join(cc_list)",
-      "        msg['Subject'] = subject",
-      '',
-      '        if body_text:',
-      '            msg.set_content(body_text)',
-      '            if html_body:',
-      "                msg.add_alternative(html_body, subtype='html')",
-      '        else:',
-      "            msg.set_content('[Sin contenido de texto]')",
-      "            msg.add_alternative(html_body, subtype='html')",
-      '',
-      '        client.send_message(msg, from_addr=from_addr, to_addrs=recipients)',
-      "        return {'ok': True, 'result': {'sent': True, 'toCount': len(to_list), 'ccCount': len(cc_list), 'bccCount': len(bcc_list), 'subject': subject}}",
-      '    except ssl.SSLError as exc:',
-      '        message = str(exc)',
-      "        if 'wrong version number' in message.lower():",
-      "            return {'ok': False, 'error': 'TLS mismatch: usa secure=auto/false con puerto 587, o secure=true con puerto 465.'}",
-      "        return {'ok': False, 'error': message}",
-      '    except Exception as exc:',
-      "        return {'ok': False, 'error': str(exc)}",
-      '    finally:',
-      '        if client is not None:',
-      '            try:',
-      '                client.quit()',
-      '            except Exception:',
-      '                pass',
-      '',
-      'def handle_ping(message):',
-      '    return {',
-      "        'ok': True,",
-      "        'result': {",
-      "            'pong': True,",
-      "            'version': HOST_VERSION,",
-      "            'capabilities': ['ping', 'smtp.send']",
-      '        }',
-      '    }',
-      '',
-      'def handle_message(message):',
-      "    msg_type = str(message.get('type') or '').strip().upper()",
-      "    if msg_type == 'PING':",
-      '        return handle_ping(message)',
-      "    if msg_type == 'GREENSTUDIO_SMTP_SEND':",
-      '        return handle_smtp_send(message)',
-      "    return {'ok': False, 'error': f'Tipo no soportado: {msg_type}'}",
-      '',
-      'def main():',
-      '    while True:',
-      '        message = read_message()',
-      '        if message is None:',
-      '            break',
-      '        try:',
-      '            response = handle_message(message)',
-      '        except Exception as exc:',
-      "            response = {'ok': False, 'error': str(exc)}",
-      '        write_message(response)',
-      '',
-      "if __name__ == '__main__':",
-      '    main()',
-      'PYEOF',
-      '',
-      'chmod +x "$HOST_PY"',
-      '',
-      "cat > \"$LAUNCHER\" <<'SHEOF'",
-      '#!/usr/bin/env bash',
-      'set -euo pipefail',
-      'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"',
-      'exec /usr/bin/env python3 "$SCRIPT_DIR/host.py"',
-      'SHEOF',
-      '',
-      'chmod +x "$LAUNCHER"',
-      '',
-      'cat > "$MANIFEST_FILE" <<JSONEOF',
-      '{',
-      `  "name": "${safeHostName}",`,
-      '  "description": "GreenStudio Native SMTP Host",',
-      '  "path": "$LAUNCHER",',
-      '  "type": "stdio",',
-      `  "allowed_origins": ["chrome-extension://${safeExtensionId}/"]`,
-      '}',
-      'JSONEOF',
-      '',
-      'echo "Instalacion completada: $HOST_NAME"',
-      'echo "Manifest: $MANIFEST_FILE"',
-      'echo "Regresa a la extension y ejecuta Ping complemento."'
-    ].join('\n');
-  }
-
-  function triggerTextFileDownload(filename, content, mimeType = 'text/plain') {
-    const safeName = String(filename || '').trim();
-    if (!safeName) {
-      throw new Error('Nombre de archivo invalido para descarga.');
-    }
-
-    const blob = new Blob([String(content || '')], {
-      type: String(mimeType || 'text/plain')
-    });
-    const objectUrl = URL.createObjectURL(blob);
-    try {
-      const anchor = document.createElement('a');
-      anchor.href = objectUrl;
-      anchor.download = safeName;
-      anchor.rel = 'noopener';
-      anchor.style.display = 'none';
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-    } finally {
-      setTimeout(() => {
-        URL.revokeObjectURL(objectUrl);
-      }, 1200);
-    }
   }
 
   function downloadMacNativeHostInstaller() {
@@ -7531,46 +7537,98 @@ export function initPanelApp() {
         }
 
         const whatsappAction = tool.replace(/^whatsapp\./, '');
-        const targetTab = getPreferredWhatsappTab(args);
-        if (!targetTab || !isWhatsappContext(targetTab)) {
+        const hasLookupArgs = hasWhatsappChatLookupArgs(args);
+        const phoneTarget = getWhatsappToolTargetPhone(args);
+        const routeSendThroughOpen = whatsappAction === 'sendMessage' && hasLookupArgs;
+        const requestedWhatsappAction = routeSendThroughOpen ? 'openChatAndSendMessage' : whatsappAction;
+        const needsPhoneRoute = Boolean(phoneTarget) && (
+          whatsappAction === 'openChat' ||
+          requestedWhatsappAction === 'openChatAndSendMessage'
+        );
+        const ensuredWhatsapp = await ensureWhatsappTabForTool(args, {
+          preferPhoneRoute: needsPhoneRoute
+        });
+        if (!ensuredWhatsapp?.ok || !ensuredWhatsapp.tab || !isWhatsappContext(ensuredWhatsapp.tab)) {
           results.push({
             tool,
             ok: false,
-            error: 'No hay tab de WhatsApp disponible para ejecutar la tool.',
-            result: {
-              requestedTabId: Number(args?.tabId) || -1
-            }
+            error: String(ensuredWhatsapp?.error || 'No hay tab de WhatsApp disponible para ejecutar la tool.').trim(),
+            result: ensuredWhatsapp?.diagnostics && typeof ensuredWhatsapp.diagnostics === 'object' ? ensuredWhatsapp.diagnostics : {}
           });
           continue;
         }
+        const targetTab = ensuredWhatsapp.tab;
 
         const siteArgs = {
           ...args
         };
         delete siteArgs.tabId;
+        if (!siteArgs.text && typeof siteArgs.message === 'string') {
+          siteArgs.text = siteArgs.message;
+        }
+
+        if (whatsappAction === 'openChat' && ensuredWhatsapp.openedViaUrl && ensuredWhatsapp.phone) {
+          results.push({
+            tool,
+            ok: true,
+            result: {
+              opened: true,
+              confirmed: false,
+              via: 'url',
+              phone: ensuredWhatsapp.phone,
+              url: ensuredWhatsapp.openedUrl,
+              tabId: Number(targetTab.tabId) || -1,
+              requestedAction: whatsappAction,
+              executedAction: 'urlOpen'
+            }
+          });
+          await tabContextService.requestSnapshot();
+          continue;
+        }
+
+        let executedWhatsappAction = requestedWhatsappAction;
+        if (executedWhatsappAction === 'openChatAndSendMessage' && ensuredWhatsapp.openedViaUrl && ensuredWhatsapp.phone) {
+          executedWhatsappAction = 'sendMessage';
+        }
+        if (executedWhatsappAction === 'sendMessage' && ensuredWhatsapp.openedViaUrl) {
+          await waitForMs(260);
+        }
 
         logDebug('executeLocalToolCalls:invoke', {
           tool,
           whatsappAction,
+          requestedWhatsappAction,
+          executedWhatsappAction,
           tabId: Number(targetTab.tabId) || -1,
-          args: siteArgs
+          args: siteArgs,
+          openedViaUrl: ensuredWhatsapp.openedViaUrl === true,
+          openedUrl: ensuredWhatsapp.openedUrl || ''
         });
 
         const response = await tabContextService.runSiteActionInTab(
           Number(targetTab.tabId) || -1,
           'whatsapp',
-          whatsappAction,
+          executedWhatsappAction,
           siteArgs
         );
 
+        const responseResult = response?.result && typeof response.result === 'object' ? response.result : {};
+        const failureMessage = buildWhatsappToolErrorText(
+          `No se pudo ejecutar whatsapp.${executedWhatsappAction}.`,
+          response
+        );
         results.push({
           tool,
           ok: response?.ok === true,
           result: {
-            ...(response?.result && typeof response.result === 'object' ? response.result : {}),
-            tabId: Number(targetTab.tabId) || -1
+            ...responseResult,
+            tabId: Number(targetTab.tabId) || -1,
+            requestedAction: whatsappAction,
+            executedAction: executedWhatsappAction,
+            openedViaUrl: ensuredWhatsapp.openedViaUrl === true,
+            openedUrl: ensuredWhatsapp.openedUrl || ''
           },
-          error: response?.error || ''
+          error: response?.ok === true ? '' : failureMessage
         });
         logDebug('executeLocalToolCalls:result', {
           tool,
@@ -7827,15 +7885,14 @@ export function initPanelApp() {
         createdAt: Date.now()
       };
       chatHistory.push(assistantMessage);
-      if (selectedChatTool !== 'create_image') {
-        chatStreamBottomReservePx = CHAT_STREAM_BOTTOM_RESERVE_PX;
-      } else {
-        chatStreamBottomReservePx = 0;
-      }
+      syncChatBottomReserve({
+        streaming: true
+      });
       renderChatMessages({
         allowAutoScroll: false
       });
       scrollChatToBottom();
+      cancelChatBottomAlign();
 
       if (selectedChatTool === 'create_image') {
         setStatus(chatStatus, 'Generando imagen...', false, { loading: true });
@@ -7845,7 +7902,7 @@ export function initPanelApp() {
           size: '1024x1024'
         });
         const imageUrl = String(imageResult?.imageUrl || '').trim();
-        const imageDataUrl = String(imageResult?.imageDataUrl || '').trim();
+        const imageDataUrl = normalizeGeneratedImageDataUrl(imageResult?.imageDataUrl || '');
         const revisedPrompt = String(imageResult?.revisedPrompt || '').trim();
         const previewSource = imageUrl || imageDataUrl;
         if (!previewSource) {
@@ -7857,7 +7914,9 @@ export function initPanelApp() {
           {
             url: imageUrl,
             dataUrl: imageDataUrl,
-            alt: content || 'Imagen generada'
+            alt: content || 'Imagen generada',
+            width: 1024,
+            height: 1024
           }
         ];
         assistantMessage.content = revisedPrompt
@@ -7875,6 +7934,9 @@ export function initPanelApp() {
           userMessage.extracted_facts = assistantMessage.extracted_facts;
         }
 
+        syncChatBottomReserve({
+          streaming: false
+        });
         renderChatMessages();
         scrollChatToBottom();
         await saveChatHistory();
@@ -7902,7 +7964,14 @@ export function initPanelApp() {
       const contextUsed = Array.isArray(streamPayload?.contextUsed)
         ? streamPayload.contextUsed.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 12)
         : [];
-      const detectedToolCalls = selectedChatTool === 'chat' ? extractToolCallsFromText(output) : [];
+      const detectedToolCalls =
+        selectedChatTool === 'chat'
+          ? extractToolCallsFromText(output, {
+              maxCalls: getSystemVariableNumber('chat.maxLocalToolCalls', MAX_LOCAL_TOOL_CALLS),
+              onDebug: logDebug,
+              onWarn: logWarn
+            })
+          : [];
       let finalAssistantOutput = output;
 
       logDebug('sendChatMessage:model_output', {
@@ -7998,16 +8067,23 @@ export function initPanelApp() {
         startRandomEmotionCycle({ immediate: true });
       }
 
-      chatStreamBottomReservePx = 0;
+      syncChatBottomReserve({
+        streaming: false
+      });
       renderChatMessages({
         allowAutoScroll: false
       });
       await saveChatHistory();
       setStatus(chatStatus, `Respuesta generada con ${activeModel}.`);
     } catch (error) {
-      chatStreamBottomReservePx = 0;
+      syncChatBottomReserve({
+        streaming: false
+      });
       if (assistantMessage && !assistantMessage.content.trim()) {
         chatHistory = chatHistory.filter((msg) => msg.id !== assistantMessage.id);
+        syncChatBottomReserve({
+          streaming: false
+        });
         renderChatMessages({
           allowAutoScroll: false
         });
@@ -8765,1331 +8841,6 @@ export function initPanelApp() {
     };
   }
 
-  function toSafeDynamicUiText(value, limit = 220) {
-    return String(value || '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, Math.max(0, Number(limit) || 0));
-  }
-
-  function normalizePhoneSignal(value) {
-    const digits = String(value || '').replace(/\D/g, '');
-    if (digits.length < 7) {
-      return '';
-    }
-    return digits.slice(0, 20);
-  }
-
-  function extractPhoneFromWhatsappChatId(value) {
-    const source = String(value || '').trim();
-    if (!source) {
-      return '';
-    }
-
-    const directWid = source.match(/(?:whatsapp:)?([0-9]{7,})@c\.us/i);
-    if (directWid && directWid[1]) {
-      return normalizePhoneSignal(directWid[1]);
-    }
-
-    const fallbackWid = source.match(/([0-9]{7,})@/);
-    if (fallbackWid && fallbackWid[1]) {
-      return normalizePhoneSignal(fallbackWid[1]);
-    }
-
-    return '';
-  }
-
-  function normalizeEmailSignal(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token || !/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(token)) {
-      return '';
-    }
-    return token.slice(0, 220);
-  }
-
-  function collectUniqueSignals(values, normalizer, limit = 6) {
-    const output = [];
-    const seen = new Set();
-    for (const item of Array.isArray(values) ? values : []) {
-      const normalized = normalizer(item);
-      if (!normalized || seen.has(normalized)) {
-        continue;
-      }
-      seen.add(normalized);
-      output.push({
-        value: toSafeDynamicUiText(item || normalized, 120),
-        normalized
-      });
-      if (output.length >= Math.max(1, Math.min(20, Number(limit) || 6))) {
-        break;
-      }
-    }
-    return output;
-  }
-
-  function extractPhoneSignalsFromText(text, limit = 8) {
-    const source = String(text || '');
-    if (!source) {
-      return [];
-    }
-    const matches = source.match(/(?:\+?\d[\d\s().-]{6,}\d)/g) || [];
-    return collectUniqueSignals(matches, normalizePhoneSignal, limit);
-  }
-
-  function extractEmailSignalsFromText(text, limit = 8) {
-    const source = String(text || '');
-    if (!source) {
-      return [];
-    }
-    const matches = source.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
-    return collectUniqueSignals(matches, normalizeEmailSignal, limit);
-  }
-
-  function collectDynamicSignalsFromTab(tabContext) {
-    const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
-    const details = context.details && typeof context.details === 'object' ? context.details : {};
-    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
-    const inbox = Array.isArray(details.inbox) ? details.inbox : [];
-    const messages = Array.isArray(details.messages) ? details.messages : [];
-    const entities = Array.isArray(details.entities) ? details.entities : [];
-
-    const textSources = [
-      String(context.title || ''),
-      String(context.description || ''),
-      String(context.textExcerpt || ''),
-      String(currentChat.channelId || ''),
-      String(currentChat.key || ''),
-      String(currentChat.phone || ''),
-      String(currentChat.title || ''),
-      entities.join(' ')
-    ];
-
-    for (const item of inbox.slice(0, 24)) {
-      textSources.push(String(item?.title || ''));
-      textSources.push(String(item?.phone || ''));
-      textSources.push(String(item?.preview || ''));
-    }
-
-    for (const item of messages.slice(-20)) {
-      textSources.push(String(item?.text || ''));
-      textSources.push(String(item?.transcript || item?.enriched?.transcript || ''));
-      textSources.push(String(item?.ocrText || item?.enriched?.ocrText || ''));
-    }
-
-    const combined = textSources.filter(Boolean).join('\n');
-    const phoneFromWhatsappChannelId = extractPhoneFromWhatsappChatId(currentChat.channelId || currentChat.key || '');
-    const phones = collectUniqueSignals(
-      [
-        phoneFromWhatsappChannelId,
-        String(currentChat.phone || ''),
-        ...extractPhoneSignalsFromText(combined, 12).map((item) => item.normalized)
-      ],
-      normalizePhoneSignal,
-      8
-    );
-    const emails = collectUniqueSignals(
-      extractEmailSignalsFromText(combined, 12).map((item) => item.normalized),
-      normalizeEmailSignal,
-      8
-    );
-
-    if (isWhatsappContext(context)) {
-      logDebug('dynamic_signals:whatsapp_detected', {
-        tabId: Number(context.tabId) || -1,
-        channelId: toSafeLogText(currentChat.channelId || '', 220),
-        chatKey: toSafeLogText(currentChat.key || '', 180),
-        chatPhone: toSafeLogText(currentChat.phone || '', 80),
-        phoneSignals: phones.map((item) => item?.normalized || ''),
-        emailSignals: emails.map((item) => item?.normalized || '')
-      });
-    }
-
-    return {
-      phones,
-      emails
-    };
-  }
-
-  function quoteSqlIdentifier(value) {
-    const safe = String(value || '').trim();
-    if (!safe) {
-      return '""';
-    }
-    return `"${safe.replace(/"/g, '""')}"`;
-  }
-
-  function tableTitleFromName(tableName) {
-    const tokens = String(tableName || '')
-      .replace(/[_-]+/g, ' ')
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 6);
-    if (!tokens.length) {
-      return 'Tabla';
-    }
-    return tokens.map((token) => token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()).join(' ');
-  }
-
-  function isPhoneColumnName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return /(phone|telefono|cel|mobile|movil|whatsapp|telefono|tel_?)/.test(token);
-  }
-
-  function isEmailColumnName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return /(email|correo|mail)/.test(token);
-  }
-
-  function isLabelColumnName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return /(name|nombre|title|subject|contact|cliente|company|empresa|lead|deal|task|item)/.test(token);
-  }
-
-  function isLikelyIdColumnName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return token === 'id' || token.endsWith('_id') || /(uuid|guid)$/.test(token);
-  }
-
-  function isContactReferenceColumnName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return /(contact_?id|cliente_?id|customer_?id|client_?id|lead_?id|persona_?id|person_?id)/.test(token);
-  }
-
-  function isContactTableName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return /(contact|cliente|customer|client|persona|person|lead|prospect)/.test(token);
-  }
-
-  function isSecondLevelRelationTableName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return /(task|activity|ticket|deal|opportunit|message|note|order|invoice|event|call|meeting)/.test(token);
-  }
-
-  function isOwnerAssignmentColumnName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return /(owner_?id|assigned_?(to|user)?_?id|assignee_?id|user_?id|employee_?id|agent_?id|sales_?rep_?id|created_?by)/.test(
-      token
-    );
-  }
-
-  function isSupportControlTableName(value) {
-    const token = String(value || '').trim().toLowerCase();
-    if (!token) {
-      return false;
-    }
-    return /(audit|log|history|meta|metadata|config|setting|permission|role|lookup|catalog|dictionary|enum|mapping|map|xref|bridge|pivot|join|migration|schema|token|session|cache|queue|job|tmp|temp|backup|archive|import|export)/.test(
-      token
-    );
-  }
-
-  function isLikelyBridgeTable(table) {
-    const columns = Array.isArray(table?.columns) ? table.columns : [];
-    if (!columns.length || columns.length > 8) {
-      return false;
-    }
-    const fkCount = columns.filter((column) => column?.foreignKey && typeof column.foreignKey === 'object').length;
-    const labelCount = columns.filter((column) => isLabelColumnName(column?.name)).length;
-    return fkCount >= 2 && labelCount <= 1;
-  }
-
-  function classifyTableRelevanceLevel(table, options = {}) {
-    const name = String(table?.name || '').trim().toLowerCase();
-    if (!name) {
-      return 'low';
-    }
-
-    if (isSupportControlTableName(name) || isLikelyBridgeTable(table)) {
-      return 'support';
-    }
-    if (isSecondLevelRelationTableName(name)) {
-      return 'high';
-    }
-    if (isContactTableName(name)) {
-      return options.allowContact === true ? 'medium' : 'low';
-    }
-
-    return 'medium';
-  }
-
-  function findOwnerAssignmentColumn(table, meProfile = null) {
-    const columns = Array.isArray(table?.columns) ? table.columns : [];
-    if (!columns.length) {
-      return {
-        hasOwnerColumn: false,
-        ownerColumn: null
-      };
-    }
-
-    const ownerCandidates = columns.filter((column) => {
-      const name = String(column?.name || '').trim();
-      if (!name) {
-        return false;
-      }
-      if (isOwnerAssignmentColumnName(name)) {
-        return true;
-      }
-      const fk = column?.foreignKey && typeof column.foreignKey === 'object' ? column.foreignKey : null;
-      if (!fk) {
-        return false;
-      }
-      const targetTable = String(fk.targetTable || '').trim();
-      if (!targetTable) {
-        return false;
-      }
-      return isLikelyUserTableName(targetTable);
-    });
-
-    if (!ownerCandidates.length) {
-      return {
-        hasOwnerColumn: false,
-        ownerColumn: null
-      };
-    }
-
-    const profile = meProfile && typeof meProfile === 'object' ? meProfile : null;
-    if (!isCrmErpMeProfileComplete(profile)) {
-      return {
-        hasOwnerColumn: true,
-        ownerColumn: null
-      };
-    }
-
-    const target = splitQualifiedTableName(profile.tableQualifiedName);
-    const profileIdColumn = String(profile.idColumn || '').trim().toLowerCase();
-    const fkMatch = ownerCandidates.find((column) => {
-      const fk = column?.foreignKey && typeof column.foreignKey === 'object' ? column.foreignKey : null;
-      if (!fk) {
-        return false;
-      }
-      const targetTable = String(fk.targetTable || '').trim().toLowerCase();
-      const targetSchema = String(fk.targetSchema || '').trim().toLowerCase();
-      const targetColumn = String(fk.targetColumn || '').trim().toLowerCase();
-      if (!targetTable) {
-        return false;
-      }
-
-      const tableMatches = target.table && targetTable === target.table.toLowerCase();
-      const schemaMatches = !target.schema || !targetSchema || targetSchema === target.schema.toLowerCase();
-      const columnMatches = !profileIdColumn || !targetColumn || targetColumn === profileIdColumn;
-      return tableMatches && schemaMatches && columnMatches;
-    });
-    if (fkMatch) {
-      return {
-        hasOwnerColumn: true,
-        ownerColumn: fkMatch
-      };
-    }
-
-    const byName = ownerCandidates.find((column) => isOwnerAssignmentColumnName(column?.name)) || ownerCandidates[0];
-    return {
-      hasOwnerColumn: true,
-      ownerColumn: byName || null
-    };
-  }
-
-  function normalizeIdSignal(value) {
-    const token = String(value || '').trim();
-    if (!token) {
-      return '';
-    }
-    return token.slice(0, 220);
-  }
-
-  function sanitizeSqlParamsForLog(rawParams, maxItems = 12) {
-    const params = Array.isArray(rawParams) ? rawParams : [];
-    return params.map((value) => {
-      if (Array.isArray(value)) {
-        return value
-          .slice(0, Math.max(1, Math.min(80, Number(maxItems) || 12)))
-          .map((item) => toSafeLogText(item, 120));
-      }
-      return toSafeLogText(value, 220);
-    });
-  }
-
-  function buildWhatsappDirectSignals(tabContext, fallbackSignals = {}) {
-    const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
-    const details = context.details && typeof context.details === 'object' ? context.details : {};
-    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
-    const fallbackPhones = Array.isArray(fallbackSignals?.phones) ? fallbackSignals.phones : [];
-    const fallbackEmails = Array.isArray(fallbackSignals?.emails) ? fallbackSignals.emails : [];
-    const phoneFromChannel = extractPhoneFromWhatsappChatId(currentChat.channelId || currentChat.key || '');
-    const primaryPhones = collectUniqueSignals(
-      [phoneFromChannel, String(currentChat.phone || ''), String(currentChat.key || '')],
-      normalizePhoneSignal,
-      4
-    );
-    const phones = primaryPhones.length ? primaryPhones : fallbackPhones;
-    const emails = fallbackEmails.slice(0, 4);
-
-    logDebug('whatsapp_contact:signals', {
-      tabId: Number(context.tabId) || -1,
-      channelId: toSafeLogText(currentChat.channelId || '', 200),
-      chatKey: toSafeLogText(currentChat.key || '', 180),
-      chatPhone: toSafeLogText(currentChat.phone || '', 80),
-      directPhones: primaryPhones.map((item) => item?.normalized || ''),
-      effectivePhones: phones.map((item) => item?.normalized || ''),
-      effectiveEmails: emails.map((item) => item?.normalized || '')
-    });
-
-    return {
-      phones,
-      emails
-    };
-  }
-
-  function buildSignalMatchExpression(signalType, matchExpr) {
-    const type = String(signalType || '').trim().toLowerCase();
-    if (type === 'phone') {
-      return `regexp_replace(${matchExpr}, '[^0-9]', '', 'g')`;
-    }
-    if (type === 'email') {
-      return `LOWER(TRIM(${matchExpr}))`;
-    }
-    return `TRIM(${matchExpr})`;
-  }
-
-  function pickIdColumn(columns) {
-    const source = Array.isArray(columns) ? columns : [];
-    let best = null;
-    let bestScore = -1;
-    for (const column of source) {
-      const name = String(column?.name || '').trim();
-      if (!name) {
-        continue;
-      }
-
-      let score = 0;
-      const token = name.toLowerCase();
-      if (column?.isPrimaryKey === true) {
-        score += 50;
-      }
-      if (token === 'id') {
-        score += 40;
-      }
-      if (isContactReferenceColumnName(token)) {
-        score += 25;
-      }
-      if (token.endsWith('_id')) {
-        score += 12;
-      }
-      if (/(uuid|guid)$/.test(token)) {
-        score += 4;
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        best = column;
-      }
-    }
-
-    return best && bestScore > 0 ? best : null;
-  }
-
-  function pickLabelColumn(columns, excludedName = '') {
-    const source = Array.isArray(columns) ? columns : [];
-    const excludedToken = String(excludedName || '').trim();
-    const preferred = source.find((column) => {
-      const name = String(column?.name || '').trim();
-      return name && name !== excludedToken && isLabelColumnName(name);
-    });
-    if (preferred) {
-      return preferred;
-    }
-
-    const fallback = source.find((column) => {
-      const name = String(column?.name || '').trim();
-      return name && name !== excludedToken && !isLikelyIdColumnName(name);
-    });
-    return fallback || null;
-  }
-
-  function buildContactAnchorCandidates(snapshot, signals, meProfile = null, limit = 8) {
-    const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
-    const tables = Array.isArray(safeSnapshot?.tables) ? safeSnapshot.tables : [];
-    const hasPhoneSignals = Array.isArray(signals?.phones) && signals.phones.length > 0;
-    const hasEmailSignals = Array.isArray(signals?.emails) && signals.emails.length > 0;
-    if (!hasPhoneSignals && !hasEmailSignals) {
-      return [];
-    }
-
-    const output = [];
-    for (const table of tables) {
-      const columns = Array.isArray(table?.columns) ? table.columns : [];
-      if (!columns.length) {
-        continue;
-      }
-
-      const relevanceLevel = classifyTableRelevanceLevel(table, { allowContact: true });
-      if (relevanceLevel === 'support') {
-        continue;
-      }
-
-      const phoneColumns = columns.filter((column) => isPhoneColumnName(column?.name)).slice(0, 6);
-      const emailColumns = columns.filter((column) => isEmailColumnName(column?.name)).slice(0, 6);
-      if (!phoneColumns.length && !emailColumns.length) {
-        continue;
-      }
-
-      const idColumn = pickIdColumn(columns);
-      if (!idColumn?.name) {
-        continue;
-      }
-
-      const ownerBinding = findOwnerAssignmentColumn(table, meProfile);
-
-      const labelColumn = pickLabelColumn(columns, idColumn.name) || idColumn;
-      const estimatedRows = Number(table?.estimatedRows) || 0;
-      const rowScore = estimatedRows > 0 ? Math.max(0, Math.min(18, 18 - Math.log10(estimatedRows + 1) * 4)) : 4;
-      const contactBoost = isContactTableName(table?.name) ? 16 : 0;
-      const signalBoost = phoneColumns.length && emailColumns.length ? 8 : 4;
-      const idBoost = idColumn?.isPrimaryKey === true ? 8 : 3;
-
-      output.push({
-        table,
-        idColumn,
-        labelColumn,
-        phoneColumns,
-        emailColumns,
-        ownerColumn: ownerBinding.ownerColumn || null,
-        relevanceLevel,
-        priorityHint: Math.round(rowScore + contactBoost + signalBoost + idBoost)
-      });
-    }
-
-    output.sort((left, right) => right.priorityHint - left.priorityHint);
-    return output.slice(0, Math.max(1, Math.min(20, Number(limit) || 8)));
-  }
-
-  async function queryContactMatchesForCandidate(connectionUrl, candidate, signals) {
-    const table = candidate?.table && typeof candidate.table === 'object' ? candidate.table : null;
-    const idColumn = candidate?.idColumn && typeof candidate.idColumn === 'object' ? candidate.idColumn : null;
-    const labelColumn =
-      candidate?.labelColumn && typeof candidate.labelColumn === 'object' ? candidate.labelColumn : idColumn;
-    const phoneColumns = Array.isArray(candidate?.phoneColumns) ? candidate.phoneColumns : [];
-    const emailColumns = Array.isArray(candidate?.emailColumns) ? candidate.emailColumns : [];
-    if (!table || !idColumn?.name || !labelColumn?.name) {
-      return [];
-    }
-
-    const schemaName = String(table.schema || '').trim();
-    const tableName = String(table.name || '').trim();
-    if (!schemaName || !tableName) {
-      return [];
-    }
-
-    const phoneValues = (Array.isArray(signals?.phones) ? signals.phones : [])
-      .map((item) => item?.normalized || '')
-      .map((item) => normalizePhoneSignal(item))
-      .filter(Boolean)
-      .slice(0, 12);
-    const emailValues = (Array.isArray(signals?.emails) ? signals.emails : [])
-      .map((item) => item?.normalized || '')
-      .map((item) => normalizeEmailSignal(item))
-      .filter(Boolean)
-      .slice(0, 12);
-    if (!phoneValues.length && !emailValues.length) {
-      return [];
-    }
-
-    const meProfile = getCrmErpDatabaseMeProfile();
-    const ownerColumnName = String(candidate?.ownerColumn?.name || '').trim();
-    const ownerUserId = isCrmErpMeProfileComplete(meProfile) ? String(meProfile.userId || '').trim() : '';
-
-    const whereTokens = [];
-    if (phoneValues.length) {
-      for (const column of phoneColumns) {
-        const matchExpr = `CAST(${quoteSqlIdentifier(column.name)} AS text)`;
-        whereTokens.push(`${buildSignalMatchExpression('phone', matchExpr)} = ANY($1::text[])`);
-      }
-    }
-    if (emailValues.length) {
-      for (const column of emailColumns) {
-        const matchExpr = `CAST(${quoteSqlIdentifier(column.name)} AS text)`;
-        whereTokens.push(`${buildSignalMatchExpression('email', matchExpr)} = ANY($2::text[])`);
-      }
-    }
-    if (!whereTokens.length) {
-      return [];
-    }
-
-    const qualifiedTable = `${quoteSqlIdentifier(schemaName)}.${quoteSqlIdentifier(tableName)}`;
-    const idExpr = `TRIM(CAST(${quoteSqlIdentifier(idColumn.name)} AS text))`;
-    const labelExpr = `COALESCE(NULLIF(TRIM(CAST(${quoteSqlIdentifier(
-      labelColumn.name
-    )} AS text)), ''), NULLIF(${idExpr}, ''), '(sin etiqueta)')`;
-    const ownerFilterSql =
-      ownerColumnName && ownerUserId
-        ? `AND TRIM(CAST(${quoteSqlIdentifier(ownerColumnName)} AS text)) = $3`
-        : '';
-    const sql = [
-      'SELECT item_id, item_label, item_count',
-      'FROM (',
-      `  SELECT ${idExpr} AS item_id, ${labelExpr} AS item_label, COUNT(*)::int AS item_count`,
-      `  FROM ${qualifiedTable}`,
-      `  WHERE (${whereTokens.join(' OR ')})`,
-      `  ${ownerFilterSql}`,
-      '  GROUP BY 1, 2',
-      ') grouped',
-      "WHERE item_id <> ''",
-      'ORDER BY item_count DESC, item_label ASC',
-      'LIMIT 12;'
-    ].join('\n');
-
-    const params = [phoneValues, emailValues];
-    if (ownerFilterSql) {
-      params.push(ownerUserId);
-    }
-    logDebug('whatsapp_contact:lookup_sql', {
-      table: `${schemaName}.${tableName}`,
-      ownerColumn: ownerColumnName || '',
-      ownerFilterActive: Boolean(ownerFilterSql),
-      sql,
-      params: sanitizeSqlParamsForLog(params)
-    });
-    const response = await postgresService.queryRead(connectionUrl, sql, params, {
-      maxRows: 20
-    });
-    const rows = Array.isArray(response?.rows) ? response.rows : [];
-    logDebug('whatsapp_contact:lookup_result', {
-      table: `${schemaName}.${tableName}`,
-      rowCount: rows.length,
-      preview: rows.slice(0, 5).map((row) => ({
-        item_id: toSafeLogText(row?.item_id || '', 80),
-        item_label: toSafeLogText(row?.item_label || '', 140),
-        item_count: Math.max(0, Number(row?.item_count) || 0)
-      }))
-    });
-    return rows
-      .map((row) => {
-        const id = normalizeIdSignal(row?.item_id || '');
-        if (!id) {
-          return null;
-        }
-        const label = toSafeDynamicUiText(row?.item_label || id, 140) || id;
-        const count = Math.max(0, Number(row?.item_count) || 0) || 1;
-        return { id, label, count };
-      })
-      .filter(Boolean);
-  }
-
-  function buildContactSignalEntries(contactRows, limit = 12) {
-    const entries = [];
-    const seen = new Set();
-    for (const row of Array.isArray(contactRows) ? contactRows : []) {
-      const id = normalizeIdSignal(row?.id || '');
-      if (!id || seen.has(id)) {
-        continue;
-      }
-      seen.add(id);
-      const label = toSafeDynamicUiText(row?.label || '', 140);
-      const value = label ? `${label} (${id})` : id;
-      entries.push({
-        normalized: id,
-        value: toSafeDynamicUiText(value, 180) || id
-      });
-      if (entries.length >= Math.max(1, Math.min(20, Number(limit) || 12))) {
-        break;
-      }
-    }
-    return entries;
-  }
-
-  function buildRelatedTableCandidatesFromContactAnchor(
-    snapshot,
-    anchorCandidate,
-    meProfile = null,
-    limit = 12
-  ) {
-    const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
-    const tables = Array.isArray(safeSnapshot?.tables) ? safeSnapshot.tables : [];
-    const anchorTable = anchorCandidate?.table && typeof anchorCandidate.table === 'object' ? anchorCandidate.table : null;
-    const anchorIdColumn =
-      anchorCandidate?.idColumn && typeof anchorCandidate.idColumn === 'object' ? anchorCandidate.idColumn : null;
-    if (!anchorTable || !anchorIdColumn?.name) {
-      return [];
-    }
-
-    const anchorSchema = String(anchorTable.schema || '').trim().toLowerCase();
-    const anchorName = String(anchorTable.name || '').trim().toLowerCase();
-    const anchorQualified = `${anchorSchema}.${anchorName}`;
-    const anchorIdName = String(anchorIdColumn.name || '').trim().toLowerCase();
-    const anchorSingular = anchorName.endsWith('s') ? anchorName.slice(0, -1) : anchorName;
-    const anchorIdTokens = new Set([
-      `${anchorName}_id`,
-      `${anchorSingular}_id`,
-      `${anchorName}id`,
-      `${anchorSingular}id`
-    ]);
-    if (anchorIdName && anchorIdName !== 'id') {
-      anchorIdTokens.add(anchorIdName);
-    }
-
-    const output = [];
-    for (const table of tables) {
-      const schemaName = String(table?.schema || '').trim();
-      const tableName = String(table?.name || '').trim();
-      if (!schemaName || !tableName) {
-        continue;
-      }
-      if (`${schemaName.toLowerCase()}.${tableName.toLowerCase()}` === anchorQualified) {
-        continue;
-      }
-      if (isContactTableName(tableName)) {
-        continue;
-      }
-
-      const columns = Array.isArray(table?.columns) ? table.columns : [];
-      if (!columns.length) {
-        continue;
-      }
-
-      const relevanceLevel = classifyTableRelevanceLevel(table);
-      if (relevanceLevel === 'support') {
-        continue;
-      }
-
-      let matchColumn = columns.find((column) => {
-        const foreignKey = column?.foreignKey && typeof column.foreignKey === 'object' ? column.foreignKey : null;
-        if (!foreignKey) {
-          return false;
-        }
-        const targetTable = String(foreignKey.targetTable || '').trim().toLowerCase();
-        const targetSchema = String(foreignKey.targetSchema || '').trim().toLowerCase();
-        const targetColumn = String(foreignKey.targetColumn || '').trim().toLowerCase();
-        if (!targetTable) {
-          return false;
-        }
-        const schemaMatches = !targetSchema || targetSchema === anchorSchema;
-        const tableMatches = targetTable === anchorName;
-        const columnMatches = !targetColumn || targetColumn === anchorIdName;
-        return schemaMatches && tableMatches && columnMatches;
-      });
-
-      if (!matchColumn) {
-        matchColumn = columns.find((column) => {
-          const name = String(column?.name || '').trim().toLowerCase();
-          if (!name) {
-            return false;
-          }
-          if (isContactReferenceColumnName(name)) {
-            return true;
-          }
-          return anchorIdTokens.has(name);
-        });
-      }
-
-      if (!matchColumn?.name) {
-        continue;
-      }
-
-      const ownerBinding = findOwnerAssignmentColumn(table, meProfile);
-
-      const labelColumn = pickLabelColumn(columns, matchColumn.name) || matchColumn;
-      const estimatedRows = Number(table?.estimatedRows) || 0;
-      const rowScore = estimatedRows > 0 ? Math.max(0, Math.min(16, 16 - Math.log10(estimatedRows + 1) * 4)) : 4;
-      const fkBoost = matchColumn?.foreignKey ? 12 : 5;
-      const nameBoost = isSecondLevelRelationTableName(tableName) ? 10 : 0;
-      const relevanceBoost = relevanceLevel === 'high' ? 10 : relevanceLevel === 'medium' ? 4 : 0;
-
-      output.push({
-        table,
-        matchColumn,
-        labelColumn,
-        ownerColumn: ownerBinding.ownerColumn || null,
-        relevanceLevel,
-        priorityHint: Math.round(rowScore + fkBoost + nameBoost + relevanceBoost)
-      });
-    }
-
-    output.sort((left, right) => right.priorityHint - left.priorityHint);
-    return output.slice(0, Math.max(1, Math.min(24, Number(limit) || 12)));
-  }
-
-  async function fetchWhatsappContactFirstRelationCards(connectionUrl, snapshot, tabContext, signals) {
-    if (!isWhatsappContext(tabContext)) {
-      return [];
-    }
-
-    const directSignals = buildWhatsappDirectSignals(tabContext, signals);
-    const meProfile = getCrmErpDatabaseMeProfile();
-    const anchors = buildContactAnchorCandidates(snapshot, directSignals, meProfile, 10);
-    logDebug('whatsapp_contact:anchor_candidates', {
-      candidateCount: anchors.length,
-      candidates: anchors.slice(0, 8).map((candidate) => ({
-        table: toSafeLogText(candidate?.table?.qualifiedName || '', 200),
-        idColumn: toSafeLogText(candidate?.idColumn?.name || '', 80),
-        ownerColumn: toSafeLogText(candidate?.ownerColumn?.name || '', 80),
-        priorityHint: Math.max(0, Number(candidate?.priorityHint) || 0)
-      }))
-    });
-    if (!anchors.length) {
-      return [];
-    }
-
-    let selectedAnchor = null;
-    let matchedContacts = [];
-    for (const candidate of anchors) {
-      let rows = [];
-      try {
-        rows = await queryContactMatchesForCandidate(connectionUrl, candidate, directSignals);
-        if (!rows.length) {
-          rows = await queryContactMatchesForCandidate(connectionUrl, candidate, signals);
-        }
-      } catch (_) {
-        rows = [];
-      }
-      if (!rows.length) {
-        continue;
-      }
-      selectedAnchor = candidate;
-      matchedContacts = rows;
-      break;
-    }
-
-    if (!selectedAnchor || !matchedContacts.length) {
-      return [];
-    }
-
-    const contactSignals = buildContactSignalEntries(matchedContacts, 12);
-    const contactIds = contactSignals.map((item) => item.normalized).filter(Boolean);
-    logDebug('whatsapp_contact:resolved_contact_ids', {
-      table: toSafeLogText(selectedAnchor?.table?.qualifiedName || '', 200),
-      contactIds: contactIds.slice(0, 12),
-      contactSignals: contactSignals.slice(0, 12)
-    });
-    if (!contactIds.length) {
-      return [];
-    }
-
-    const cards = [];
-    const relatedCandidates = buildRelatedTableCandidatesFromContactAnchor(
-      snapshot,
-      selectedAnchor,
-      meProfile,
-      14
-    );
-    const secondLevelTasks = relatedCandidates.map((candidate) =>
-      queryRelationCardForCandidate(connectionUrl, candidate, 'contact_id', contactIds, contactSignals)
-    );
-    const settled = await Promise.all(secondLevelTasks.map((task) => task.catch(() => null)));
-    for (const result of settled) {
-      if (!result) {
-        continue;
-      }
-      cards.push(result);
-    }
-
-    logDebug('whatsapp_contact:second_level_relations', {
-      tableCount: cards.length,
-      tables: cards.map((card) => ({
-        table: toSafeLogText(card?.tableQualifiedName || '', 200),
-        count: Math.max(0, Number(card?.totalCount) || 0),
-        caption: toSafeLogText(card?.caption || '', 160)
-      }))
-    });
-
-    return collapseRelationCardsByTable(cards);
-  }
-
-  function buildRelationTableCandidates(snapshot, signalType, options = {}) {
-    const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
-    const tables = Array.isArray(safeSnapshot?.tables) ? safeSnapshot.tables : [];
-    const limit = Math.max(1, Math.min(20, Number(options.limit) || 8));
-    const excludeContactTables = options.excludeContactTables === true;
-    const meProfile = options.meProfile && typeof options.meProfile === 'object' ? options.meProfile : null;
-    const output = [];
-
-    for (const table of tables) {
-      const tableName = String(table?.name || '').trim();
-      if (!tableName) {
-        continue;
-      }
-      if (excludeContactTables && isContactTableName(tableName)) {
-        continue;
-      }
-
-      const relevanceLevel = classifyTableRelevanceLevel(table, { allowContact: !excludeContactTables });
-      if (relevanceLevel === 'support') {
-        continue;
-      }
-
-      const columns = Array.isArray(table?.columns) ? table.columns : [];
-      if (!columns.length) {
-        continue;
-      }
-
-      const matchColumn =
-        signalType === 'phone'
-          ? columns.find((column) => isPhoneColumnName(column?.name))
-          : columns.find((column) => isEmailColumnName(column?.name));
-      if (!matchColumn || !matchColumn.name) {
-        continue;
-      }
-
-      const ownerBinding = findOwnerAssignmentColumn(table, meProfile);
-
-      let labelColumn = columns.find((column) => {
-        const name = String(column?.name || '');
-        return name && name !== matchColumn.name && isLabelColumnName(name);
-      });
-      if (!labelColumn) {
-        labelColumn = matchColumn;
-      }
-
-      const estimatedRows = Number(table?.estimatedRows) || 0;
-      const rowScore = estimatedRows > 0 ? Math.max(0, Math.min(18, 18 - Math.log10(estimatedRows + 1) * 4)) : 4;
-      const nameBoost = /(task|deal|lead|contact|customer|client|message|ticket|opportunity|activity)/.test(
-        tableName.toLowerCase()
-      )
-        ? 8
-        : 0;
-      const relevanceBoost = relevanceLevel === 'high' ? 10 : relevanceLevel === 'medium' ? 4 : 0;
-
-      output.push({
-        table,
-        matchColumn,
-        labelColumn,
-        ownerColumn: ownerBinding.ownerColumn || null,
-        relevanceLevel,
-        priorityHint: Math.round(rowScore + nameBoost + relevanceBoost)
-      });
-    }
-
-    output.sort((left, right) => right.priorityHint - left.priorityHint);
-    return output.slice(0, limit);
-  }
-
-  function fieldLabelFromColumnName(value) {
-    const token = String(value || '')
-      .replace(/[_-]+/g, ' ')
-      .trim();
-    if (!token) {
-      return 'Field';
-    }
-    return token
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 5)
-      .map((item) => item.charAt(0).toUpperCase() + item.slice(1).toLowerCase())
-      .join(' ');
-  }
-
-  function pickRelationDetailColumns(table, options = {}) {
-    const columns = Array.isArray(table?.columns) ? table.columns : [];
-    const excluded = new Set(
-      [
-        String(options.matchColumnName || '').trim().toLowerCase(),
-        String(options.labelColumnName || '').trim().toLowerCase(),
-        String(options.ownerColumnName || '').trim().toLowerCase()
-      ].filter(Boolean)
-    );
-
-    const preferredPatterns = [
-      /^(status|stage|priority|state)$/,
-      /(due|deadline|start|end|date|time)/,
-      /(amount|value|total|budget|price)/,
-      /(title|name|subject)/,
-      /(source|channel|type|category)/
-    ];
-
-    const candidates = [];
-    for (const column of columns) {
-      const rawName = String(column?.name || '').trim();
-      const name = rawName.toLowerCase();
-      if (!rawName || excluded.has(name)) {
-        continue;
-      }
-      if (isLikelyIdColumnName(name) || isContactReferenceColumnName(name) || isOwnerAssignmentColumnName(name)) {
-        continue;
-      }
-
-      let score = 0;
-      preferredPatterns.forEach((pattern, index) => {
-        if (pattern.test(name)) {
-          score += Math.max(1, 12 - index * 2);
-        }
-      });
-      if (isLabelColumnName(name)) {
-        score += 2;
-      }
-      if (column?.nullable !== true) {
-        score += 1;
-      }
-
-      candidates.push({
-        name: rawName,
-        score
-      });
-    }
-
-    candidates.sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
-    return candidates.slice(0, 3);
-  }
-
-  async function queryRelationCardForCandidate(connectionUrl, candidate, signalType, normalizedValues, sourceSignals) {
-    const table = candidate?.table && typeof candidate.table === 'object' ? candidate.table : null;
-    const matchColumn = candidate?.matchColumn && typeof candidate.matchColumn === 'object' ? candidate.matchColumn : null;
-    const labelColumn = candidate?.labelColumn && typeof candidate.labelColumn === 'object' ? candidate.labelColumn : null;
-    if (!table || !matchColumn?.name || !labelColumn?.name) {
-      return null;
-    }
-
-    const schemaName = String(table.schema || '').trim();
-    const tableName = String(table.name || '').trim();
-    if (!schemaName || !tableName) {
-      return null;
-    }
-
-    const normalizedSignals = (Array.isArray(normalizedValues) ? normalizedValues : [])
-      .map((item) =>
-        signalType === 'phone'
-          ? normalizePhoneSignal(item)
-          : signalType === 'email'
-            ? normalizeEmailSignal(item)
-            : normalizeIdSignal(item)
-      )
-      .filter(Boolean)
-      .slice(0, 12);
-    if (!normalizedSignals.length) {
-      return null;
-    }
-
-    const ownerColumnName = String(candidate?.ownerColumn?.name || '').trim();
-    const meProfile = getCrmErpDatabaseMeProfile();
-    const ownerUserId = isCrmErpMeProfileComplete(meProfile) ? String(meProfile.userId || '').trim() : '';
-
-    const qualifiedTable = `${quoteSqlIdentifier(schemaName)}.${quoteSqlIdentifier(tableName)}`;
-    const matchExpr = `CAST(${quoteSqlIdentifier(matchColumn.name)} AS text)`;
-    const normalizedExpr = buildSignalMatchExpression(signalType, matchExpr);
-    const labelExprRaw = `CAST(${quoteSqlIdentifier(labelColumn.name)} AS text)`;
-    const labelExpr = `COALESCE(NULLIF(TRIM(${labelExprRaw}), ''), NULLIF(TRIM(${matchExpr}), ''), '(sin etiqueta)')`;
-    const whereClauses = [`${normalizedExpr} = ANY($1::text[])`];
-    const params = [normalizedSignals];
-    if (ownerColumnName && ownerUserId) {
-      params.push(ownerUserId);
-      whereClauses.push(`TRIM(CAST(${quoteSqlIdentifier(ownerColumnName)} AS text)) = $${params.length}`);
-    }
-    const whereSql = whereClauses.join(' AND ');
-    const sql = [
-      'SELECT item_label, item_count, SUM(item_count) OVER()::int AS total_count',
-      'FROM (',
-      `  SELECT ${labelExpr} AS item_label, COUNT(*)::int AS item_count`,
-      `  FROM ${qualifiedTable}`,
-      `  WHERE ${whereSql}`,
-      '  GROUP BY 1',
-      ') grouped',
-      'ORDER BY item_count DESC, item_label ASC',
-      'LIMIT 4;'
-    ].join('\n');
-
-    logDebug('dynamic_relations:query_sql', {
-      table: `${schemaName}.${tableName}`,
-      signalType,
-      ownerColumn: ownerColumnName || '',
-      ownerFilterActive: Boolean(ownerColumnName && ownerUserId),
-      sql,
-      params: sanitizeSqlParamsForLog(params)
-    });
-    const response = await postgresService.queryRead(connectionUrl, sql, params, {
-      maxRows: 4
-    });
-    const rows = Array.isArray(response?.rows) ? response.rows : [];
-    logDebug('dynamic_relations:query_result', {
-      table: `${schemaName}.${tableName}`,
-      signalType,
-      rowCount: rows.length,
-      preview: rows.slice(0, 4).map((row) => ({
-        label: toSafeLogText(row?.item_label || '', 120),
-        count: Math.max(0, Number(row?.item_count) || 0),
-        total: Math.max(0, Number(row?.total_count) || 0)
-      }))
-    });
-    if (!rows.length) {
-      return null;
-    }
-
-    const relationRows = rows
-      .map((row) => {
-        const label = toSafeDynamicUiText(row?.item_label || '', 120) || '(sin etiqueta)';
-        const count = Math.max(0, Number(row?.item_count) || 0);
-        if (!count) {
-          return null;
-        }
-        return { label, count };
-      })
-      .filter(Boolean)
-      .slice(0, 3);
-
-    if (!relationRows.length) {
-      return null;
-    }
-
-    const totalCount =
-      Math.max(0, Number(rows[0]?.total_count) || 0) || relationRows.reduce((sum, row) => sum + row.count, 0);
-    const isSingleResult = totalCount === 1;
-    const detailColumns = isSingleResult
-      ? pickRelationDetailColumns(table, {
-          matchColumnName: matchColumn.name,
-          labelColumnName: labelColumn.name,
-          ownerColumnName
-        })
-      : [];
-    let detailFields = [];
-    if (isSingleResult && detailColumns.length) {
-      const detailSelect = detailColumns
-        .map(
-          (column) =>
-            `NULLIF(TRIM(CAST(${quoteSqlIdentifier(column.name)} AS text)), '') AS ${quoteSqlIdentifier(
-              column.name
-            )}`
-        )
-        .join(', ');
-      const detailSql = [
-        `SELECT ${detailSelect}`,
-        `FROM ${qualifiedTable}`,
-        `WHERE ${whereSql}`,
-        'LIMIT 1;'
-      ].join('\n');
-      logDebug('dynamic_relations:detail_sql', {
-        table: `${schemaName}.${tableName}`,
-        signalType,
-        sql: detailSql,
-        params: sanitizeSqlParamsForLog(params)
-      });
-      try {
-        const detailResponse = await postgresService.queryRead(connectionUrl, detailSql, params, { maxRows: 1 });
-        const detailRow = Array.isArray(detailResponse?.rows) ? detailResponse.rows[0] || null : null;
-        if (detailRow && typeof detailRow === 'object') {
-          detailFields = detailColumns
-            .map((column) => {
-              const rawValue = toSafeDynamicUiText(detailRow[column.name] || '', 120);
-              if (!rawValue) {
-                return null;
-              }
-              return {
-                label: fieldLabelFromColumnName(column.name),
-                value: rawValue
-              };
-            })
-            .filter(Boolean)
-            .slice(0, 3);
-        }
-      } catch (_) {
-        detailFields = [];
-      }
-    }
-
-    const cardRows =
-      isSingleResult && detailFields.length
-        ? detailFields.map((item) => ({
-            label: item.label,
-            value: item.value
-          }))
-        : relationRows;
-
-    const normalizedToRaw = {};
-    for (const signal of Array.isArray(sourceSignals) ? sourceSignals : []) {
-      if (!signal?.normalized || normalizedToRaw[signal.normalized]) {
-        continue;
-      }
-      normalizedToRaw[signal.normalized] = signal.value || signal.normalized;
-    }
-    for (const value of normalizedSignals) {
-      if (!normalizedToRaw[value]) {
-        normalizedToRaw[value] = value;
-      }
-    }
-
-    const relevanceLevel = String(candidate?.relevanceLevel || '').trim().toLowerCase();
-    const relevanceLabel =
-      relevanceLevel === 'high'
-        ? 'Relevancia alta'
-        : relevanceLevel === 'medium'
-          ? 'Relevancia media'
-          : relevanceLevel === 'low'
-            ? 'Relevancia baja'
-            : '';
-    const captionTokens = [`${totalCount} resultado${totalCount === 1 ? '' : 's'}`];
-    if (ownerColumnName) {
-      captionTokens.push('Asignado a mi');
-    }
-    if (relevanceLabel) {
-      captionTokens.push(relevanceLabel);
-    }
-    const detailDescription =
-      isSingleResult && detailFields.length
-        ? detailFields.map((item) => `${item.label}: ${item.value}`).join(' | ')
-        : '';
-
-    return {
-      id: `${table.qualifiedName || `${schemaName}.${tableName}`}::${signalType}`,
-      title: tableTitleFromName(tableName),
-      caption: captionTokens.join(' · '),
-      description: detailDescription,
-      tableName,
-      tableQualifiedName: String(table.qualifiedName || `${schemaName}.${tableName}`),
-      signalType,
-      totalCount,
-      priorityHint: Math.max(0, Number(candidate?.priorityHint) || 0),
-      rows: cardRows,
-      detailFields,
-      meta: {
-        schema: schemaName,
-        table: tableName,
-        matchColumn: String(matchColumn.name || ''),
-        labelColumn: String(labelColumn.name || ''),
-        ownerColumn: ownerColumnName,
-        signalType,
-        normalizedSignals: normalizedSignals.slice(0, 12),
-        normalizedToRaw,
-        singleResult: isSingleResult,
-        relevanceLevel
-      }
-    };
-  }
-
-  function collapseRelationCardsByTable(cards) {
-    const byTable = new Map();
-    for (const card of Array.isArray(cards) ? cards : []) {
-      const tableKey = String(card?.tableQualifiedName || '').trim();
-      if (!tableKey) {
-        continue;
-      }
-      const known = byTable.get(tableKey);
-      const nextTotal = Number(card?.totalCount) || 0;
-      const knownTotal = Number(known?.totalCount) || 0;
-      const nextPriority = Number(card?.priorityHint) || 0;
-      const knownPriority = Number(known?.priorityHint) || 0;
-      if (!known || nextTotal > knownTotal || (nextTotal === knownTotal && nextPriority > knownPriority)) {
-        byTable.set(tableKey, card);
-      }
-    }
-    return Array.from(byTable.values());
-  }
-
-  function buildDynamicRelationsSignalKey(tabContext, signals) {
-    const tabId = Number(tabContext?.tabId) || -1;
-    const snapshot = getCrmErpDatabaseSchemaSnapshot();
-    const schemaStamp = Number(snapshot?.analyzedAt) || 0;
-    const meProfile = getCrmErpDatabaseMeProfile();
-    const meKey = isCrmErpMeProfileComplete(meProfile)
-      ? `${meProfile.tableQualifiedName}|${meProfile.idColumn}|${meProfile.userId}`
-      : 'me:none';
-    const phones = (Array.isArray(signals?.phones) ? signals.phones : []).map((item) => item?.normalized || '').filter(Boolean);
-    const emails = (Array.isArray(signals?.emails) ? signals.emails : []).map((item) => item?.normalized || '').filter(Boolean);
-    return `${tabId}|${schemaStamp}|${meKey}|p:${phones.join(',')}|e:${emails.join(',')}`;
-  }
-
-  async function fetchDynamicRelationCards(tabContext, signals) {
-    const connectionUrl = getCrmErpDatabaseConnectionUrl();
-    const snapshot = getCrmErpDatabaseSchemaSnapshot();
-    if (!connectionUrl || !snapshot) {
-      return [];
-    }
-    const meProfile = getCrmErpDatabaseMeProfile();
-    const isWhatsappTab = isWhatsappContext(tabContext);
-    if (isWhatsappTab) {
-      logDebug('whatsapp_contact:fetch_relations_start', {
-        tabId: Number(tabContext?.tabId) || -1,
-        signalPhones: (Array.isArray(signals?.phones) ? signals.phones : []).map(
-          (item) => item?.normalized || ''
-        ),
-        signalEmails: (Array.isArray(signals?.emails) ? signals.emails : []).map(
-          (item) => item?.normalized || ''
-        ),
-        meProfile: isCrmErpMeProfileComplete(meProfile)
-          ? {
-              table: toSafeLogText(meProfile.tableQualifiedName || '', 180),
-              idColumn: toSafeLogText(meProfile.idColumn || '', 80),
-              userId: toSafeLogText(meProfile.userId || '', 80)
-            }
-          : null
-      });
-    }
-
-    const whatsappContactFirstCards = await fetchWhatsappContactFirstRelationCards(
-      connectionUrl,
-      snapshot,
-      tabContext,
-      signals
-    );
-    if (whatsappContactFirstCards.length) {
-      if (isWhatsappTab) {
-        logDebug('whatsapp_contact:fetch_relations_contact_id_success', {
-          relationTables: whatsappContactFirstCards.map((card) =>
-            toSafeLogText(card?.tableQualifiedName || card?.title || '', 200)
-          )
-        });
-      }
-      return whatsappContactFirstCards;
-    }
-    if (isWhatsappTab) {
-      logDebug('whatsapp_contact:fetch_relations_fallback_signal_scan');
-    }
-
-    const phoneSignals = Array.isArray(signals?.phones) ? signals.phones : [];
-    const emailSignals = Array.isArray(signals?.emails) ? signals.emails : [];
-    const tasks = [];
-
-    if (phoneSignals.length) {
-      const phoneCandidates = buildRelationTableCandidates(snapshot, 'phone', {
-        limit: 8,
-        excludeContactTables: isWhatsappTab,
-        meProfile
-      });
-      const phoneValues = phoneSignals.map((item) => item.normalized).filter(Boolean).slice(0, 8);
-      for (const candidate of phoneCandidates) {
-        tasks.push(queryRelationCardForCandidate(connectionUrl, candidate, 'phone', phoneValues, phoneSignals));
-      }
-    }
-
-    if (emailSignals.length) {
-      const emailCandidates = buildRelationTableCandidates(snapshot, 'email', {
-        limit: 8,
-        excludeContactTables: isWhatsappTab,
-        meProfile
-      });
-      const emailValues = emailSignals.map((item) => item.normalized).filter(Boolean).slice(0, 8);
-      for (const candidate of emailCandidates) {
-        tasks.push(queryRelationCardForCandidate(connectionUrl, candidate, 'email', emailValues, emailSignals));
-      }
-    }
-
-    if (!tasks.length) {
-      return [];
-    }
-
-    const settled = await Promise.all(tasks.map((task) => task.catch(() => null)));
-    const found = settled.filter(Boolean);
-    return collapseRelationCardsByTable(found);
-  }
-
   async function refreshDynamicRelationsContext(tabContext, signals, options = {}) {
     const activeTab = tabContext && typeof tabContext === 'object' ? tabContext : null;
     const safeSignals = signals && typeof signals === 'object' ? signals : { phones: [], emails: [] };
@@ -10391,33 +9142,6 @@ export function initPanelApp() {
     list.appendChild(item);
   }
 
-  function summarizeRelationRow(row) {
-    const label = toSafeDynamicUiText(row?.label || '', 84) || '(sin etiqueta)';
-    const value = toSafeDynamicUiText(row?.value || '', 84);
-    const count = Math.max(0, Number(row?.count) || 0);
-
-    if (value) {
-      return `${label}: ${value}`;
-    }
-
-    return `${label}: ${count}`;
-  }
-
-  function buildRelationSimpleColumns(cardModel) {
-    const card = cardModel && typeof cardModel === 'object' ? cardModel : {};
-    const title = toSafeDynamicUiText(card.title || 'Relacion', 92) || 'Relacion';
-    const caption = toSafeDynamicUiText(
-      card.caption || `${Math.max(0, Number(card.totalCount) || 0)} resultado${Math.max(0, Number(card.totalCount) || 0) === 1 ? '' : 's'}`,
-      96
-    );
-    const rows = Array.isArray(card.rows) ? card.rows : [];
-    const rowSummary = rows.map((row) => summarizeRelationRow(row)).filter(Boolean).slice(0, 2).join(' · ');
-    const description = toSafeDynamicUiText(card.description || '', 120);
-    const detail = rowSummary || description || 'Sin detalle';
-
-    return [title, caption || '-', detail];
-  }
-
   function showDynamicUiToast(message, isError = false, options = {}) {
     if (!dynamicUiToast) {
       return;
@@ -10687,95 +9411,6 @@ export function initPanelApp() {
       dynamicRelationsDetailState.isError === true,
       { loading: dynamicRelationsDetailState.loading === true }
     );
-  }
-
-  async function fetchDynamicRelationGroups(cardModel) {
-    const card = cardModel && typeof cardModel === 'object' ? cardModel : null;
-    const meta = card?.meta && typeof card.meta === 'object' ? card.meta : {};
-    const schema = String(meta.schema || '').trim();
-    const table = String(meta.table || '').trim();
-    const matchColumn = String(meta.matchColumn || '').trim();
-    const labelColumn = String(meta.labelColumn || '').trim();
-    const ownerColumn = String(meta.ownerColumn || '').trim();
-    const signalType = String(meta.signalType || '').trim().toLowerCase();
-    const normalizedSignals = Array.isArray(meta.normalizedSignals) ? meta.normalizedSignals.filter(Boolean).slice(0, 12) : [];
-    if (!schema || !table || !matchColumn || !labelColumn || !normalizedSignals.length) {
-      return [];
-    }
-
-    const connectionUrl = getCrmErpDatabaseConnectionUrl();
-    if (!connectionUrl) {
-      return [];
-    }
-
-    const qualifiedTable = `${quoteSqlIdentifier(schema)}.${quoteSqlIdentifier(table)}`;
-    const matchExpr = `CAST(${quoteSqlIdentifier(matchColumn)} AS text)`;
-    const normalizedExpr = buildSignalMatchExpression(signalType, matchExpr);
-    const labelExprRaw = `CAST(${quoteSqlIdentifier(labelColumn)} AS text)`;
-    const labelExpr = `COALESCE(NULLIF(TRIM(${labelExprRaw}), ''), NULLIF(TRIM(${matchExpr}), ''), '(sin etiqueta)')`;
-    const whereClauses = [`${normalizedExpr} = ANY($1::text[])`];
-    const params = [normalizedSignals];
-    if (ownerColumn) {
-      const meProfile = getCrmErpDatabaseMeProfile();
-      const ownerUserId = isCrmErpMeProfileComplete(meProfile) ? String(meProfile.userId || '').trim() : '';
-      if (ownerUserId) {
-        params.push(ownerUserId);
-        whereClauses.push(`TRIM(CAST(${quoteSqlIdentifier(ownerColumn)} AS text)) = $${params.length}`);
-      }
-    }
-    const whereSql = whereClauses.join(' AND ');
-    const sql = [
-      `SELECT ${normalizedExpr} AS detected_value, ${labelExpr} AS item_label, COUNT(*)::int AS item_count`,
-      `FROM ${qualifiedTable}`,
-      `WHERE ${whereSql}`,
-      'GROUP BY 1, 2',
-      'ORDER BY detected_value ASC, item_count DESC, item_label ASC',
-      'LIMIT 240;'
-    ].join('\n');
-
-    logDebug('dynamic_relations:detail_groups_sql', {
-      table: `${schema}.${table}`,
-      signalType,
-      ownerColumn: ownerColumn || '',
-      sql,
-      params: sanitizeSqlParamsForLog(params)
-    });
-    const response = await postgresService.queryRead(connectionUrl, sql, params, { maxRows: 240 });
-    const rows = Array.isArray(response?.rows) ? response.rows : [];
-    logDebug('dynamic_relations:detail_groups_result', {
-      table: `${schema}.${table}`,
-      rowCount: rows.length,
-      preview: rows.slice(0, 6).map((row) => ({
-        detected_value: toSafeLogText(row?.detected_value || '', 120),
-        item_label: toSafeLogText(row?.item_label || '', 140),
-        item_count: Math.max(0, Number(row?.item_count) || 0)
-      }))
-    });
-    if (!rows.length) {
-      return [];
-    }
-
-    const lookup = meta.normalizedToRaw && typeof meta.normalizedToRaw === 'object' ? meta.normalizedToRaw : {};
-    const byGroup = new Map();
-    for (const row of rows) {
-      const rawKey = toSafeDynamicUiText(row?.detected_value || '', 160);
-      if (!rawKey) {
-        continue;
-      }
-      const displayKey = toSafeDynamicUiText(lookup[rawKey] || rawKey, 160) || rawKey;
-      const label = toSafeDynamicUiText(row?.item_label || '(sin etiqueta)', 120) || '(sin etiqueta)';
-      const count = Math.max(0, Number(row?.item_count) || 0);
-      if (!byGroup.has(rawKey)) {
-        byGroup.set(rawKey, {
-          key: rawKey,
-          label: displayKey,
-          items: []
-        });
-      }
-      byGroup.get(rawKey).items.push({ label, count });
-    }
-
-    return Array.from(byGroup.values());
   }
 
   async function openDynamicRelationDetailScreen(cardId) {
@@ -11862,6 +10497,173 @@ export function initPanelApp() {
     imageInput.value = '';
   }
 
+  function resolveGeneratedChatImage(messageId, imageIndexRaw) {
+    const safeMessageId = String(messageId || '').trim();
+    const imageIndex = Number(imageIndexRaw);
+    if (!safeMessageId || !Number.isInteger(imageIndex) || imageIndex < 0) {
+      return null;
+    }
+
+    const message = chatHistory.find((entry) => String(entry?.id || '') === safeMessageId);
+    if (!message) {
+      return null;
+    }
+
+    const generatedImages = Array.isArray(message.generated_images) ? message.generated_images : [];
+    const image = generatedImages[imageIndex] && typeof generatedImages[imageIndex] === 'object' ? generatedImages[imageIndex] : null;
+    if (!image) {
+      return null;
+    }
+
+    const dataUrl = normalizeGeneratedImageDataUrl(image.dataUrl || image.data_url || '');
+    const url = String(image.url || '').trim();
+    if (!dataUrl && !url) {
+      return null;
+    }
+
+    return {
+      message,
+      imageIndex,
+      image,
+      dataUrl,
+      url
+    };
+  }
+
+  async function readImageBlobFromSource(source) {
+    const src = String(source || '').trim();
+    if (!src) {
+      throw new Error('Fuente de imagen vacia.');
+    }
+
+    const response = await fetch(src);
+    if (!response.ok) {
+      throw new Error(`No se pudo cargar la imagen (HTTP ${response.status}).`);
+    }
+
+    const blob = await response.blob();
+    if (!(blob instanceof Blob) || blob.size <= 0) {
+      throw new Error('La imagen cargada esta vacia.');
+    }
+
+    return blob;
+  }
+
+  async function readGeneratedChatImageBlob(target) {
+    const record = target && typeof target === 'object' ? target : {};
+    const sources = [record.dataUrl, record.url].map((value) => String(value || '').trim()).filter(Boolean);
+    if (!sources.length) {
+      throw new Error('No hay fuente de imagen disponible.');
+    }
+
+    let lastError = null;
+    for (const source of sources) {
+      try {
+        return await readImageBlobFromSource(source);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError instanceof Error) {
+      throw lastError;
+    }
+
+    throw new Error('No se pudo cargar la imagen generada.');
+  }
+
+  function getImageExtensionByMimeType(mimeType) {
+    const type = String(mimeType || '').trim().toLowerCase();
+    if (type === 'image/jpeg' || type === 'image/jpg') {
+      return 'jpg';
+    }
+    if (type === 'image/webp') {
+      return 'webp';
+    }
+    if (type === 'image/gif') {
+      return 'gif';
+    }
+    if (type === 'image/bmp') {
+      return 'bmp';
+    }
+    return 'png';
+  }
+
+  function buildGeneratedChatImageFilename(target, mimeType = 'image/png') {
+    const record = target && typeof target === 'object' ? target : {};
+    const image = record.image && typeof record.image === 'object' ? record.image : {};
+    const baseLabel = String(image.alt || 'generated-image')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 36);
+    const safeBase = baseLabel || 'generated-image';
+    const idToken = String(record?.message?.id || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '')
+      .slice(-8);
+    const ordinal = Number.isInteger(record.imageIndex) ? record.imageIndex + 1 : 1;
+    const extension = getImageExtensionByMimeType(mimeType);
+    return `${safeBase}-${idToken || Date.now()}-${ordinal}.${extension}`;
+  }
+
+  async function downloadGeneratedChatImage(messageId, imageIndexRaw, triggerButton) {
+    const target = resolveGeneratedChatImage(messageId, imageIndexRaw);
+    if (!target) {
+      setStatus(chatStatus, 'No se encontro la imagen generada.', true);
+      return;
+    }
+
+    if (triggerButton) {
+      triggerButton.disabled = true;
+    }
+
+    try {
+      const blob = await readGeneratedChatImageBlob(target);
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = buildGeneratedChatImageFilename(target, blob.type || 'image/png');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo descargar la imagen.';
+      setStatus(chatStatus, message, true);
+    } finally {
+      if (triggerButton) {
+        triggerButton.disabled = false;
+      }
+    }
+  }
+
+  async function copyGeneratedChatImage(messageId, imageIndexRaw, triggerButton) {
+    const target = resolveGeneratedChatImage(messageId, imageIndexRaw);
+    if (!target) {
+      setStatus(chatStatus, 'No se encontro la imagen generada.', true);
+      return;
+    }
+
+    if (triggerButton) {
+      triggerButton.disabled = true;
+    }
+
+    try {
+      const blob = await readGeneratedChatImageBlob(target);
+      await writeBlobToImageClipboard(blob);
+      setStatus(chatStatus, 'Imagen copiada al portapapeles.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo copiar la imagen.';
+      setStatus(chatStatus, message, true);
+    } finally {
+      if (triggerButton) {
+        triggerButton.disabled = false;
+      }
+    }
+  }
+
   function triggerDownloadForItem(itemId) {
     const item = imageQueue.find((entry) => entry.id === itemId);
     if (!item || !item.outputUrl) {
@@ -12531,8 +11333,11 @@ export function initPanelApp() {
       chatHistory = chatHistory.slice(-maxHistoryMessages);
       await saveChatHistory();
     }
+    syncChatBottomReserve({
+      streaming: false
+    });
     renderChatMessages();
-    scrollChatToBottom();
+    requestChatBottomAlign(20, 80);
 
     const latestAssistant = [...chatHistory].reverse().find((msg) => msg.role === 'assistant');
     if (latestAssistant) {
@@ -13087,6 +11892,29 @@ export function initPanelApp() {
       removePendingConversationAttachment(button.dataset.attachmentRemove || '');
     });
 
+    chatMessagesEl?.addEventListener('click', (event) => {
+      const actionButton = event.target.closest('[data-chat-image-action]');
+      if (!actionButton) {
+        return;
+      }
+
+      const action = String(actionButton.dataset.chatImageAction || '').trim();
+      const messageId = String(actionButton.dataset.chatMessageId || '').trim();
+      const imageIndex = actionButton.dataset.chatImageIndex || '';
+      if (!messageId) {
+        return;
+      }
+
+      if (action === 'copy') {
+        void copyGeneratedChatImage(messageId, imageIndex, actionButton);
+        return;
+      }
+
+      if (action === 'download') {
+        void downloadGeneratedChatImage(messageId, imageIndex, actionButton);
+      }
+    });
+
     document.addEventListener('click', (event) => {
       if (!chatToolPicker || !chatToolPicker.contains(event.target)) {
         closeToolMenu();
@@ -13289,88 +12117,99 @@ export function initPanelApp() {
   }
 
   async function init() {
-    settingsScreenState = {
-      panelSettings: { ...panelSettings }
-    };
-    settingsScreenController = createSettingsScreenController({
-      elements: {
-        onboardingAssistantNameInput,
-        onboardingNameInput,
-        onboardingStatus,
-        settingsNameInput,
-        settingsBirthdayInput,
-        settingsThemeModeSelect,
-        settingsLanguageSelect,
-        settingsSystemPrompt,
-        settingsUserStatus,
-        settingsAssistantStatus,
-        chatStatus
-      },
-      state: settingsScreenState,
-      defaults: {
-        panelSettingsDefaults: PANEL_SETTINGS_DEFAULTS
-      },
-      storage: {
-        readPanelSettings,
-        savePanelSettings
-      },
-      setStatus,
-      getThemeMode: () => themeMode,
-      setThemeMode,
-      onAfterHydrate: normalizePanelModelSettings
-    });
-
-    setStageTransitionEnabled(false);
-    realignStageToScreen(app?.dataset?.screen || 'onboarding');
-    renderAssistantBranding();
-    wireEvents();
-    setChatTool(DEFAULT_CHAT_TOOL);
-    renderPendingConversationAttachments();
-    closeToolMenu();
-    updateChatInputSize();
-    renderImageQueue();
-    hideWhatsappSuggestion();
-    renderTabsContextJson();
-
-    await contextMemoryService.init();
-    await tabContextService.start();
-
-    await hydrateSettings();
-    await hydratePanelSettings();
-    void runInitialContextBootstrap();
-    setActiveTool('image');
-    const initialScreen = resolveHomeOrOnboardingScreen();
-    setScreen(initialScreen);
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => {
-        setStageTransitionEnabled(true);
+    setAppBootstrapState(false);
+    try {
+      settingsScreenState = {
+        panelSettings: { ...panelSettings }
+      };
+      settingsScreenController = createSettingsScreenController({
+        elements: {
+          onboardingAssistantNameInput,
+          onboardingNameInput,
+          onboardingStatus,
+          settingsNameInput,
+          settingsBirthdayInput,
+          settingsThemeModeSelect,
+          settingsLanguageSelect,
+          settingsSystemPrompt,
+          settingsUserStatus,
+          settingsAssistantStatus,
+          chatStatus
+        },
+        state: settingsScreenState,
+        defaults: {
+          panelSettingsDefaults: PANEL_SETTINGS_DEFAULTS
+        },
+        storage: {
+          readPanelSettings,
+          savePanelSettings
+        },
+        setStatus,
+        getThemeMode: () => themeMode,
+        setThemeMode,
+        onAfterHydrate: normalizePanelModelSettings
       });
-    } else {
-      setStageTransitionEnabled(true);
+
+      setStageTransitionEnabled(false);
+      realignStageToScreen(app?.dataset?.screen || 'onboarding');
+      renderAssistantBranding();
+      wireEvents();
+      setChatTool(DEFAULT_CHAT_TOOL);
+      renderPendingConversationAttachments();
+      closeToolMenu();
+      updateChatInputSize();
+      renderImageQueue();
+      hideWhatsappSuggestion();
+      renderTabsContextJson();
+
+      await contextMemoryService.init();
+      await tabContextService.start();
+
+      await hydrateSettings();
+      await hydratePanelSettings();
+      void runInitialContextBootstrap();
+      setActiveTool('image');
+      const initialScreen = resolveHomeOrOnboardingScreen();
+      setScreen(initialScreen);
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+          setStageTransitionEnabled(true);
+        });
+      } else {
+        setStageTransitionEnabled(true);
+      }
+      scheduleStageStabilization(initialScreen);
+
+      await hydrateBrandEmotions();
+      await hydrateChatHistory();
+      await refreshLocalModels({ silent: true });
+      syncModelSelectors();
+      renderAiModelsSettings();
+
+      const activeProfile = getActiveModelProfile();
+      const hasReadinessWarning = applyChatModelReadinessStatus();
+      if (!chatHistory.length && !hasReadinessWarning && activeProfile && activeProfile.provider === AI_PROVIDER_IDS.OLLAMA) {
+        setStatus(chatStatus, `Precargando ${activeProfile.model}...`, false, { loading: true });
+        warmupPrimaryModel();
+      } else if (!chatHistory.length && !hasReadinessWarning && activeProfile) {
+        setStatus(chatStatus, `Modelo principal: ${activeProfile.name} (${activeProfile.model}).`);
+      }
+
+      if (initialScreen === 'home') {
+        requestChatBottomAlign(20, 80);
+        requestChatAutofocus(10, 80);
+      } else {
+        onboardingAssistantNameInput?.focus();
+      }
+
+      scheduleStageStabilization(initialScreen);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo inicializar el panel.';
+      setStatus(chatStatus, message, true);
+      logWarn('init:error', { error: message });
+    } finally {
+      setAppBootstrapState(true);
     }
-    scheduleStageStabilization(initialScreen);
-
-    await hydrateBrandEmotions();
-    await hydrateChatHistory();
-    await refreshLocalModels({ silent: true });
-    syncModelSelectors();
-    renderAiModelsSettings();
-
-    const activeProfile = getActiveModelProfile();
-    if (!chatHistory.length && activeProfile && activeProfile.provider === AI_PROVIDER_IDS.OLLAMA) {
-      setStatus(chatStatus, `Precargando ${activeProfile.model}...`, false, { loading: true });
-      warmupPrimaryModel();
-    } else if (!chatHistory.length && activeProfile) {
-      setStatus(chatStatus, `Modelo principal: ${activeProfile.name} (${activeProfile.model}).`);
-    }
-
-    if (initialScreen === 'home') {
-      requestChatAutofocus(10, 80);
-    } else {
-      onboardingAssistantNameInput?.focus();
-    }
-
-    scheduleStageStabilization(initialScreen);
   }
 
   init();

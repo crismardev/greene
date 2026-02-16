@@ -10,7 +10,7 @@
 </head>
 
 <body>
-  <main class="app" id="app" data-screen="onboarding">
+  <main class="app" id="app" data-screen="home" data-bootstrap="loading">
     <header class="topbar">
       <button id="brandHomeBtn" class="brand brand--home-trigger" type="button" aria-label="Ir al chat principal">
         <div class="brand__emotion" id="brandEmotion" role="img" aria-label="Greene emotion neutral">
@@ -776,6 +776,13 @@
         </div>
         <p id="pinModalStatus" class="status" role="status"></p>
       </section>
+    </div>
+
+    <div id="appBootstrapMask" class="app-bootstrap-mask" role="status" aria-live="polite">
+      <div class="app-bootstrap-mask__inner">
+        <span class="app-bootstrap-mask__spinner" aria-hidden="true"></span>
+        <p class="app-bootstrap-mask__label">Cargando panel...</p>
+      </div>
     </div>
 
     <div id="dropOverlay" class="drop-overlay">Suelta archivos para convertir a WebP</div>

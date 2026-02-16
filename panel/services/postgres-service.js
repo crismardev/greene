@@ -170,11 +170,12 @@ function toSafeReadSql(rawSql) {
   return statement;
 }
 
-function toSafeWriteSql(rawSql) {
+function toSafeWriteSql(rawSql, options = {}) {
   const statement = toSingleSqlStatement(rawSql);
   const head = statement.toLowerCase();
   const startsLikeWrite = /^(insert|update|delete|with)\b/.test(head);
   const hasWriteKeyword = /\b(insert|update|delete)\b/i.test(statement);
+  const allowFullTableWrite = options && options.allowFullTableWrite === true;
 
   if (!startsLikeWrite || !hasWriteKeyword) {
     throw new Error('db.queryWrite solo permite INSERT/UPDATE/DELETE.');
@@ -182,6 +183,15 @@ function toSafeWriteSql(rawSql) {
 
   if (/\b(create|alter|drop|truncate|grant|revoke|comment)\b/i.test(statement)) {
     throw new Error('db.queryWrite bloqueo una operacion DDL no permitida.');
+  }
+
+  if (!allowFullTableWrite) {
+    const hasDelete = /\bdelete\s+from\b/i.test(statement);
+    const hasUpdate = /\bupdate\b/i.test(statement);
+    const hasWhere = /\bwhere\b/i.test(statement);
+    if ((hasDelete || hasUpdate) && !hasWhere) {
+      throw new Error('db.queryWrite bloqueo UPDATE/DELETE sin WHERE para evitar escrituras masivas.');
+    }
   }
 
   return statement;
@@ -437,7 +447,9 @@ export function createPostgresService() {
   async function queryWrite(connectionUrl, rawSql, rawParams, options = {}) {
     const maxRows = Math.max(1, Math.min(200, Number(options.maxRows) || WRITE_RESULT_MAX_ROWS));
     const sql = createSqlClient(connectionUrl);
-    const queryText = toSafeWriteSql(rawSql);
+    const queryText = toSafeWriteSql(rawSql, {
+      allowFullTableWrite: options.allowFullTableWrite === true
+    });
     const params = normalizeSqlParams(rawParams);
     const result = await sql.query(queryText, params, { fullResults: true });
 

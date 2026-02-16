@@ -136,7 +136,7 @@ chrome.runtime.sendMessage('<EXTENSION_ID>', {
 }, console.log);
 ```
 
-### 3) Enviar mensaje al chat abierto de WhatsApp
+### 3) Enviar mensaje por WhatsApp (chat abierto o destino buscado)
 
 ```js
 chrome.runtime.sendMessage('<EXTENSION_ID>', {
@@ -144,6 +144,8 @@ chrome.runtime.sendMessage('<EXTENSION_ID>', {
   args: { text: 'Te escribo en 10 min' }
 }, console.log);
 ```
+
+Si agregas `phone/query/name/chat`, el background enruta a `openChatAndSendMessage` y el handler valida que el numero del chat coincida antes de enviar.
 
 ## Seguridad de origen externo
 

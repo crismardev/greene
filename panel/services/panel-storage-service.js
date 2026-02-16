@@ -21,6 +21,24 @@ export function createPanelStorageService({
     return text.slice(0, limit);
   }
 
+  function normalizeImageDataUrl(value, maxLength = 8 * 1024 * 1024) {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!raw) {
+      return '';
+    }
+
+    const compact = raw.replace(/\s+/g, '');
+    if (!compact.toLowerCase().startsWith('data:image/')) {
+      return '';
+    }
+
+    if (compact.length > Math.max(1024, Number(maxLength) || 8 * 1024 * 1024)) {
+      return '';
+    }
+
+    return compact;
+  }
+
   function toChatToken(value, limit = 200) {
     const normalized = toSafeText(value || '', limit)
       .toLowerCase()
@@ -363,12 +381,18 @@ export function createPanelStorageService({
       .map((item) => {
         const source = item && typeof item === 'object' ? item : {};
         const url = toSafeText(source.url || '', 1200);
-        if (!url) {
+        const dataUrl = normalizeImageDataUrl(source.dataUrl || source.data_url || '');
+        if (!url && !dataUrl) {
           return null;
         }
+        const width = Math.max(0, Number(source.width || source.imageWidth) || 0);
+        const height = Math.max(0, Number(source.height || source.imageHeight) || 0);
         return {
           url,
-          alt: toSafeText(source.alt || 'Generated image', 220)
+          dataUrl,
+          alt: toSafeText(source.alt || 'Generated image', 220),
+          width,
+          height
         };
       })
       .filter(Boolean)

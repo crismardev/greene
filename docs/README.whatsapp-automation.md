@@ -53,6 +53,7 @@ Si no hay tab de WhatsApp abierta, devuelve error y recomienda usar `OPEN_WHATSA
 - Requiere sesion activa en WhatsApp Web.
 - Cambios fuertes de DOM en WhatsApp pueden romper selectores.
 - Algunas acciones dependen de que la UI este cargada y estable.
+- Si `sendMessage` recibe `phone/to/number` valida que el chat actual coincida; si no coincide, cancela el envio.
 
 ## Sincronizacion historica
 
