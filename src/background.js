@@ -57,6 +57,8 @@
     'http://localhost:4395/smtp/send'
   ]);
   const DEFAULT_SMTP_NATIVE_HOST_NAME = 'com.greene.smtp_bridge';
+  const LOCAL_CONNECTOR_PING_ALARM_NAME = 'greene_local_connector_ping';
+  const LOCAL_CONNECTOR_PING_PERIOD_MINUTES = 3;
   const whatsappContextLogByTab = new Map();
   let runtimeContextState = {
     updatedAt: 0,
@@ -247,6 +249,53 @@
     smtpHttpAgentFallbackEndpoints: SMTP_HTTP_AGENT_FALLBACK_ENDPOINTS,
     toSafeText
   });
+
+  async function pingLocalConnector(options = {}) {
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const reason = toSafeText(safeOptions.reason || 'auto_ping', 80) || 'auto_ping';
+    const nativeHostName =
+      toSafeText(safeOptions.nativeHostName || DEFAULT_SMTP_NATIVE_HOST_NAME, 180) || DEFAULT_SMTP_NATIVE_HOST_NAME;
+
+    try {
+      const result = await smtpBridgeService.runNativeHostPing({
+        nativeHostName
+      });
+      logDebug('local_connector_ping:ok', {
+        reason,
+        hostName: toSafeText(result?.hostName || nativeHostName, 180),
+        version: toSafeText(result?.version || '', 60)
+      });
+      return result;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Error en ping automatico de conector local.';
+      logWarn('local_connector_ping:error', {
+        reason,
+        nativeHostName,
+        error: toSafeText(errorMessage, 220)
+      });
+      return null;
+    }
+  }
+
+  function scheduleLocalConnectorPing() {
+    if (!chrome.alarms || typeof chrome.alarms.create !== 'function') {
+      return;
+    }
+
+    try {
+      chrome.alarms.create(LOCAL_CONNECTOR_PING_ALARM_NAME, {
+        periodInMinutes: LOCAL_CONNECTOR_PING_PERIOD_MINUTES
+      });
+      logDebug('local_connector_ping:schedule', {
+        alarm: LOCAL_CONNECTOR_PING_ALARM_NAME,
+        periodMinutes: LOCAL_CONNECTOR_PING_PERIOD_MINUTES
+      });
+    } catch (error) {
+      logWarn('local_connector_ping:schedule_error', {
+        error: error instanceof Error ? error.message : String(error || '')
+      });
+    }
+  }
 
   function isRetoolHost(hostname) {
     const host = String(hostname || '').toLowerCase();
@@ -1538,6 +1587,10 @@
   chrome.runtime.onInstalled.addListener((details) => {
     enablePanelOnActionClick();
     refreshAllTabs('installed');
+    void pingLocalConnector({
+      reason: 'installed'
+    });
+    scheduleLocalConnectorPing();
 
     const reason = typeof details?.reason === 'string' ? details.reason : 'install';
     if (reason === 'install') {
@@ -1566,7 +1619,24 @@
   chrome.runtime.onStartup.addListener(() => {
     enablePanelOnActionClick();
     refreshAllTabs('startup');
+    void pingLocalConnector({
+      reason: 'startup'
+    });
+    scheduleLocalConnectorPing();
   });
+
+  if (chrome.alarms && chrome.alarms.onAlarm) {
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      const alarmName = String(alarm?.name || '').trim();
+      if (alarmName !== LOCAL_CONNECTOR_PING_ALARM_NAME) {
+        return;
+      }
+
+      void pingLocalConnector({
+        reason: 'alarm'
+      });
+    });
+  }
 
   chrome.tabs.onActivated.addListener((activeInfo) => {
     const nextTabId = activeInfo && typeof activeInfo.tabId === 'number' ? activeInfo.tabId : -1;
@@ -1948,5 +2018,9 @@
 
   enablePanelOnActionClick();
   refreshAllTabs('boot');
+  void pingLocalConnector({
+    reason: 'boot'
+  });
+  scheduleLocalConnectorPing();
   logDebug('Servicio de tabs/contexto inicializado.');
 })();
