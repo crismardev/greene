@@ -8,6 +8,8 @@ export const AI_PROVIDER_IDS = Object.freeze({
 
 const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
 const OPENAI_IMAGES_ENDPOINT = 'https://api.openai.com/v1/images/generations';
+const OPENAI_TRANSCRIPTIONS_ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
+const OPENAI_SPEECH_ENDPOINT = 'https://api.openai.com/v1/audio/speech';
 const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -183,7 +185,8 @@ async function streamOpenAiLikeChat({
   messages,
   onChunk,
   providerLabel,
-  extraHeaders
+  extraHeaders,
+  signal
 }) {
   const headers = {
     'Content-Type': 'application/json',
@@ -201,7 +204,8 @@ async function streamOpenAiLikeChat({
   const response = await fetch(endpoint, {
     method: 'POST',
     headers,
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: signal || undefined
   });
 
   if (!response.ok) {
@@ -235,6 +239,7 @@ async function streamOpenAiLikeChat({
   const fallbackResponse = await fetch(endpoint, {
     method: 'POST',
     headers,
+    signal: signal || undefined,
     body: JSON.stringify({
       model,
       messages,
@@ -283,7 +288,7 @@ function extractAnthropicError(payload, status) {
   return String(detail || 'Anthropic error');
 }
 
-async function streamAnthropicChat({ model, apiKey, temperature, messages, onChunk }) {
+async function streamAnthropicChat({ model, apiKey, temperature, messages, onChunk, signal }) {
   const anthropicMessages = toAnthropicMessages(messages);
   if (!anthropicMessages.length) {
     anthropicMessages.push({
@@ -319,6 +324,7 @@ async function streamAnthropicChat({ model, apiKey, temperature, messages, onChu
   const response = await fetch(ANTHROPIC_ENDPOINT, {
     method: 'POST',
     headers,
+    signal: signal || undefined,
     body: JSON.stringify({
       ...basePayload,
       stream: true
@@ -355,6 +361,7 @@ async function streamAnthropicChat({ model, apiKey, temperature, messages, onChu
   const fallbackResponse = await fetch(ANTHROPIC_ENDPOINT, {
     method: 'POST',
     headers,
+    signal: signal || undefined,
     body: JSON.stringify({
       ...basePayload,
       stream: false
@@ -444,7 +451,7 @@ function extractGeminiError(payload, status) {
   return String(detail || 'Gemini error');
 }
 
-async function streamGeminiChat({ model, apiKey, temperature, messages, onChunk }) {
+async function streamGeminiChat({ model, apiKey, temperature, messages, onChunk, signal }) {
   const payload = toGeminiPayload(messages, temperature);
   const streamEndpoint = `${GEMINI_BASE_URL}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
   const response = await fetch(streamEndpoint, {
@@ -452,6 +459,7 @@ async function streamGeminiChat({ model, apiKey, temperature, messages, onChunk 
     headers: {
       'Content-Type': 'application/json'
     },
+    signal: signal || undefined,
     body: JSON.stringify(payload)
   });
 
@@ -488,6 +496,7 @@ async function streamGeminiChat({ model, apiKey, temperature, messages, onChunk 
     headers: {
       'Content-Type': 'application/json'
     },
+    signal: signal || undefined,
     body: JSON.stringify(payload)
   });
 
@@ -619,6 +628,27 @@ function buildModelProfileId() {
   return `model-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
+function normalizeSpeechFormat(format) {
+  const token = String(format || '')
+    .trim()
+    .toLowerCase();
+  if (token === 'wav' || token === 'flac' || token === 'opus' || token === 'pcm') {
+    return token;
+  }
+
+  return 'mp3';
+}
+
+function normalizeSpeechSpeed(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 1;
+  }
+
+  const clamped = Math.max(0.25, Math.min(4, numeric));
+  return Number(clamped.toFixed(2));
+}
+
 export function createAiProviderService({
   ollamaService,
   defaultOllamaModel,
@@ -704,7 +734,7 @@ export function createAiProviderService({
     };
   }
 
-  async function streamWithProfile({ profile, messages, temperature, apiKey, onChunk }) {
+  async function streamWithProfile({ profile, messages, temperature, apiKey, onChunk, signal = null }) {
     const safeProfile = normalizeProfile(profile);
     const safeMessages = toChatMessages(messages);
     const safeTemperature = Number.isFinite(temperature) ? temperature : 0.7;
@@ -734,7 +764,8 @@ export function createAiProviderService({
         temperature: safeTemperature,
         messages: safeMessages,
         onChunk,
-        providerLabel: 'OpenAI'
+        providerLabel: 'OpenAI',
+        signal
       });
     }
 
@@ -744,7 +775,8 @@ export function createAiProviderService({
         apiKey,
         temperature: safeTemperature,
         messages: safeMessages,
-        onChunk
+        onChunk,
+        signal
       });
     }
 
@@ -754,7 +786,8 @@ export function createAiProviderService({
         apiKey,
         temperature: safeTemperature,
         messages: safeMessages,
-        onChunk
+        onChunk,
+        signal
       });
     }
 
@@ -766,7 +799,8 @@ export function createAiProviderService({
       temperature: safeTemperature,
       messages: safeMessages,
       onChunk,
-      providerLabel: 'OpenAI Compatible'
+      providerLabel: 'OpenAI Compatible',
+      signal
     });
   }
 
@@ -815,6 +849,121 @@ export function createAiProviderService({
     throw new Error('Generacion de imagen soportada solo en OpenAI/OpenAI-compatible.');
   }
 
+  async function transcribeOpenAiAudio({
+    apiKey,
+    audioBlob,
+    model = 'gpt-4o-mini-transcribe',
+    language = 'es',
+    prompt = ''
+  }) {
+    const token = String(apiKey || '').trim();
+    if (!token) {
+      throw new Error('Falta API key para OpenAI speech.');
+    }
+
+    const blob = audioBlob instanceof Blob ? audioBlob : null;
+    if (!blob || blob.size <= 0) {
+      throw new Error('Audio vacio para transcripcion.');
+    }
+
+    const mime = String(blob.type || '').trim().toLowerCase();
+    const extension = mime.includes('wav')
+      ? 'wav'
+      : mime.includes('ogg')
+        ? 'ogg'
+        : mime.includes('mp4')
+          ? 'mp4'
+          : mime.includes('mpeg') || mime.includes('mp3')
+            ? 'mp3'
+            : 'webm';
+
+    const formData = new FormData();
+    formData.append('file', blob, `voice-${Date.now()}.${extension}`);
+    formData.append('model', String(model || 'gpt-4o-mini-transcribe').trim() || 'gpt-4o-mini-transcribe');
+    formData.append('response_format', 'json');
+
+    const languageCode = String(language || '')
+      .trim()
+      .toLowerCase()
+      .slice(0, 8);
+    if (languageCode) {
+      formData.append('language', languageCode);
+    }
+
+    const promptText = String(prompt || '')
+      .trim()
+      .slice(0, 2000);
+    if (promptText) {
+      formData.append('prompt', promptText);
+    }
+
+    const response = await fetch(OPENAI_TRANSCRIPTIONS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      body: formData
+    });
+
+    const payload = await parseJsonSafe(response);
+    if (!response.ok) {
+      throw new Error(`OpenAI speech error: ${extractOpenAiError(payload, response.status)}`);
+    }
+
+    const transcript = String(payload?.text || payload?.transcript || '').trim();
+    if (!transcript) {
+      throw new Error('OpenAI no devolvio transcripcion.');
+    }
+
+    return transcript;
+  }
+
+  async function synthesizeOpenAiSpeech({
+    apiKey,
+    model = 'gpt-4o-mini-tts',
+    voice = 'alloy',
+    speed = 1,
+    format = 'mp3',
+    input
+  }) {
+    const token = String(apiKey || '').trim();
+    if (!token) {
+      throw new Error('Falta API key para OpenAI speech.');
+    }
+
+    const content = String(input || '').trim();
+    if (!content) {
+      throw new Error('Texto vacio para sintetizar voz.');
+    }
+
+    const response = await fetch(OPENAI_SPEECH_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        model: String(model || 'gpt-4o-mini-tts').trim() || 'gpt-4o-mini-tts',
+        voice: String(voice || 'alloy').trim() || 'alloy',
+        speed: normalizeSpeechSpeed(speed),
+        response_format: normalizeSpeechFormat(format),
+        input: content
+      })
+    });
+
+    if (!response.ok) {
+      const payload = await parseJsonSafe(response);
+      throw new Error(`OpenAI speech error: ${extractOpenAiError(payload, response.status)}`);
+    }
+
+    const blob = await response.blob();
+    if (!(blob instanceof Blob) || blob.size <= 0) {
+      throw new Error('OpenAI no devolvio audio de voz.');
+    }
+
+    return blob;
+  }
+
   return {
     AI_PROVIDER_IDS,
     buildModelProfileId,
@@ -825,6 +974,8 @@ export function createAiProviderService({
     requiresApiKey,
     streamWithProfile,
     generateImageWithProfile,
+    transcribeOpenAiAudio,
+    synthesizeOpenAiSpeech,
     warmupProfile,
     fetchLocalModels
   };

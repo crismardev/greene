@@ -17,7 +17,9 @@ const COPY_ENTRIES = [
   'node_modules/marked/lib/marked.esm.js',
   'node_modules/@neondatabase/serverless',
   'node_modules/@orama/orama/dist/browser',
-  'node_modules/@xenova/transformers/dist'
+  'node_modules/@xenova/transformers/dist',
+  'node_modules/@ricky0123/vad-web/dist',
+  'node_modules/onnxruntime-web/dist'
 ];
 
 async function copyEntry(relativePath) {

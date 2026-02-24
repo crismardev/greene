@@ -23,12 +23,22 @@ export function createSettingsScreenController({
     settingsNameInput,
     settingsBirthdayInput,
     settingsThemeModeSelect,
+    settingsVoiceModeMeta,
+    settingsVoiceTtsVoiceSelect,
+    settingsVoiceTtsSpeedInput,
+    settingsVoiceTtsSpeedValue,
     settingsLanguageSelect,
     settingsSystemPrompt,
     settingsUserStatus,
     settingsAssistantStatus,
     chatStatus
   } = elements;
+
+  const AVAILABLE_OPENAI_TTS_VOICES = Object.freeze(['alloy', 'ash', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer']);
+  const AVAILABLE_OPENAI_TTS_VOICE_SET = new Set(AVAILABLE_OPENAI_TTS_VOICES);
+  const DEFAULT_VOICE_TTS_SPEED = 1;
+  const MIN_VOICE_TTS_SPEED = 0.25;
+  const MAX_VOICE_TTS_SPEED = 2;
 
   function getPanelSettings() {
     return state.panelSettings;
@@ -59,6 +69,49 @@ export function createSettingsScreenController({
     return 'system';
   }
 
+  function normalizeVoiceActiveListening(value) {
+    return true;
+  }
+
+  function normalizeVoiceTtsVoice(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    if (AVAILABLE_OPENAI_TTS_VOICE_SET.has(token)) {
+      return token;
+    }
+    return 'alloy';
+  }
+
+  function normalizeVoiceTtsSpeed(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return DEFAULT_VOICE_TTS_SPEED;
+    }
+    const clamped = Math.min(MAX_VOICE_TTS_SPEED, Math.max(MIN_VOICE_TTS_SPEED, numeric));
+    return Number(clamped.toFixed(2));
+  }
+
+  function updateVoiceModeMeta() {
+    const panelSettings = getPanelSettings();
+    const selectedLanguage = normalizeAssistantLanguage(panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE);
+    const browserPreferredLanguage = normalizeAssistantLanguage(
+      defaults?.panelSettingsDefaults?.language || DEFAULT_ASSISTANT_LANGUAGE
+    );
+    const ttsVoice = normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || '');
+    const ttsSpeed = normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed);
+
+    if (settingsVoiceTtsSpeedValue) {
+      settingsVoiceTtsSpeedValue.textContent = `${ttsSpeed.toFixed(2)}x`;
+    }
+
+    if (!settingsVoiceModeMeta) {
+      return;
+    }
+
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} (browser: ${browserPreferredLanguage.toUpperCase()}) · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x`;
+  }
+
   function applyPanelSettingsToUi() {
     const panelSettings = getPanelSettings();
 
@@ -82,6 +135,14 @@ export function createSettingsScreenController({
       settingsLanguageSelect.value = normalizeAssistantLanguage(panelSettings.language);
     }
 
+    if (settingsVoiceTtsVoiceSelect) {
+      settingsVoiceTtsVoiceSelect.value = normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || '');
+    }
+
+    if (settingsVoiceTtsSpeedInput) {
+      settingsVoiceTtsSpeedInput.value = String(normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed));
+    }
+
     if (settingsSystemPrompt) {
       settingsSystemPrompt.value = panelSettings.systemPrompt || buildDefaultChatSystemPrompt(panelSettings.language);
     }
@@ -89,6 +150,8 @@ export function createSettingsScreenController({
     if (settingsThemeModeSelect && typeof getThemeMode === 'function') {
       settingsThemeModeSelect.value = normalizeThemeMode(getThemeMode());
     }
+
+    updateVoiceModeMeta();
   }
 
   function populateSettingsForm() {
@@ -131,7 +194,12 @@ export function createSettingsScreenController({
     }
     merged.displayName = String(merged.displayName || '').trim();
     merged.birthday = String(merged.birthday || '').trim();
+    merged.voiceActiveListening = true;
     merged.language = language;
+    merged.voiceTtsVoice = normalizeVoiceTtsVoice(merged.voiceTtsVoice || defaults?.panelSettingsDefaults?.voiceTtsVoice || '');
+    merged.voiceTtsSpeed = normalizeVoiceTtsSpeed(
+      merged.voiceTtsSpeed ?? defaults?.panelSettingsDefaults?.voiceTtsSpeed ?? DEFAULT_VOICE_TTS_SPEED
+    );
     merged.onboardingDone = merged.onboardingDone === true || String(merged.onboardingDone).toLowerCase() === 'true';
     merged.systemPrompt = sanitizePromptByLanguage(merged.systemPrompt, language);
 
@@ -188,7 +256,6 @@ export function createSettingsScreenController({
     const panelSettings = getPanelSettings();
     const nextName = String(settingsNameInput?.value || '').trim();
     const nextBirthday = String(settingsBirthdayInput?.value || '').trim();
-
     if (!nextName) {
       setStatus(settingsUserStatus, 'El nombre no puede estar vacio.', true);
       settingsNameInput?.focus();
@@ -199,6 +266,7 @@ export function createSettingsScreenController({
       ...panelSettings,
       displayName: nextName,
       birthday: nextBirthday,
+      voiceActiveListening: true,
       onboardingDone: true
     };
 
@@ -225,6 +293,10 @@ export function createSettingsScreenController({
   async function saveAssistantSettings() {
     const panelSettings = getPanelSettings();
     const nextLanguage = normalizeAssistantLanguage(settingsLanguageSelect?.value || DEFAULT_ASSISTANT_LANGUAGE);
+    const nextVoiceTtsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || '');
+    const nextVoiceTtsSpeed = normalizeVoiceTtsSpeed(
+      settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed ?? DEFAULT_VOICE_TTS_SPEED
+    );
     const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
 
     if (!nextPrompt) {
@@ -236,6 +308,8 @@ export function createSettingsScreenController({
     const nextSettings = {
       ...panelSettings,
       language: nextLanguage,
+      voiceTtsVoice: nextVoiceTtsVoice,
+      voiceTtsSpeed: nextVoiceTtsSpeed,
       onboardingDone: true,
       systemPrompt: nextPrompt
     };

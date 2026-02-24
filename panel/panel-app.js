@@ -19,6 +19,7 @@ import { createDynamicUiSortShowController } from './controllers/dynamic-ui-sort
 import { buildTabSummaryPrompt, toJsonTabRecord } from './services/site-context/generic-site-context.js';
 import { createDynamicRelationsService } from './services/dynamic-relations-service.js';
 import { extractToolCallsFromText } from './services/local-tool-call-parser-service.js';
+import { isGmailContext, isGmailMessageOpenContext } from './services/site-context/gmail-site-context.js';
 import {
   buildMacNativeHostInstallerScript,
   buildWindowsNativeHostInstallerScript,
@@ -89,6 +90,9 @@ export function initPanelApp() {
   const BACKGROUND_RUNTIME_CONTEXT_UPDATE_TYPE = 'GREENE_LOCATION_CONTEXT_UPDATE';
   const BACKGROUND_SMTP_SEND_TYPE = 'GREENE_SMTP_SEND';
   const BACKGROUND_NATIVE_HOST_PING_TYPE = 'GREENE_NATIVE_HOST_PING';
+  const MICROPHONE_PERMISSION_RESULT_MESSAGE_TYPE = 'GREENE_MIC_PERMISSION_RESULT';
+  const MICROPHONE_PERMISSION_HELPER_PAGE_PATH = 'panel/mic-permission.html';
+  const MICROPHONE_PERMISSION_HELPER_COOLDOWN_MS = 4500;
   const NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL = 'macOS y Windows';
   const DEFAULT_CHAT_SYSTEM_PROMPT = buildDefaultChatSystemPrompt(DEFAULT_ASSISTANT_LANGUAGE);
   const DEFAULT_ASSISTANT_DISPLAY_NAME = 'Greene';
@@ -185,6 +189,35 @@ export function initPanelApp() {
   const WHATSAPP_SUGGESTION_HISTORY_LIMIT = 120;
   const MAX_WHATSAPP_PROMPT_ENTRIES = 320;
   const MAX_WHATSAPP_PROMPT_CHARS = 1800;
+  const VOICE_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+  const VOICE_TRANSCRIPTION_LANGUAGE = 'es';
+  const VOICE_TTS_MODEL = 'gpt-4o-mini-tts';
+  const VOICE_TTS_VOICE = 'alloy';
+  const OPENAI_TTS_VOICE_OPTIONS = Object.freeze(['alloy', 'ash', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer']);
+  const OPENAI_TTS_VOICE_SET = new Set(OPENAI_TTS_VOICE_OPTIONS);
+  const VOICE_TTS_SPEED_DEFAULT = 1;
+  const VOICE_TTS_SPEED_MIN = 0.25;
+  const VOICE_TTS_SPEED_MAX = 2;
+  const VOICE_TTS_FORMAT = 'mp3';
+  const VOICE_AUTO_STOP_MAX_MS = 1000 * 60 * 2;
+  const VOICE_MIN_ACTIVE_RECORDING_MS = 650;
+  const VOICE_SILENCE_HOLD_MS = 650;
+  const VOICE_SILENCE_RMS_THRESHOLD = 0.026;
+  const VOICE_VAD_MODEL = 'v5';
+  const VOICE_VAD_ASSET_BASE_PATH = new URL('../node_modules/@ricky0123/vad-web/dist/', import.meta.url).href;
+  const VOICE_VAD_WASM_BASE_PATH = new URL('../node_modules/onnxruntime-web/dist/', import.meta.url).href;
+  const VOICE_VAD_POSITIVE_THRESHOLD = 0.28;
+  const VOICE_VAD_NEGATIVE_THRESHOLD = 0.22;
+  const VOICE_VAD_REDEMPTION_MS = 560;
+  const VOICE_VAD_MIN_SPEECH_MS = 220;
+  const VOICE_VAD_PRESPEECH_PAD_MS = 260;
+  const VOICE_MEDIA_RECORDER_TIMESLICE_MS = 0;
+  const VOICE_MIN_VAD_SEGMENT_SAMPLES = 2800;
+  const VOICE_MIN_TRANSCRIBE_BLOB_BYTES = 640;
+  const VOICE_SESSION_RESTART_DELAY_MS = 240;
+  const VOICE_SESSION_RESTART_AFTER_ERROR_MS = 780;
+  const VOICE_REPLY_SYNC_FALLBACK_MS_PER_CHAR = 34;
+  const CHAT_INTERRUPT_WAIT_MAX_MS = 2200;
 
   const DEFAULT_OLLAMA_MODEL = 'gpt-oss:20b';
   const DEFAULT_PRIMARY_MODEL_ID = 'model-local-ollama';
@@ -314,11 +347,41 @@ export function initPanelApp() {
     };
   }
 
+  function resolveBrowserPreferredAssistantLanguage() {
+    const nav = globalThis.navigator || null;
+    const candidates = [];
+    if (Array.isArray(nav?.languages)) {
+      candidates.push(...nav.languages);
+    }
+    candidates.push(nav?.language);
+
+    for (const candidate of candidates) {
+      const raw = String(candidate || '')
+        .trim()
+        .toLowerCase();
+      if (!raw) {
+        continue;
+      }
+
+      const base = raw.split(/[-_]/)[0];
+      if (base === 'en' || base === 'pt' || base === 'fr' || base === 'es') {
+        return base;
+      }
+    }
+
+    return DEFAULT_ASSISTANT_LANGUAGE;
+  }
+
+  const BROWSER_DEFAULT_ASSISTANT_LANGUAGE = resolveBrowserPreferredAssistantLanguage();
+
   const PANEL_SETTINGS_DEFAULTS = Object.freeze({
     assistantName: DEFAULT_ASSISTANT_DISPLAY_NAME,
     displayName: '',
     birthday: '',
-    language: DEFAULT_ASSISTANT_LANGUAGE,
+    voiceActiveListening: true,
+    language: BROWSER_DEFAULT_ASSISTANT_LANGUAGE,
+    voiceTtsVoice: VOICE_TTS_VOICE,
+    voiceTtsSpeed: VOICE_TTS_SPEED_DEFAULT,
     onboardingDone: false,
     systemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
     systemVariables: { ...SYSTEM_VARIABLE_DEFAULTS },
@@ -377,6 +440,7 @@ export function initPanelApp() {
   const chatAttachmentInput = document.getElementById('chatAttachmentInput');
   const chatAttachmentsBar = document.getElementById('chatAttachmentsBar');
   const chatSendBtn = document.getElementById('chatSendBtn');
+  const chatSendVoiceBars = chatSendBtn ? Array.from(chatSendBtn.querySelectorAll('[data-voice-bar]')) : [];
   const chatStatus = document.getElementById('chatStatus');
   const chatResetBtn = document.getElementById('chatResetBtn');
   const chatToolPicker = document.getElementById('chatToolPicker');
@@ -418,6 +482,10 @@ export function initPanelApp() {
   const settingsNameInput = document.getElementById('settingsNameInput');
   const settingsBirthdayInput = document.getElementById('settingsBirthdayInput');
   const settingsThemeModeSelect = document.getElementById('settingsThemeModeSelect');
+  const settingsVoiceModeMeta = document.getElementById('settingsVoiceModeMeta');
+  const settingsVoiceTtsVoiceSelect = document.getElementById('settingsVoiceTtsVoiceSelect');
+  const settingsVoiceTtsSpeedInput = document.getElementById('settingsVoiceTtsSpeedInput');
+  const settingsVoiceTtsSpeedValue = document.getElementById('settingsVoiceTtsSpeedValue');
   const settingsLanguageSelect = document.getElementById('settingsLanguageSelect');
   const settingsSystemPrompt = document.getElementById('settingsSystemPrompt');
   const settingsUserStatus = document.getElementById('settingsUserStatus');
@@ -645,6 +713,54 @@ export function initPanelApp() {
   let whatsappHistorySyncPromise = Promise.resolve();
   let whatsappHistoryVectorFingerprintByKey = new Map();
   let initialContextSyncPromise = null;
+  function createInitialVoiceCaptureState() {
+    return {
+      mode: 'idle',
+      mediaStream: null,
+      mediaRecorder: null,
+      vad: null,
+      usingVad: false,
+      chunks: [],
+      audioContext: null,
+      analyser: null,
+      sourceNode: null,
+      sampleBuffer: null,
+      graphStreamId: '',
+      rafId: 0,
+      silenceSince: 0,
+      startedAt: 0,
+      maxStopTimer: 0
+    };
+  }
+
+  let voiceCaptureState = createInitialVoiceCaptureState();
+  let activeTtsAudio = null;
+  let activeTtsObjectUrl = '';
+  let voiceSessionActive = false;
+  let voiceSessionResumeTimer = 0;
+  let activeChatAbortController = null;
+  let voiceReplySyncState = {
+    messageId: '',
+    rafId: 0,
+    startedAt: 0,
+    fullText: '',
+    audio: null
+  };
+  let voiceButtonMeterState = {
+    audioContext: null,
+    sourceNode: null,
+    analyser: null,
+    sampleBuffer: null,
+    rafId: 0,
+    level: 0
+  };
+  let runtimeMessageListenerAttached = false;
+  let microphonePermissionHelperFlow = {
+    inFlight: false,
+    requestId: '',
+    openedAt: 0,
+    source: ''
+  };
 
   const prefersDarkMedia =
     typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -694,6 +810,15 @@ export function initPanelApp() {
     }
 
     console.warn(`${LOG_PREFIX} ${message}`, payload);
+  }
+
+  function logInfo(message, payload) {
+    if (payload === undefined) {
+      console.info(`${LOG_PREFIX} ${message}`);
+      return;
+    }
+
+    console.info(`${LOG_PREFIX} ${message}`, payload);
   }
 
   function toSafeLogText(value, limit = 180) {
@@ -1839,6 +1964,7 @@ export function initPanelApp() {
     const integrations = getIntegrationsConfig();
     const smtp = integrations.smtp || {};
     const maps = integrations.maps || {};
+    const permissions = integrations.permissions || {};
     runWithSettingsScrollPreserved(
       () => {
         if (syncInput) {
@@ -1887,6 +2013,11 @@ export function initPanelApp() {
         if (settingsLocationMeta) {
           settingsLocationMeta.textContent = buildLocationMetaText(maps.lastKnownLocation, maps.nearbyPlaces);
         }
+        if (settingsPermissionMicBtn) {
+          const micState = normalizeIntegrationPermissionState(permissions.microphone);
+          settingsPermissionMicBtn.textContent =
+            micState === 'granted' ? 'Microfono concedido' : micState === 'denied' ? 'Reintentar microfono' : 'Pedir microfono';
+        }
         renderToolErrorsLog();
       },
       {
@@ -1906,6 +2037,8 @@ export function initPanelApp() {
     if (shouldTryAutoPing && expectedHost && (!sameHost || stalePing || !nativeHostDiagnostics.ok)) {
       void pingNativeHostBridge({ silent: true, hostName: expectedHost });
     }
+
+    renderChatSendButtonState();
   }
 
   function collectAppsIntegrationsSettingsFromScreen() {
@@ -2343,13 +2476,390 @@ export function initPanelApp() {
     return true;
   }
 
-  async function requestMicrophonePermissionAndSync() {
-    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
-      setStatus(settingsIntegrationsStatus, 'Microfono no soportado en este navegador.', true);
+  async function readBrowserMicrophonePermissionState() {
+    if (!navigator.permissions || typeof navigator.permissions.query !== 'function') {
+      return 'unsupported';
+    }
+
+    try {
+      const status = await navigator.permissions.query({ name: 'microphone' });
+      const state = normalizeIntegrationPermissionState(status?.state);
+      return state || 'prompt';
+    } catch (_) {
+      return 'unsupported';
+    }
+  }
+
+  function classifyMicrophoneAccessError(error) {
+    const name = String(error?.name || '').trim();
+    const code = name.toLowerCase();
+    const rawMessage = String(error?.message || '').trim();
+    const messageToken = rawMessage.toLowerCase();
+    const dismissed = code === 'notallowederror' && /(dismiss|closed|ignore|cancel)/i.test(messageToken);
+    if (dismissed) {
+      return {
+        code,
+        name,
+        rawMessage,
+        permissionState: 'prompt',
+        userMessage: 'Permission dismissed: se cerro el popup del microfono sin elegir.',
+        hint: 'Haz click de nuevo y pulsa "Permitir".'
+      };
+    }
+
+    if (code === 'notallowederror') {
+      return {
+        code,
+        name,
+        rawMessage,
+        permissionState: 'denied',
+        userMessage: 'Microfono bloqueado por Chrome.',
+        hint: 'Abre el icono del candado/sitio y permite Microfono para esta extension.'
+      };
+    }
+
+    if (code === 'notfounderror' || code === 'devicesnotfounderror') {
+      return {
+        code,
+        name,
+        rawMessage,
+        permissionState: 'prompt',
+        userMessage: 'No se detecto ningun microfono disponible.',
+        hint: 'Conecta/activa un microfono y vuelve a intentar.'
+      };
+    }
+
+    if (code === 'notreadableerror' || code === 'trackstarterror') {
+      return {
+        code,
+        name,
+        rawMessage,
+        permissionState: 'prompt',
+        userMessage: 'No se pudo abrir el microfono (puede estar ocupado por otra app).',
+        hint: 'Cierra apps que esten usando el microfono y reintenta.'
+      };
+    }
+
+    if (code === 'securityerror') {
+      return {
+        code,
+        name,
+        rawMessage,
+        permissionState: 'prompt',
+        userMessage: 'Chrome bloqueo acceso al microfono por seguridad.',
+        hint: 'Recarga la extension y vuelve a probar.'
+      };
+    }
+
+    return {
+      code,
+      name,
+      rawMessage,
+      permissionState: 'prompt',
+      userMessage: 'No se pudo obtener permiso de microfono.',
+      hint: rawMessage ? `Detalle: ${rawMessage}` : ''
+    };
+  }
+
+  function createMicrophonePermissionHelperRequestId() {
+    const nowToken = Date.now().toString(36);
+    const randomToken = Math.random()
+      .toString(36)
+      .slice(2, 10);
+    return `mic_${nowToken}_${randomToken}`;
+  }
+
+  function buildMicrophonePermissionHelperUrl(options = {}) {
+    const requestId = String(options?.requestId || '').trim();
+    const source = String(options?.source || '').trim();
+    const returnTabId = Number(options?.returnTabId);
+    const baseUrl =
+      chrome?.runtime && typeof chrome.runtime.getURL === 'function'
+        ? chrome.runtime.getURL(MICROPHONE_PERMISSION_HELPER_PAGE_PATH)
+        : MICROPHONE_PERMISSION_HELPER_PAGE_PATH;
+
+    const url = new URL(baseUrl);
+    if (requestId) {
+      url.searchParams.set('requestId', requestId);
+    }
+    if (source) {
+      url.searchParams.set('source', source);
+    }
+    if (Number.isFinite(returnTabId) && returnTabId > 0) {
+      url.searchParams.set('returnTabId', String(returnTabId));
+    }
+    return url.toString();
+  }
+
+  async function queryActiveTabInCurrentWindow() {
+    if (!chrome?.tabs || typeof chrome.tabs.query !== 'function') {
+      return null;
+    }
+
+    return new Promise((resolve) => {
+      try {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (chrome.runtime?.lastError) {
+            resolve(null);
+            return;
+          }
+
+          const firstTab = Array.isArray(tabs) && tabs.length ? tabs[0] : null;
+          resolve(firstTab && typeof firstTab === 'object' ? firstTab : null);
+        });
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+
+  async function createBrowserTab(createProperties = {}) {
+    if (!chrome?.tabs || typeof chrome.tabs.create !== 'function') {
+      return null;
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.tabs.create(createProperties, (tab) => {
+          if (chrome.runtime?.lastError) {
+            reject(new Error(chrome.runtime.lastError.message || 'No se pudo abrir pestana de permiso.'));
+            return;
+          }
+          resolve(tab && typeof tab === 'object' ? tab : null);
+        });
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error('No se pudo abrir pestana de permiso.'));
+      }
+    });
+  }
+
+  function shouldUseMicrophonePermissionTabFallback(detail, browserPermissionBefore, browserPermissionAfter) {
+    const safeDetail = detail && typeof detail === 'object' ? detail : {};
+    const code = String(safeDetail.code || '').trim().toLowerCase();
+    if (code !== 'notallowederror') {
       return false;
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const beforeState = normalizeIntegrationPermissionState(browserPermissionBefore);
+    const afterState = normalizeIntegrationPermissionState(browserPermissionAfter);
+    if (beforeState === 'denied' || afterState === 'denied') {
+      return false;
+    }
+
+    const token = `${safeDetail.rawMessage || ''} ${safeDetail.userMessage || ''}`.toLowerCase();
+    const hasDismissToken = /(dismiss|closed|cancel|ignore|permission dismissed)/i.test(token);
+    return hasDismissToken || (beforeState === 'prompt' && afterState === 'prompt');
+  }
+
+  async function openMicrophonePermissionHelperTab(options = {}) {
+    const source = String(options?.source || 'unknown').trim() || 'unknown';
+    const now = Date.now();
+    if (
+      microphonePermissionHelperFlow.inFlight &&
+      now - Math.max(0, Number(microphonePermissionHelperFlow.openedAt) || 0) < MICROPHONE_PERMISSION_HELPER_COOLDOWN_MS
+    ) {
+      logInfo('microphone:helper_tab:skip_recent', {
+        source,
+        requestId: microphonePermissionHelperFlow.requestId
+      });
+      return true;
+    }
+
+    const requestId = createMicrophonePermissionHelperRequestId();
+    const activeTab = await queryActiveTabInCurrentWindow();
+    const returnTabId = Number(activeTab?.id);
+    const targetUrl = buildMicrophonePermissionHelperUrl({
+      requestId,
+      source,
+      returnTabId
+    });
+
+    logInfo('microphone:helper_tab:open', {
+      source,
+      requestId,
+      returnTabId: Number.isFinite(returnTabId) ? returnTabId : 0
+    });
+
+    try {
+      await createBrowserTab({
+        url: targetUrl,
+        active: true
+      });
+      microphonePermissionHelperFlow = {
+        inFlight: true,
+        requestId,
+        openedAt: now,
+        source
+      };
+      return true;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'No se pudo abrir pestana de permiso.';
+      logWarn('microphone:helper_tab:open_failed', {
+        source,
+        requestId,
+        error: errorMessage
+      });
+      microphonePermissionHelperFlow = {
+        inFlight: false,
+        requestId: '',
+        openedAt: 0,
+        source: ''
+      };
+      return false;
+    }
+  }
+
+  async function handleMicrophonePermissionResultMessage(payload = {}, sender = null) {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const status = String(safePayload.status || '').trim().toLowerCase();
+    const permissionStateRaw = String(safePayload.permissionState || '').trim().toLowerCase();
+    const message = String(safePayload.message || '').trim();
+    const requestId = String(safePayload.requestId || '').trim();
+    const source = String(safePayload.source || '').trim() || 'unknown';
+    const helperTabId = Number(sender?.tab?.id);
+    const helperUrl = String(sender?.tab?.url || sender?.url || '').trim();
+
+    const permissionState =
+      permissionStateRaw === 'granted' || permissionStateRaw === 'denied' || permissionStateRaw === 'prompt'
+        ? permissionStateRaw
+        : status === 'granted'
+          ? 'granted'
+          : status === 'denied'
+            ? 'denied'
+            : 'prompt';
+
+    logInfo('microphone:helper_tab:result', {
+      source,
+      status,
+      permissionState,
+      requestId,
+      helperTabId: Number.isFinite(helperTabId) ? helperTabId : 0,
+      helperUrl,
+      flowRequestId: microphonePermissionHelperFlow.requestId
+    });
+
+    microphonePermissionHelperFlow = {
+      inFlight: false,
+      requestId: '',
+      openedAt: 0,
+      source: ''
+    };
+
+    await setMicrophonePermissionState(permissionState);
+
+    if (status === 'granted') {
+      setStatus(settingsIntegrationsStatus, 'Permiso de microfono concedido desde pestana auxiliar.');
+      setStatus(chatStatus, 'Microfono listo. Regresa al panel y toca waves para grabar.');
+      return;
+    }
+
+    if (status === 'denied') {
+      setStatus(
+        settingsIntegrationsStatus,
+        'Microfono bloqueado por Chrome. Habilitalo en permisos del sitio de extension.',
+        true
+      );
+      setStatus(chatStatus, 'Microfono bloqueado por Chrome.', true);
+      return;
+    }
+
+    const dismissedMessage = message || 'Permiso de microfono no confirmado.';
+    setStatus(settingsIntegrationsStatus, dismissedMessage, true);
+    setStatus(chatStatus, dismissedMessage, true);
+  }
+
+  function handlePanelRuntimeMessage(message, sender) {
+    const type = String(message?.type || '').trim();
+    if (type !== MICROPHONE_PERMISSION_RESULT_MESSAGE_TYPE) {
+      return;
+    }
+
+    void handleMicrophonePermissionResultMessage(message?.payload || {}, sender);
+  }
+
+  function attachRuntimeMessageListener() {
+    if (runtimeMessageListenerAttached) {
+      return;
+    }
+
+    if (!chrome?.runtime?.onMessage || typeof chrome.runtime.onMessage.addListener !== 'function') {
+      return;
+    }
+
+    chrome.runtime.onMessage.addListener(handlePanelRuntimeMessage);
+    runtimeMessageListenerAttached = true;
+  }
+
+  function detachRuntimeMessageListener() {
+    if (!runtimeMessageListenerAttached) {
+      return;
+    }
+
+    if (!chrome?.runtime?.onMessage || typeof chrome.runtime.onMessage.removeListener !== 'function') {
+      return;
+    }
+
+    chrome.runtime.onMessage.removeListener(handlePanelRuntimeMessage);
+    runtimeMessageListenerAttached = false;
+  }
+
+  async function requestMicrophonePermissionAndSync(options = {}) {
+    const source = String(options?.source || 'settings').trim() || 'settings';
+    const allowTabFallback = options?.allowTabFallback !== false;
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      setStatus(settingsIntegrationsStatus, 'Microfono no soportado en este navegador.', true);
+      logWarn('microphone:unsupported', {
+        source,
+        hasMediaDevices: Boolean(navigator.mediaDevices),
+        hasGetUserMedia: Boolean(navigator.mediaDevices?.getUserMedia)
+      });
+      return false;
+    }
+
+    const browserPermissionBefore = await readBrowserMicrophonePermissionState();
+    logInfo('microphone:request:start', {
+      source,
+      browserPermissionBefore,
+      visibility: document.visibilityState,
+      hasFocus: document.hasFocus(),
+      isSecureContext: window.isSecureContext,
+      url: window.location.href
+    });
+
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      const detail = classifyMicrophoneAccessError(error);
+      if (detail.permissionState) {
+        await setMicrophonePermissionState(detail.permissionState);
+      }
+      const browserPermissionAfter = await readBrowserMicrophonePermissionState();
+      logWarn('microphone:request:failed', {
+        source,
+        code: detail.code,
+        name: detail.name,
+        rawMessage: detail.rawMessage,
+        browserPermissionBefore,
+        browserPermissionAfter
+      });
+      const shouldFallback =
+        allowTabFallback && shouldUseMicrophonePermissionTabFallback(detail, browserPermissionBefore, browserPermissionAfter);
+      if (shouldFallback) {
+        const opened = await openMicrophonePermissionHelperTab({
+          source
+        });
+        if (opened) {
+          setStatus(
+            settingsIntegrationsStatus,
+            'Chrome no pudo mostrar el permiso desde side panel. Se abrio una pestana para autorizar microfono.'
+          );
+          return false;
+        }
+      }
+      throw new Error([detail.userMessage, detail.hint].filter(Boolean).join(' '));
+    }
+
     try {
       const tracks = Array.isArray(stream?.getTracks?.()) ? stream.getTracks() : [];
       for (const track of tracks) {
@@ -2373,6 +2883,12 @@ export function initPanelApp() {
       throw new Error('No se pudo guardar estado de microfono.');
     }
 
+    const browserPermissionAfter = await readBrowserMicrophonePermissionState();
+    logInfo('microphone:request:granted', {
+      source,
+      browserPermissionBefore,
+      browserPermissionAfter
+    });
     renderAppsIntegrationsSettings({ syncInput: false });
     setStatus(settingsIntegrationsStatus, 'Permiso de microfono concedido.');
     return true;
@@ -3636,6 +4152,9 @@ export function initPanelApp() {
     next.primaryModelProfileId = resolvedPrimary;
     next.defaultModel = resolvedPrimaryProfile ? resolvedPrimaryProfile.model : legacyDefaultModel;
     next.assistantName = normalizeAssistantDisplayName(next.assistantName) || DEFAULT_ASSISTANT_DISPLAY_NAME;
+    next.voiceActiveListening = true;
+    next.voiceTtsVoice = normalizeVoiceTtsVoice(next.voiceTtsVoice || VOICE_TTS_VOICE);
+    next.voiceTtsSpeed = normalizeVoiceTtsSpeed(next.voiceTtsSpeed);
     next.securityConfig = pinCryptoService.isConfigured(next.securityConfig) ? next.securityConfig : null;
     next.systemVariables = normalizeSystemVariables(next.systemVariables);
     next.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(next.crmErpDatabaseUrl || '');
@@ -4109,11 +4628,13 @@ export function initPanelApp() {
     renderAiModelsAccessWall();
 
     if (!aiModelsList) {
+      renderChatSendButtonState();
       return;
     }
 
     if (isAiModelsAccessLocked()) {
       aiModelsList.textContent = '';
+      renderChatSendButtonState();
       return;
     }
 
@@ -4126,6 +4647,7 @@ export function initPanelApp() {
       item.className = 'ai-model-item';
       item.textContent = 'No hay modelos configurados.';
       aiModelsList.appendChild(item);
+      renderChatSendButtonState();
       return;
     }
 
@@ -4183,6 +4705,8 @@ export function initPanelApp() {
       item.append(head, meta, actions);
       aiModelsList.appendChild(item);
     }
+
+    renderChatSendButtonState();
   }
 
   function updateModelModalProviderUi() {
@@ -4688,6 +5212,8 @@ export function initPanelApp() {
     renderCrmErpDatabaseSettings({ syncInput: true });
     renderAppsIntegrationsSettings({ syncInput: true });
     renderAssistantBranding();
+    updateVoiceModeMetaLabel();
+    renderChatSendButtonState();
   }
 
   function populateSettingsForm() {
@@ -4700,6 +5226,8 @@ export function initPanelApp() {
     setStatus(settingsCrmErpMeStatus, '');
     setStatus(settingsIntegrationsStatus, '');
     renderAssistantBranding();
+    updateVoiceModeMetaLabel();
+    renderChatSendButtonState();
   }
 
   function isOnboardingComplete() {
@@ -4850,6 +5378,11 @@ export function initPanelApp() {
   async function saveChatHistory() {
     const payload = chatHistory.map((item) => {
       const source = item && typeof item === 'object' ? item : {};
+      const {
+        voiceRevealState: _voiceRevealState,
+        audioSyncVisibleChars: _audioSyncVisibleChars,
+        ...persistedSource
+      } = source;
       const generatedImages = Array.isArray(source.generated_images)
         ? source.generated_images
             .map((image) => {
@@ -4873,7 +5406,7 @@ export function initPanelApp() {
         : [];
 
       return {
-        ...source,
+        ...persistedSource,
         pending: false,
         generated_images: generatedImages
       };
@@ -4941,6 +5474,9 @@ export function initPanelApp() {
     }
 
     panelSettings.assistantName = normalizeAssistantDisplayName(panelSettings.assistantName) || DEFAULT_ASSISTANT_DISPLAY_NAME;
+    panelSettings.voiceActiveListening = true;
+    panelSettings.voiceTtsVoice = normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
+    panelSettings.voiceTtsSpeed = normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed);
     panelSettings.systemVariables = normalizeSystemVariables(panelSettings.systemVariables);
     panelSettings.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
     panelSettings.crmErpDatabaseSchemaSnapshot = normalizeCrmErpDatabaseSnapshot(panelSettings.crmErpDatabaseSchemaSnapshot);
@@ -4955,6 +5491,9 @@ export function initPanelApp() {
       settingsScreenState.panelSettings = {
         ...settingsScreenState.panelSettings,
         assistantName: panelSettings.assistantName,
+        voiceActiveListening: true,
+        voiceTtsVoice: panelSettings.voiceTtsVoice,
+        voiceTtsSpeed: panelSettings.voiceTtsSpeed,
         systemPrompt: panelSettings.systemPrompt,
         systemVariables: { ...panelSettings.systemVariables },
         crmErpDatabaseUrl: panelSettings.crmErpDatabaseUrl,
@@ -5231,12 +5770,14 @@ export function initPanelApp() {
 
   function renderPendingConversationAttachments() {
     if (!chatAttachmentsBar) {
+      renderChatSendButtonState();
       return;
     }
 
     if (!pendingConversationAttachments.length) {
       chatAttachmentsBar.hidden = true;
       chatAttachmentsBar.textContent = '';
+      renderChatSendButtonState();
       return;
     }
 
@@ -5263,6 +5804,8 @@ export function initPanelApp() {
       chip.append(name, removeBtn);
       chatAttachmentsBar.appendChild(chip);
     }
+
+    renderChatSendButtonState();
   }
 
   function clearPendingConversationAttachments() {
@@ -5287,6 +5830,22 @@ export function initPanelApp() {
     const sourceFiles = Array.from(fileList || []).filter((item) => item instanceof File);
     if (!sourceFiles.length) {
       return;
+    }
+
+    if (voiceSessionActive) {
+      setVoiceSessionActive(false, {
+        reason: 'attachments_added'
+      });
+      if (voiceCaptureState.mode === 'recording') {
+        void stopVoiceCapture({
+          transcribe: false,
+          preserveStatus: true
+        });
+      } else {
+        releaseVoiceSessionResources({
+          preserveMode: voiceCaptureState.mode === 'transcribing'
+        });
+      }
     }
 
     const existingFingerprints = new Set(
@@ -5449,6 +6008,1402 @@ export function initPanelApp() {
     return ok;
   }
 
+  function normalizeVoiceInputLanguage() {
+    const normalized = normalizeAssistantLanguage(panelSettings.language || BROWSER_DEFAULT_ASSISTANT_LANGUAGE);
+    if (normalized === 'en' || normalized === 'pt' || normalized === 'fr') {
+      return normalized;
+    }
+    return normalized || VOICE_TRANSCRIPTION_LANGUAGE;
+  }
+
+  function normalizeVoiceTtsVoice(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    if (OPENAI_TTS_VOICE_SET.has(token)) {
+      return token;
+    }
+    return VOICE_TTS_VOICE;
+  }
+
+  function normalizeVoiceTtsSpeed(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return VOICE_TTS_SPEED_DEFAULT;
+    }
+
+    const clamped = Math.max(VOICE_TTS_SPEED_MIN, Math.min(VOICE_TTS_SPEED_MAX, numeric));
+    return Number(clamped.toFixed(2));
+  }
+
+  function getConfiguredVoiceTtsVoice() {
+    return normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
+  }
+
+  function getConfiguredVoiceTtsSpeed() {
+    return normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed);
+  }
+
+  function isVoiceActiveListeningEnabled() {
+    return true;
+  }
+
+  function updateVoiceModeMetaLabel() {
+    const inputLanguage = normalizeAssistantLanguage(
+      settingsLanguageSelect?.value || panelSettings.language || BROWSER_DEFAULT_ASSISTANT_LANGUAGE
+    );
+    const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
+    const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
+
+    if (settingsVoiceTtsSpeedValue) {
+      settingsVoiceTtsSpeedValue.textContent = `${ttsSpeed.toFixed(2)}x`;
+    }
+
+    if (!settingsVoiceModeMeta) {
+      return;
+    }
+
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} (browser: ${BROWSER_DEFAULT_ASSISTANT_LANGUAGE.toUpperCase()}) · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x`;
+  }
+
+  function getOpenAiSpeechProfile() {
+    const profiles = getModelProfiles();
+    return profiles.find((item) => item.provider === AI_PROVIDER_IDS.OPENAI && item.hasApiKey === true) || null;
+  }
+
+  function hasOpenAiSpeechCredentialConfigured() {
+    return Boolean(getOpenAiSpeechProfile());
+  }
+
+  function resolveChatSendMode() {
+    const hasText = Boolean(String(chatInput?.value || '').trim());
+    const hasAttachments = pendingConversationAttachments.length > 0;
+    if (hasText || hasAttachments) {
+      return 'text';
+    }
+
+    if (voiceCaptureState.mode === 'recording' || voiceCaptureState.mode === 'transcribing') {
+      return 'voice';
+    }
+
+    return hasOpenAiSpeechCredentialConfigured() ? 'voice' : 'text';
+  }
+
+  function renderChatSendButtonState() {
+    if (!chatSendBtn) {
+      return;
+    }
+
+    const sendMode = resolveChatSendMode();
+    const recording = voiceCaptureState.mode === 'recording';
+    const voiceActionActive = sendMode === 'voice' && voiceSessionActive;
+    chatSendBtn.dataset.sendMode = sendMode;
+    chatSendBtn.dataset.recording = recording ? 'true' : 'false';
+    chatSendBtn.dataset.voiceSession = voiceSessionActive ? 'true' : 'false';
+
+    if (sendMode === 'voice') {
+      const title = voiceActionActive
+        ? 'End Voice'
+        : recording
+          ? 'Escuchando... Pulsa waves para detener'
+          : 'Iniciar escucha por voz';
+      chatSendBtn.setAttribute('aria-label', title);
+      chatSendBtn.setAttribute('title', title);
+    } else {
+      chatSendBtn.setAttribute('aria-label', 'Enviar mensaje');
+      chatSendBtn.setAttribute('title', 'Enviar mensaje');
+    }
+
+    chatSendBtn.disabled = voiceCaptureState.mode === 'transcribing' && sendMode !== 'voice';
+  }
+
+  function applyVoiceButtonBars(level = 0) {
+    if (!chatSendVoiceBars.length) {
+      return;
+    }
+
+    const safeLevel = Math.max(0, Math.min(1, Number(level) || 0));
+    const now = Date.now();
+    for (let index = 0; index < chatSendVoiceBars.length; index += 1) {
+      const bar = chatSendVoiceBars[index];
+      if (!(bar instanceof HTMLElement)) {
+        continue;
+      }
+
+      const phase = now / 150 + index * 0.95;
+      const wobble = 0.42 + (Math.sin(phase) + 1) * 0.29;
+      const base = 4 + index;
+      const amplitude = safeLevel * 12 * wobble;
+      const height = Math.max(4, Math.min(16, Math.round(base + amplitude)));
+      bar.style.height = `${height}px`;
+    }
+  }
+
+  function resetVoiceButtonBars() {
+    applyVoiceButtonBars(0);
+  }
+
+  function stopVoiceButtonMeter(options = {}) {
+    if (voiceButtonMeterState.rafId) {
+      cancelAnimationFrame(voiceButtonMeterState.rafId);
+    }
+
+    if (voiceButtonMeterState.sourceNode) {
+      try {
+        voiceButtonMeterState.sourceNode.disconnect();
+      } catch (_) {
+        // Ignore source node disconnect issues.
+      }
+    }
+
+    if (voiceButtonMeterState.audioContext) {
+      void voiceButtonMeterState.audioContext.close().catch(() => {});
+    }
+
+    voiceButtonMeterState = {
+      audioContext: null,
+      sourceNode: null,
+      analyser: null,
+      sampleBuffer: null,
+      rafId: 0,
+      level: 0
+    };
+
+    if (options.resetBars !== false) {
+      resetVoiceButtonBars();
+    }
+  }
+
+  async function startVoiceButtonMeter(stream) {
+    if (!chatSendVoiceBars.length || !(stream instanceof MediaStream) || !hasLiveVoiceMediaStream(stream)) {
+      return;
+    }
+
+    stopVoiceButtonMeter({
+      resetBars: false
+    });
+
+    if (typeof AudioContext !== 'function') {
+      return;
+    }
+
+    try {
+      const meterContext = new AudioContext();
+      const analyser = meterContext.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.52;
+      const sourceNode = meterContext.createMediaStreamSource(stream);
+      sourceNode.connect(analyser);
+      const sampleBuffer = new Float32Array(analyser.fftSize);
+
+      voiceButtonMeterState = {
+        audioContext: meterContext,
+        sourceNode,
+        analyser,
+        sampleBuffer,
+        rafId: 0,
+        level: 0
+      };
+
+      const tick = () => {
+        if (voiceCaptureState.mode !== 'recording' || voiceButtonMeterState.analyser !== analyser) {
+          return;
+        }
+
+        analyser.getFloatTimeDomainData(sampleBuffer);
+        let energy = 0;
+        for (let index = 0; index < sampleBuffer.length; index += 1) {
+          const sample = sampleBuffer[index];
+          energy += sample * sample;
+        }
+
+        const rms = Math.sqrt(energy / sampleBuffer.length);
+        const normalized = Math.max(0, Math.min(1, rms * 14.5));
+        voiceButtonMeterState.level = voiceButtonMeterState.level * 0.62 + normalized * 0.38;
+        applyVoiceButtonBars(voiceButtonMeterState.level);
+        voiceButtonMeterState.rafId = requestAnimationFrame(tick);
+      };
+
+      voiceButtonMeterState.rafId = requestAnimationFrame(tick);
+    } catch (_) {
+      stopVoiceButtonMeter();
+    }
+  }
+
+  function getChatMessageById(messageId) {
+    const token = String(messageId || '').trim();
+    if (!token) {
+      return null;
+    }
+    return chatHistory.find((item) => String(item?.id || '').trim() === token) || null;
+  }
+
+  function stopVoiceReplyTextSync(options = {}) {
+    if (voiceReplySyncState.rafId) {
+      cancelAnimationFrame(voiceReplySyncState.rafId);
+    }
+
+    const message = getChatMessageById(voiceReplySyncState.messageId);
+    if (message) {
+      if (options.keepVisibleChars !== true) {
+        delete message.audioSyncVisibleChars;
+      }
+      delete message.voiceRevealState;
+      scheduleChatRender({
+        allowAutoScroll: false
+      });
+    }
+
+    voiceReplySyncState = {
+      messageId: '',
+      rafId: 0,
+      startedAt: 0,
+      fullText: '',
+      audio: null
+    };
+  }
+
+  function clearVoiceSessionRestartTimer() {
+    if (!voiceSessionResumeTimer) {
+      return;
+    }
+
+    window.clearTimeout(voiceSessionResumeTimer);
+    voiceSessionResumeTimer = 0;
+  }
+
+  function setVoiceSessionActive(nextState, options = {}) {
+    const next = nextState === true;
+    const previous = voiceSessionActive;
+    voiceSessionActive = next;
+
+    if (!next) {
+      clearVoiceSessionRestartTimer();
+      if (options.stopPlayback !== false) {
+        stopAssistantSpeechPlayback();
+      }
+    }
+
+    if (previous !== next) {
+      logInfo('voice:session:toggle', {
+        active: next,
+        reason: String(options.reason || '').trim() || 'manual'
+      });
+    }
+
+    renderChatSendButtonState();
+  }
+
+  function scheduleVoiceSessionRestart(options = {}) {
+    if (!voiceSessionActive) {
+      return;
+    }
+
+    clearVoiceSessionRestartTimer();
+    const delayMs = Math.max(0, Number(options.delayMs) || VOICE_SESSION_RESTART_DELAY_MS);
+    const reason = String(options.reason || 'next_turn').trim() || 'next_turn';
+    voiceSessionResumeTimer = window.setTimeout(() => {
+      voiceSessionResumeTimer = 0;
+      if (!voiceSessionActive) {
+        return;
+      }
+      if (voiceCaptureState.mode !== 'idle') {
+        return;
+      }
+      if (!hasOpenAiSpeechCredentialConfigured()) {
+        setVoiceSessionActive(false, {
+          reason: 'voice_session_missing_credentials',
+          stopPlayback: false
+        });
+        releaseVoiceSessionResources();
+        return;
+      }
+      if (String(chatInput?.value || '').trim()) {
+        return;
+      }
+
+      void startVoiceCapture({
+        source: `voice_session:${reason}`
+      }).then((started) => {
+        if (!started && voiceSessionActive) {
+          setVoiceSessionActive(false, {
+            reason: 'voice_session_restart_failed',
+            stopPlayback: false
+          });
+          releaseVoiceSessionResources();
+        }
+      });
+    }, delayMs);
+  }
+
+  function isAbortLikeError(error) {
+    if (!error) {
+      return false;
+    }
+
+    const name = String(error?.name || '').trim().toLowerCase();
+    if (name === 'aborterror') {
+      return true;
+    }
+
+    const message = String(error?.message || '').trim().toLowerCase();
+    return /abort|interrumpid|canceled|cancelled/.test(message);
+  }
+
+  async function interruptActiveChatTurn(options = {}) {
+    const reason = String(options.reason || 'interrupted').trim() || 'interrupted';
+    if (activeChatAbortController) {
+      try {
+        activeChatAbortController.abort(reason);
+      } catch (_) {
+        // Ignore abort issues.
+      }
+    }
+
+    stopAssistantSpeechPlayback();
+
+    if (!isGeneratingChat) {
+      return true;
+    }
+
+    const startedAt = Date.now();
+    while (isGeneratingChat && Date.now() - startedAt < CHAT_INTERRUPT_WAIT_MAX_MS) {
+      await waitForMs(48);
+    }
+
+    return !isGeneratingChat;
+  }
+
+  function stopAssistantSpeechPlayback() {
+    stopVoiceReplyTextSync();
+    if (activeTtsAudio) {
+      activeTtsAudio.pause();
+      activeTtsAudio.src = '';
+      activeTtsAudio = null;
+    }
+
+    if (activeTtsObjectUrl) {
+      URL.revokeObjectURL(activeTtsObjectUrl);
+      activeTtsObjectUrl = '';
+    }
+  }
+
+  async function setMicrophonePermissionState(nextState) {
+    const safeState = normalizeIntegrationPermissionState(nextState);
+    const integrations = getIntegrationsConfig();
+    const currentState = normalizeIntegrationPermissionState(integrations.permissions?.microphone);
+    if (safeState === currentState) {
+      return true;
+    }
+
+    const nextIntegrations = normalizeIntegrationsConfig({
+      ...integrations,
+      permissions: {
+        ...integrations.permissions,
+        microphone: safeState
+      }
+    });
+
+    const ok = await savePanelSettings({
+      integrations: nextIntegrations
+    });
+    if (ok) {
+      renderAppsIntegrationsSettings({ syncInput: false });
+    }
+    return ok;
+  }
+
+  function getVoiceBlobFromChunks(chunks = []) {
+    const safeChunks = Array.isArray(chunks) ? chunks.filter((item) => item instanceof Blob && item.size > 0) : [];
+    if (!safeChunks.length) {
+      return null;
+    }
+    const firstType = String(safeChunks[0]?.type || '').trim();
+    const type = firstType || 'audio/webm';
+    return new Blob(safeChunks, { type });
+  }
+
+  function clearVoiceCaptureTimers() {
+    if (voiceCaptureState.rafId) {
+      cancelAnimationFrame(voiceCaptureState.rafId);
+      voiceCaptureState.rafId = 0;
+    }
+
+    if (voiceCaptureState.maxStopTimer) {
+      window.clearTimeout(voiceCaptureState.maxStopTimer);
+      voiceCaptureState.maxStopTimer = 0;
+    }
+  }
+
+  function cleanupVoiceCaptureGraph() {
+    clearVoiceCaptureTimers();
+
+    if (voiceCaptureState.sourceNode) {
+      try {
+        voiceCaptureState.sourceNode.disconnect();
+      } catch (_) {
+        // Ignore disconnect cleanup issues.
+      }
+    }
+
+    voiceCaptureState.sourceNode = null;
+    voiceCaptureState.analyser = null;
+    voiceCaptureState.sampleBuffer = null;
+    voiceCaptureState.graphStreamId = '';
+
+    if (voiceCaptureState.audioContext) {
+      void voiceCaptureState.audioContext.close().catch(() => {});
+    }
+    voiceCaptureState.audioContext = null;
+  }
+
+  function hasLiveVoiceMediaStream(stream) {
+    const tracks = Array.isArray(stream?.getAudioTracks?.()) ? stream.getAudioTracks() : [];
+    return tracks.some((track) => track && track.readyState === 'live');
+  }
+
+  function stopVoiceCaptureTracks(stream) {
+    const tracks = Array.isArray(stream?.getTracks?.()) ? stream.getTracks() : [];
+    for (const track of tracks) {
+      try {
+        track.stop();
+      } catch (_) {
+        // Ignore cleanup issues.
+      }
+    }
+  }
+
+  function releaseVoiceSessionResources(options = {}) {
+    const preserveMode = options.preserveMode === true;
+    stopVoiceButtonMeter();
+    if (voiceCaptureState.vad) {
+      const vadInstance = voiceCaptureState.vad;
+      voiceCaptureState.vad = null;
+      voiceCaptureState.usingVad = false;
+      try {
+        void vadInstance.pause().catch(() => {});
+      } catch (_) {
+        // Ignore pause cleanup issues.
+      }
+      try {
+        void vadInstance.destroy().catch(() => {});
+      } catch (_) {
+        // Ignore destroy cleanup issues.
+      }
+    }
+    cleanupVoiceCaptureGraph();
+    stopVoiceCaptureTracks(voiceCaptureState.mediaStream);
+    voiceCaptureState.mediaStream = null;
+    voiceCaptureState.mediaRecorder = null;
+    voiceCaptureState.chunks = [];
+    voiceCaptureState.silenceSince = 0;
+    voiceCaptureState.startedAt = 0;
+    if (!preserveMode) {
+      voiceCaptureState.mode = 'idle';
+    }
+    renderChatSendButtonState();
+  }
+
+  async function getSpeechAuthContext() {
+    const profile = getOpenAiSpeechProfile();
+    if (!profile) {
+      throw new Error('Voice requiere un perfil OpenAI con API key activa.');
+    }
+
+    const apiKey = await getApiKeyForProfile(profile, { statusTarget: chatStatus });
+    return {
+      profile,
+      apiKey
+    };
+  }
+
+  async function transcribeVoiceBlob(blob) {
+    if (!(blob instanceof Blob) || blob.size <= 0) {
+      throw new Error('No se detecto audio para transcribir.');
+    }
+
+    const { apiKey } = await getSpeechAuthContext();
+    const result = await aiProviderService.transcribeOpenAiAudio({
+      apiKey,
+      audioBlob: blob,
+      model: VOICE_TRANSCRIPTION_MODEL,
+      language: normalizeVoiceInputLanguage()
+    });
+    return String(result || '').trim();
+  }
+
+  function getVoiceVadLibrary() {
+    const vadApi = window?.vad;
+    if (!vadApi || typeof vadApi !== 'object') {
+      return null;
+    }
+    if (!vadApi.MicVAD || typeof vadApi.MicVAD.new !== 'function') {
+      return null;
+    }
+    return vadApi;
+  }
+
+  function createVoiceBlobFromVadAudio(audioSamples) {
+    const vadApi = getVoiceVadLibrary();
+    const segment = audioSamples instanceof Float32Array ? audioSamples : null;
+    if (
+      !vadApi ||
+      !vadApi.utils ||
+      typeof vadApi.utils.encodeWAV !== 'function' ||
+      !segment ||
+      segment.length < VOICE_MIN_VAD_SEGMENT_SAMPLES
+    ) {
+      return null;
+    }
+
+    try {
+      const normalized = new Float32Array(segment.length);
+      let hasSignal = false;
+      for (let index = 0; index < segment.length; index += 1) {
+        const sample = Number(segment[index]);
+        const clamped = Number.isFinite(sample) ? Math.max(-1, Math.min(1, sample)) : 0;
+        normalized[index] = clamped;
+        if (!hasSignal && Math.abs(clamped) > 0.0001) {
+          hasSignal = true;
+        }
+      }
+      if (!hasSignal) {
+        return null;
+      }
+
+      const wavBuffer = vadApi.utils.encodeWAV(normalized, 1, 16000, 1, 16);
+      return new Blob([wavBuffer], {
+        type: 'audio/wav'
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function isCorruptedOrUnsupportedAudioError(error) {
+    const message = String(error?.message || '')
+      .trim()
+      .toLowerCase();
+    if (!message) {
+      return false;
+    }
+    return /corrupt|unsupported|invalid[_\s-]?value.*file|audio file/i.test(message);
+  }
+
+  async function ensureVoiceVadEngine() {
+    const vadApi = getVoiceVadLibrary();
+    if (!vadApi) {
+      return null;
+    }
+
+    if (voiceCaptureState.vad) {
+      return voiceCaptureState.vad;
+    }
+
+    const sharedGetStream = async () => {
+      if (hasLiveVoiceMediaStream(voiceCaptureState.mediaStream)) {
+        return voiceCaptureState.mediaStream;
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      voiceCaptureState.mediaStream = stream;
+      return stream;
+    };
+
+    const vadInstance = await vadApi.MicVAD.new({
+      model: VOICE_VAD_MODEL,
+      startOnLoad: false,
+      baseAssetPath: VOICE_VAD_ASSET_BASE_PATH,
+      onnxWASMBasePath: VOICE_VAD_WASM_BASE_PATH,
+      positiveSpeechThreshold: VOICE_VAD_POSITIVE_THRESHOLD,
+      negativeSpeechThreshold: VOICE_VAD_NEGATIVE_THRESHOLD,
+      redemptionMs: VOICE_VAD_REDEMPTION_MS,
+      minSpeechMs: VOICE_VAD_MIN_SPEECH_MS,
+      preSpeechPadMs: VOICE_VAD_PRESPEECH_PAD_MS,
+      getStream: sharedGetStream,
+      pauseStream: async () => {},
+      resumeStream: async () => sharedGetStream(),
+      onSpeechStart: () => {
+        voiceCaptureState.silenceSince = 0;
+      },
+      onSpeechRealStart: () => {
+        voiceCaptureState.silenceSince = 0;
+      },
+      onVADMisfire: () => {
+        logDebug('voice:vad:misfire');
+      },
+      onSpeechEnd: (audio) => {
+        if (!voiceSessionActive || voiceCaptureState.mode !== 'recording') {
+          return;
+        }
+
+        const segment = audio instanceof Float32Array ? audio : null;
+        if (!segment || segment.length <= 0) {
+          return;
+        }
+
+        void stopVoiceCapture({
+          transcribe: true,
+          reason: 'vad_speech_end',
+          keepSession: true,
+          vadAudioSegment: segment
+        });
+      }
+    });
+
+    voiceCaptureState.vad = vadInstance;
+    return vadInstance;
+  }
+
+  function updateVoiceReplyTextSyncFrame() {
+    const messageId = String(voiceReplySyncState.messageId || '').trim();
+    const audio = voiceReplySyncState.audio;
+    const fullText = String(voiceReplySyncState.fullText || '');
+    if (!messageId || !(audio instanceof Audio) || !fullText) {
+      stopVoiceReplyTextSync();
+      return;
+    }
+
+    const message = getChatMessageById(messageId);
+    if (!message) {
+      stopVoiceReplyTextSync();
+      return;
+    }
+
+    let progress = 0;
+    const duration = Number(audio.duration);
+    if (Number.isFinite(duration) && duration > 0) {
+      progress = Math.min(1, Math.max(0, audio.currentTime / duration));
+    } else if (voiceReplySyncState.startedAt > 0) {
+      const fallbackDurationMs = Math.max(1200, fullText.length * VOICE_REPLY_SYNC_FALLBACK_MS_PER_CHAR);
+      progress = Math.min(1, (Date.now() - voiceReplySyncState.startedAt) / fallbackDurationMs);
+    }
+
+    const nextVisibleChars = Math.max(0, Math.min(fullText.length, Math.round(fullText.length * progress)));
+    if (Number(message.audioSyncVisibleChars) !== nextVisibleChars) {
+      message.audioSyncVisibleChars = nextVisibleChars;
+      scheduleChatRender({
+        allowAutoScroll: false
+      });
+    }
+
+    if (audio.ended) {
+      delete message.audioSyncVisibleChars;
+      delete message.voiceRevealState;
+      stopVoiceReplyTextSync();
+      scheduleChatRender({
+        allowAutoScroll: false
+      });
+      return;
+    }
+
+    if (!audio.paused) {
+      voiceReplySyncState.rafId = requestAnimationFrame(updateVoiceReplyTextSyncFrame);
+    }
+  }
+
+  function beginVoiceReplyTextSync(messageRecord, audio) {
+    const record = messageRecord && typeof messageRecord === 'object' ? messageRecord : null;
+    if (!record || !(audio instanceof Audio)) {
+      return;
+    }
+
+    const fullText = String(stripEmotionTag(String(record.content || '')) || record.content || '')
+      .trim()
+      .slice(0, 4000);
+    if (!fullText) {
+      return;
+    }
+
+    stopVoiceReplyTextSync();
+    record.voiceRevealState = 'playing';
+    record.audioSyncVisibleChars = 0;
+    voiceReplySyncState = {
+      messageId: String(record.id || '').trim(),
+      rafId: 0,
+      startedAt: Date.now(),
+      fullText,
+      audio
+    };
+    scheduleChatRender({
+      allowAutoScroll: false
+    });
+    voiceReplySyncState.rafId = requestAnimationFrame(updateVoiceReplyTextSyncFrame);
+  }
+
+  function releaseActiveSpeechResourcesFor(audio) {
+    if (voiceReplySyncState.audio === audio) {
+      stopVoiceReplyTextSync();
+    }
+
+    if (activeTtsAudio === audio) {
+      activeTtsAudio.src = '';
+      activeTtsAudio = null;
+    }
+
+    if (activeTtsObjectUrl) {
+      URL.revokeObjectURL(activeTtsObjectUrl);
+      activeTtsObjectUrl = '';
+    }
+  }
+
+  async function speakAssistantReply(options = {}) {
+    const messageRecord =
+      options?.message && typeof options.message === 'object'
+        ? options.message
+        : null;
+    const rawText =
+      messageRecord && typeof messageRecord.content === 'string'
+        ? messageRecord.content
+        : typeof options?.text === 'string'
+          ? options.text
+          : typeof options === 'string'
+            ? options
+            : '';
+    const content = String(stripEmotionTag(String(rawText || '')) || rawText || '')
+      .trim()
+      .slice(0, 4000);
+    if (!content || !hasOpenAiSpeechCredentialConfigured()) {
+      return false;
+    }
+
+    const { apiKey } = await getSpeechAuthContext();
+    const ttsVoice = getConfiguredVoiceTtsVoice();
+    const ttsSpeed = getConfiguredVoiceTtsSpeed();
+    const audioBlob = await aiProviderService.synthesizeOpenAiSpeech({
+      apiKey,
+      model: VOICE_TTS_MODEL,
+      voice: ttsVoice,
+      speed: ttsSpeed,
+      format: VOICE_TTS_FORMAT,
+      input: content
+    });
+
+    if (!(audioBlob instanceof Blob) || audioBlob.size <= 0) {
+      throw new Error('No se pudo sintetizar audio de respuesta.');
+    }
+
+    stopAssistantSpeechPlayback();
+    if (messageRecord) {
+      messageRecord.voiceRevealState = 'waiting';
+      messageRecord.audioSyncVisibleChars = 0;
+      scheduleChatRender({
+        allowAutoScroll: false
+      });
+    }
+
+    activeTtsObjectUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(activeTtsObjectUrl);
+    activeTtsAudio = audio;
+
+    const playbackPromise = new Promise((resolve, reject) => {
+      audio.addEventListener(
+        'play',
+        () => {
+          if (messageRecord) {
+            beginVoiceReplyTextSync(messageRecord, audio);
+          }
+        },
+        { once: true }
+      );
+
+      audio.addEventListener(
+        'ended',
+        () => {
+          if (messageRecord) {
+            delete messageRecord.audioSyncVisibleChars;
+            delete messageRecord.voiceRevealState;
+            scheduleChatRender({
+              allowAutoScroll: false
+            });
+          }
+          releaseActiveSpeechResourcesFor(audio);
+          resolve(true);
+        },
+        { once: true }
+      );
+
+      audio.addEventListener(
+        'error',
+        () => {
+          if (messageRecord) {
+            delete messageRecord.audioSyncVisibleChars;
+            delete messageRecord.voiceRevealState;
+            scheduleChatRender({
+              allowAutoScroll: false
+            });
+          }
+          releaseActiveSpeechResourcesFor(audio);
+          reject(new Error('No se pudo reproducir respuesta en voz.'));
+        },
+        { once: true }
+      );
+    });
+
+    try {
+      await audio.play();
+    } catch (error) {
+      releaseActiveSpeechResourcesFor(audio);
+      throw error instanceof Error ? error : new Error('No se pudo reproducir respuesta en voz.');
+    }
+    if (options?.awaitEnd === true) {
+      return playbackPromise;
+    }
+
+    void playbackPromise.catch(() => {});
+    return true;
+  }
+
+  async function startVoiceCapture(options = {}) {
+    if (voiceCaptureState.mode !== 'idle') {
+      return false;
+    }
+
+    if (isGeneratingChat) {
+      const interrupted = await interruptActiveChatTurn({
+        reason: String(options?.source || 'voice_input').trim() || 'voice_input'
+      });
+      if (!interrupted) {
+        setStatus(chatStatus, 'No se pudo interrumpir la respuesta actual para escuchar nueva voz.', true);
+        return false;
+      }
+    }
+
+    if (!hasOpenAiSpeechCredentialConfigured()) {
+      setStatus(chatStatus, 'Voice no disponible: configura API key de OpenAI en AI Models.', true);
+      return false;
+    }
+
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      setStatus(chatStatus, 'Microfono no soportado en este navegador.', true);
+      return false;
+    }
+
+    if (typeof MediaRecorder !== 'function') {
+      setStatus(chatStatus, 'Grabacion de voz no soportada en este navegador.', true);
+      return false;
+    }
+
+    const browserPermissionBefore = await readBrowserMicrophonePermissionState();
+    const reusingOpenStream = hasLiveVoiceMediaStream(voiceCaptureState.mediaStream);
+    logInfo('voice:capture:start', {
+      browserPermissionBefore,
+      visibility: document.visibilityState,
+      hasFocus: document.hasFocus(),
+      isSecureContext: window.isSecureContext,
+      sendMode: resolveChatSendMode(),
+      source: String(options?.source || '').trim() || 'unknown',
+      voiceSessionActive,
+      reusedStream: reusingOpenStream
+    });
+    setStatus(
+      chatStatus,
+      reusingOpenStream ? 'Microfono activo. Iniciando escucha...' : 'Activando microfono...',
+      false,
+      { loading: true }
+    );
+
+    let stream = reusingOpenStream ? voiceCaptureState.mediaStream : null;
+    if (!stream) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+      } catch (error) {
+        const detail = classifyMicrophoneAccessError(error);
+        if (detail.permissionState) {
+          await setMicrophonePermissionState(detail.permissionState);
+        }
+        const browserPermissionAfter = await readBrowserMicrophonePermissionState();
+        logWarn('voice:capture:failed', {
+          code: detail.code,
+          name: detail.name,
+          rawMessage: detail.rawMessage,
+          browserPermissionBefore,
+          browserPermissionAfter
+        });
+        const shouldFallback = shouldUseMicrophonePermissionTabFallback(
+          detail,
+          browserPermissionBefore,
+          browserPermissionAfter
+        );
+        if (shouldFallback) {
+          const opened = await openMicrophonePermissionHelperTab({
+            source: 'voice_capture'
+          });
+          if (opened) {
+            setStatus(
+              chatStatus,
+              'Chrome no mostro el popup de microfono en side panel. Se abrio una pestana auxiliar para autorizar.',
+              true
+            );
+            return false;
+          }
+        }
+        setStatus(chatStatus, [detail.userMessage, detail.hint].filter(Boolean).join(' '), true);
+        return false;
+      }
+
+      await setMicrophonePermissionState('granted');
+      voiceCaptureState.mediaStream = stream;
+    }
+
+    const mimeTypeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+    const mimeType = mimeTypeCandidates.find((item) => {
+      try {
+        return typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function'
+          ? MediaRecorder.isTypeSupported(item)
+          : false;
+      } catch (_) {
+        return false;
+      }
+    });
+
+    let recorder;
+    try {
+      recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    } catch (error) {
+      releaseVoiceSessionResources();
+      setStatus(chatStatus, 'No se pudo iniciar grabacion de audio.', true);
+      return false;
+    }
+
+    let vadEngine = null;
+    let usingVad = false;
+    try {
+      vadEngine = await ensureVoiceVadEngine();
+      if (vadEngine && typeof vadEngine.start === 'function') {
+        await vadEngine.start();
+        usingVad = true;
+      }
+    } catch (error) {
+      logWarn('voice:vad:init_failed', {
+        message: error instanceof Error ? error.message : String(error || '')
+      });
+      usingVad = false;
+    }
+
+    const streamId = String(stream?.id || '').trim();
+    let audioContext = null;
+    let analyser = null;
+    let sourceNode = null;
+    let sampleBuffer = null;
+
+    if (!usingVad && typeof AudioContext === 'function') {
+      const hasReusableGraph =
+        Boolean(voiceCaptureState.audioContext) &&
+        Boolean(voiceCaptureState.analyser) &&
+        Boolean(voiceCaptureState.sourceNode) &&
+        voiceCaptureState.sampleBuffer instanceof Float32Array &&
+        voiceCaptureState.graphStreamId === streamId;
+
+      audioContext = voiceCaptureState.audioContext;
+      analyser = voiceCaptureState.analyser;
+      sourceNode = voiceCaptureState.sourceNode;
+      sampleBuffer = voiceCaptureState.sampleBuffer;
+
+      if (!hasReusableGraph) {
+        cleanupVoiceCaptureGraph();
+        try {
+          audioContext = new AudioContext();
+          analyser = audioContext.createAnalyser();
+          analyser.fftSize = 2048;
+          analyser.smoothingTimeConstant = 0.1;
+          sourceNode = audioContext.createMediaStreamSource(stream);
+          sourceNode.connect(analyser);
+          sampleBuffer = new Float32Array(analyser.fftSize);
+        } catch (_) {
+          audioContext = null;
+          analyser = null;
+          sourceNode = null;
+          sampleBuffer = null;
+        }
+      } else if (audioContext && audioContext.state === 'suspended') {
+        try {
+          await audioContext.resume();
+        } catch (_) {
+          // Ignore audio context resume failures.
+        }
+      }
+    } else {
+      cleanupVoiceCaptureGraph();
+    }
+
+    clearVoiceCaptureTimers();
+    voiceCaptureState.mode = 'recording';
+    voiceCaptureState.mediaStream = stream;
+    voiceCaptureState.mediaRecorder = recorder;
+    voiceCaptureState.vad = vadEngine || voiceCaptureState.vad;
+    voiceCaptureState.usingVad = usingVad;
+    voiceCaptureState.chunks = [];
+    voiceCaptureState.audioContext = audioContext;
+    voiceCaptureState.analyser = analyser;
+    voiceCaptureState.sourceNode = sourceNode;
+    voiceCaptureState.sampleBuffer = sampleBuffer;
+    voiceCaptureState.graphStreamId = streamId;
+    voiceCaptureState.silenceSince = 0;
+    voiceCaptureState.startedAt = Date.now();
+
+    recorder.addEventListener('dataavailable', (event) => {
+      if (voiceCaptureState.mediaRecorder !== recorder) {
+        return;
+      }
+      const chunk = event?.data;
+      if (chunk instanceof Blob && chunk.size > 0) {
+        voiceCaptureState.chunks.push(chunk);
+      }
+    });
+
+    try {
+      if (VOICE_MEDIA_RECORDER_TIMESLICE_MS > 0) {
+        recorder.start(VOICE_MEDIA_RECORDER_TIMESLICE_MS);
+      } else {
+        recorder.start();
+      }
+    } catch (_) {
+      releaseVoiceSessionResources();
+      setStatus(chatStatus, 'No se pudo iniciar la grabacion.', true);
+      return false;
+    }
+    void startVoiceButtonMeter(stream);
+
+    if (!usingVad) {
+      const canAutoStopBySilence = Boolean(voiceCaptureState.analyser && voiceCaptureState.sampleBuffer);
+      const monitorSilence = () => {
+        if (voiceCaptureState.mode !== 'recording') {
+          return;
+        }
+        const analyserNode = voiceCaptureState.analyser;
+        const buffer = voiceCaptureState.sampleBuffer;
+        if (!analyserNode || !buffer) {
+          return;
+        }
+
+        analyserNode.getFloatTimeDomainData(buffer);
+        let energy = 0;
+        for (let index = 0; index < buffer.length; index += 1) {
+          const sample = buffer[index];
+          energy += sample * sample;
+        }
+        const rms = Math.sqrt(energy / buffer.length);
+        const now = Date.now();
+
+        if (rms < VOICE_SILENCE_RMS_THRESHOLD) {
+          if (!voiceCaptureState.silenceSince) {
+            voiceCaptureState.silenceSince = now;
+          }
+
+          if (
+            canAutoStopBySilence &&
+            now - voiceCaptureState.startedAt >= VOICE_MIN_ACTIVE_RECORDING_MS &&
+            now - voiceCaptureState.silenceSince >= VOICE_SILENCE_HOLD_MS
+          ) {
+            void stopVoiceCapture({
+              transcribe: true,
+              reason: 'silence',
+              keepSession: true
+            });
+            return;
+          }
+        } else {
+          voiceCaptureState.silenceSince = 0;
+        }
+
+        voiceCaptureState.rafId = requestAnimationFrame(monitorSilence);
+      };
+
+      voiceCaptureState.rafId = requestAnimationFrame(monitorSilence);
+    }
+
+    voiceCaptureState.maxStopTimer = window.setTimeout(() => {
+      void stopVoiceCapture({
+        transcribe: true,
+        reason: 'timeout',
+        keepSession: true
+      });
+    }, VOICE_AUTO_STOP_MAX_MS);
+
+    renderChatSendButtonState();
+    setStatus(
+      chatStatus,
+      usingVad
+        ? 'Escucha por voz activa (VAD). Se enviara automaticamente al terminar de hablar.'
+        : 'Escucha por silencio iniciada. Se enviara en cuanto detecte pausa.',
+      false,
+      { loading: true }
+    );
+    return true;
+  }
+
+  async function stopVoiceCapture(options = {}) {
+    const transcribe = options.transcribe !== false;
+    const preserveStatus = options.preserveStatus === true;
+    const keepSession = options.keepSession === true || voiceSessionActive;
+    const stopReason = String(options?.reason || '').trim().toLowerCase();
+    const vadAudioSegment = options?.vadAudioSegment instanceof Float32Array ? options.vadAudioSegment : null;
+    if (voiceCaptureState.mode !== 'recording') {
+      return false;
+    }
+
+    const recorder = voiceCaptureState.mediaRecorder;
+    const stream = voiceCaptureState.mediaStream;
+    const vadEngine = voiceCaptureState.vad;
+
+    clearVoiceCaptureTimers();
+    stopVoiceButtonMeter();
+    voiceCaptureState.mode = transcribe ? 'transcribing' : 'idle';
+    renderChatSendButtonState();
+
+    if (vadEngine && typeof vadEngine.pause === 'function') {
+      try {
+        await vadEngine.pause();
+      } catch (_) {
+        // Ignore VAD pause failures.
+      }
+    }
+
+    if (recorder && recorder.state !== 'inactive') {
+      await new Promise((resolve) => {
+        const finish = () => resolve(true);
+        recorder.addEventListener('stop', finish, { once: true });
+        try {
+          recorder.requestData();
+        } catch (_) {
+          // Ignore requestData failures before stop.
+        }
+        try {
+          recorder.stop();
+        } catch (_) {
+          resolve(true);
+        }
+      });
+    }
+
+    if (voiceCaptureState.mediaRecorder === recorder) {
+      voiceCaptureState.mediaRecorder = null;
+    }
+    if (!keepSession) {
+      if (vadEngine && typeof vadEngine.destroy === 'function') {
+        try {
+          await vadEngine.destroy();
+        } catch (_) {
+          // Ignore VAD destroy failures.
+        }
+      }
+      voiceCaptureState.vad = null;
+      voiceCaptureState.usingVad = false;
+      cleanupVoiceCaptureGraph();
+      stopVoiceCaptureTracks(stream);
+      voiceCaptureState.mediaStream = null;
+    }
+
+    if (!transcribe) {
+      voiceCaptureState.mode = 'idle';
+      voiceCaptureState.chunks = [];
+      voiceCaptureState.silenceSince = 0;
+      voiceCaptureState.startedAt = 0;
+      renderChatSendButtonState();
+      if (!preserveStatus) {
+        setStatus(chatStatus, keepSession ? 'Escucha por voz pausada.' : 'Grabacion cancelada.');
+      }
+      if (keepSession) {
+        scheduleVoiceSessionRestart({
+          reason: 'manual_resume'
+        });
+      }
+      return true;
+    }
+
+    const finalChunks = Array.isArray(voiceCaptureState.chunks) ? [...voiceCaptureState.chunks] : [];
+    const recorderBlob = getVoiceBlobFromChunks(finalChunks);
+    const vadBlob = createVoiceBlobFromVadAudio(vadAudioSegment);
+    const preferVadBlob = Boolean(vadBlob) && stopReason.includes('vad');
+
+    let primaryBlob = preferVadBlob ? vadBlob : recorderBlob;
+    let fallbackBlob = preferVadBlob ? recorderBlob : vadBlob;
+
+    const primaryTooSmall = !(primaryBlob instanceof Blob) || primaryBlob.size < VOICE_MIN_TRANSCRIBE_BLOB_BYTES;
+    if (primaryTooSmall && fallbackBlob instanceof Blob && fallbackBlob.size >= VOICE_MIN_TRANSCRIBE_BLOB_BYTES) {
+      primaryBlob = fallbackBlob;
+      fallbackBlob = null;
+    }
+
+    voiceCaptureState.chunks = [];
+    if (!(primaryBlob instanceof Blob) || primaryBlob.size <= 0) {
+      voiceCaptureState.mode = 'idle';
+      voiceCaptureState.silenceSince = 0;
+      voiceCaptureState.startedAt = 0;
+      renderChatSendButtonState();
+      setStatus(chatStatus, 'No se detecto audio valido.', true);
+      if (keepSession) {
+        scheduleVoiceSessionRestart({
+          reason: 'empty_audio',
+          delayMs: VOICE_SESSION_RESTART_AFTER_ERROR_MS
+        });
+      }
+      return false;
+    }
+
+    logInfo('voice:transcribe:blob_selected', {
+      reason: stopReason || 'manual',
+      primaryType: String(primaryBlob.type || ''),
+      primarySize: Number(primaryBlob.size) || 0,
+      fallbackType: fallbackBlob instanceof Blob ? String(fallbackBlob.type || '') : '',
+      fallbackSize: fallbackBlob instanceof Blob ? Number(fallbackBlob.size) || 0 : 0,
+      usingVad: voiceCaptureState.usingVad
+    });
+
+    setStatus(chatStatus, 'Transcribiendo audio...', false, { loading: true });
+    try {
+      let transcript = await transcribeVoiceBlob(primaryBlob);
+      if (!transcript && fallbackBlob instanceof Blob && fallbackBlob.size > 0) {
+        transcript = await transcribeVoiceBlob(fallbackBlob);
+      }
+      voiceCaptureState.mode = 'idle';
+      voiceCaptureState.silenceSince = 0;
+      voiceCaptureState.startedAt = 0;
+      renderChatSendButtonState();
+
+      if (!transcript) {
+        setStatus(chatStatus, 'No se pudo transcribir el audio.', true);
+        if (keepSession) {
+          scheduleVoiceSessionRestart({
+            reason: 'empty_transcript',
+            delayMs: VOICE_SESSION_RESTART_AFTER_ERROR_MS
+          });
+        }
+        return false;
+      }
+
+      chatInput.value = transcript;
+      updateChatInputSize();
+      setStatus(chatStatus, 'Mensaje de voz transcrito. Enviando...');
+      await sendChatMessage({
+        source: 'voice',
+        allowInterrupt: true,
+        awaitVoicePlayback: keepSession
+      });
+      if (keepSession) {
+        scheduleVoiceSessionRestart({
+          reason: 'next_turn'
+        });
+      }
+      return true;
+    } catch (error) {
+      const canRetryWithFallback =
+        fallbackBlob instanceof Blob &&
+        fallbackBlob.size > 0 &&
+        isCorruptedOrUnsupportedAudioError(error);
+      if (canRetryWithFallback) {
+        try {
+          const retryTranscript = await transcribeVoiceBlob(fallbackBlob);
+          voiceCaptureState.mode = 'idle';
+          voiceCaptureState.silenceSince = 0;
+          voiceCaptureState.startedAt = 0;
+          renderChatSendButtonState();
+          if (!retryTranscript) {
+            throw new Error('No se pudo transcribir el audio.');
+          }
+          chatInput.value = retryTranscript;
+          updateChatInputSize();
+          setStatus(chatStatus, 'Mensaje de voz transcrito. Enviando...');
+          await sendChatMessage({
+            source: 'voice',
+            allowInterrupt: true,
+            awaitVoicePlayback: keepSession
+          });
+          if (keepSession) {
+            scheduleVoiceSessionRestart({
+              reason: 'next_turn'
+            });
+          }
+          return true;
+        } catch (retryError) {
+          error = retryError;
+        }
+      }
+
+      voiceCaptureState.mode = 'idle';
+      voiceCaptureState.silenceSince = 0;
+      voiceCaptureState.startedAt = 0;
+      renderChatSendButtonState();
+      const message = error instanceof Error ? error.message : 'No se pudo transcribir el audio.';
+      setStatus(chatStatus, message, true);
+      if (keepSession) {
+        scheduleVoiceSessionRestart({
+          reason: 'transcribe_error',
+          delayMs: VOICE_SESSION_RESTART_AFTER_ERROR_MS
+        });
+      }
+      return false;
+    }
+  }
+
+  async function handleVoiceSendButtonClick() {
+    if (voiceCaptureState.mode === 'transcribing') {
+      if (voiceSessionActive) {
+        setVoiceSessionActive(false, {
+          reason: 'tap_stop_transcribing'
+        });
+        releaseVoiceSessionResources({
+          preserveMode: true
+        });
+        setStatus(chatStatus, 'Escucha por voz desactivada.');
+      }
+      return;
+    }
+
+    if (voiceCaptureState.mode === 'recording') {
+      setVoiceSessionActive(false, {
+        reason: 'tap_stop_recording'
+      });
+      await stopVoiceCapture({
+        transcribe: false,
+        reason: 'tap_stop'
+      });
+      return;
+    }
+
+    if (voiceSessionActive) {
+      setVoiceSessionActive(false, {
+        reason: 'tap_stop_idle'
+      });
+      releaseVoiceSessionResources();
+      if (isGeneratingChat) {
+        void interruptActiveChatTurn({
+          reason: 'voice_session_stop'
+        });
+      }
+      setStatus(chatStatus, 'Escucha por voz desactivada.');
+      return;
+    }
+
+    setVoiceSessionActive(true, {
+      reason: 'tap_start',
+      stopPlayback: false
+    });
+    const started = await startVoiceCapture({
+      source: 'voice_button'
+    });
+    if (!started) {
+      setVoiceSessionActive(false, {
+        reason: 'voice_start_failed'
+      });
+      releaseVoiceSessionResources();
+    }
+  }
+
   function openToolMenu() {
     if (!chatToolMenu || !chatToolBtn) {
       return;
@@ -5479,6 +7434,7 @@ export function initPanelApp() {
 
     chatInput.style.height = `${Math.max(next, minimum)}px`;
     chatInput.style.overflowY = chatInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
+    renderChatSendButtonState();
   }
 
   function createChatMessageNode(message) {
@@ -5487,9 +7443,18 @@ export function initPanelApp() {
 
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble';
-    const visibleText = message.role === 'assistant' ? stripEmotionTag(message.content) : message.content;
+    const baseText = message.role === 'assistant' ? stripEmotionTag(message.content) : message.content;
+    const isVoiceRevealWaiting = message.role === 'assistant' && String(message?.voiceRevealState || '') === 'waiting';
+    const isVoiceRevealPlaying = message.role === 'assistant' && String(message?.voiceRevealState || '') === 'playing';
+    const visibleChars = Math.max(0, Number(message?.audioSyncVisibleChars) || 0);
+    const hasVoiceRevealChars = isVoiceRevealPlaying && Number.isFinite(Number(message?.audioSyncVisibleChars));
+    const visibleText = isVoiceRevealWaiting
+      ? ''
+      : hasVoiceRevealChars
+        ? String(baseText || '').slice(0, visibleChars)
+        : baseText;
 
-    if (message.role === 'assistant' && message.pending && !visibleText) {
+    if (message.role === 'assistant' && ((message.pending && !visibleText) || isVoiceRevealWaiting)) {
       const loader = document.createElement('span');
       loader.className = 'chat-inline-loader chat-inline-loader--solo';
       loader.setAttribute('aria-hidden', 'true');
@@ -5501,7 +7466,11 @@ export function initPanelApp() {
       bubble.append(loader, label);
     } else {
       if (message.role === 'assistant') {
-        renderMarkdownInto(bubble, visibleText || message.content);
+        if (hasVoiceRevealChars) {
+          bubble.textContent = visibleText || '';
+        } else {
+          renderMarkdownInto(bubble, visibleText || message.content);
+        }
       } else {
         bubble.textContent = visibleText || message.content;
       }
@@ -5798,9 +7767,28 @@ export function initPanelApp() {
     startRandomEmotionCycle({ immediate: true });
   }
 
-  function buildActiveTabsSystemContext(limit = 10) {
+  function buildActiveTabsSystemContext(limit = 20) {
     const tabs = Array.isArray(tabContextSnapshot?.tabs) ? tabContextSnapshot.tabs : [];
-    const trimmed = tabs.slice(0, limit);
+    const ordered = tabs
+      .slice()
+      .sort((left, right) => {
+        const leftId = Number(left?.tabId) || -1;
+        const rightId = Number(right?.tabId) || -1;
+        const leftActive = leftId === tabContextSnapshot.activeTabId ? 1 : 0;
+        const rightActive = rightId === tabContextSnapshot.activeTabId ? 1 : 0;
+        if (leftActive !== rightActive) {
+          return rightActive - leftActive;
+        }
+
+        const leftAccess = Number(left?.details?.temporal?.lastAccessedAt) || Number(left?.updatedAt) || 0;
+        const rightAccess = Number(right?.details?.temporal?.lastAccessedAt) || Number(right?.updatedAt) || 0;
+        if (leftAccess !== rightAccess) {
+          return rightAccess - leftAccess;
+        }
+
+        return leftId - rightId;
+      });
+    const trimmed = ordered.slice(0, limit);
 
     if (!trimmed.length) {
       return 'Navegacion activa (tabs abiertas): sin tabs detectadas.';
@@ -5815,7 +7803,9 @@ export function initPanelApp() {
       return `${index + 1}. [tabId:${tabId}] ${title}${marker} | site:${site} | ${url}`;
     });
 
-    return `Navegacion activa (tabs abiertas):\n${lines.join('\n')}`;
+    const omitted = Math.max(0, tabs.length - trimmed.length);
+    const footer = omitted > 0 ? `\n... ${omitted} tabs mas no listadas.` : '';
+    return `Navegacion activa (tabs abiertas):\n${lines.join('\n')}${footer}`;
   }
 
   function buildRecentHistorySystemContext(limit = 10) {
@@ -6718,7 +8708,7 @@ export function initPanelApp() {
       '- browser.openNewTab (args: url, active)',
       '- browser.navigateTab (args: tabId opcional o urlContains/titleContains/query, url requerida, active)',
       '- browser.focusTab (args: tabId o urlContains/titleContains)',
-      '- browser.closeTab (args: tabId o url/urlContains/titleContains, preventActive)',
+      '- browser.closeTab (args: tabId o url/urlContains/titleContains/query, preventActive; soporta closeAll/allMatches/maxMatches para cerrar multiples por lenguaje natural, ej: "todas las de google" o "todas las de retool")',
       '- browser.closeNonProductivityTabs (args: dryRun, keepPinned, keepActive, onlyCurrentWindow)',
       '- whatsapp.getInbox (args: limit)',
       '- whatsapp.openChat (args: query|name|chat|phone|chatIndex, tabId opcional)',
@@ -6755,6 +8745,7 @@ export function initPanelApp() {
         ? ['- integration.call (args: name requerido, input objeto opcional)']
         : ['- integration.call requiere registrar Custom Tools Schema en Settings > Apps & Integrations.']),
       'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
+      'Si el usuario pide cerrar/focar una tab y hay duda de coincidencia, usa browser.listTabs y luego ejecuta browser.closeTab/browser.focusTab con criterios precisos.',
       'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
       'Para preguntas de CRM/ERP, usa db.refreshSchema si falta contexto y luego db.queryRead/db.queryWrite segun corresponda.',
       'smtp.sendMail usa bridge interno en background y transporte SMTP configurable (http_agent o native_host).',
@@ -7280,6 +9271,13 @@ export function initPanelApp() {
     const calls = Array.isArray(toolCalls)
       ? toolCalls.slice(0, getSystemVariableNumber('chat.maxLocalToolCalls', MAX_LOCAL_TOOL_CALLS))
       : [];
+    const browserActionsThatMutateTabs = new Set([
+      'openNewTab',
+      'navigateTab',
+      'focusTab',
+      'closeTab',
+      'closeNonProductivityTabs'
+    ]);
     const results = [];
 
     logDebug('executeLocalToolCalls:start', {
@@ -7322,6 +9320,9 @@ export function initPanelApp() {
             result: response?.result,
             error: response?.error || ''
           });
+          if (response?.ok === true && browserActionsThatMutateTabs.has(browserAction)) {
+            await tabContextService.requestSnapshot();
+          }
           logDebug('executeLocalToolCalls:result', {
             tool,
             response
@@ -7844,6 +9845,14 @@ export function initPanelApp() {
   }
 
   async function streamChatResponse(userQuery, onChunk, options = {}) {
+    if (selectedChatTool === 'chat' && options.refreshTabSnapshot !== false) {
+      try {
+        await tabContextService.requestSnapshot();
+      } catch (_) {
+        // Keep chat flow resilient if snapshot refresh fails.
+      }
+    }
+
     const temperature = Number(settings[PREFERENCE_KEYS.AI_TEMPERATURE] ?? DEFAULT_SETTINGS[PREFERENCE_KEYS.AI_TEMPERATURE]);
     const safeTemp = Number.isFinite(temperature) ? temperature : DEFAULT_SETTINGS[PREFERENCE_KEYS.AI_TEMPERATURE];
     const conversation = await buildChatConversation(userQuery);
@@ -7883,7 +9892,8 @@ export function initPanelApp() {
       messages,
       temperature: safeTemp,
       apiKey,
-      onChunk: handleChunk
+      onChunk: handleChunk,
+      signal: options.signal || null
     });
 
     return {
@@ -7892,21 +9902,46 @@ export function initPanelApp() {
     };
   }
 
-  async function sendChatMessage() {
-    if (isGeneratingChat) {
-      return;
-    }
-
+  async function sendChatMessage(options = {}) {
+    const allowInterrupt = options?.allowInterrupt === true;
+    const awaitVoicePlayback = options?.awaitVoicePlayback === true;
+    const source = options?.source === 'voice' ? 'voice' : 'text';
     const content = chatInput.value.trim();
     const attachmentsForTurn = pendingConversationAttachments.slice(0, MAX_CHAT_ATTACHMENTS_PER_TURN);
     if (!content && !attachmentsForTurn.length) {
       return;
     }
 
+    if (isGeneratingChat) {
+      if (!allowInterrupt) {
+        return;
+      }
+
+      const interrupted = await interruptActiveChatTurn({
+        reason: `${source}_new_message`
+      });
+      if (!interrupted) {
+        setStatus(chatStatus, 'No se pudo interrumpir la respuesta activa.', true);
+        return;
+      }
+    }
+
+    if (source === 'text' && voiceSessionActive) {
+      setVoiceSessionActive(false, {
+        reason: 'text_message'
+      });
+      releaseVoiceSessionResources({
+        preserveMode: voiceCaptureState.mode === 'transcribing'
+      });
+    }
+
     closeToolMenu();
+    stopAssistantSpeechPlayback();
     isGeneratingChat = true;
-    chatSendBtn.disabled = true;
+    renderChatSendButtonState();
     chatResetBtn.disabled = true;
+    const generationAbortController = new AbortController();
+    activeChatAbortController = generationAbortController;
     let assistantMessage = null;
 
     try {
@@ -7994,22 +10029,50 @@ export function initPanelApp() {
         const imageProfile = imageResult?.profile && typeof imageResult.profile === 'object' ? imageResult.profile : null;
         const imageModel = imageProfile ? `${imageProfile.name} · ${imageProfile.model}` : 'modelo de imagen';
         setStatus(chatStatus, `Imagen generada con ${imageModel}.`);
+        if (source === 'voice') {
+          const playbackTask = speakAssistantReply({
+            message: assistantMessage,
+            awaitEnd: awaitVoicePlayback
+          }).catch((error) => {
+            const message = error instanceof Error ? error.message : 'No se pudo reproducir respuesta en voz.';
+            setStatus(chatStatus, message, true);
+            return false;
+          });
+          if (awaitVoicePlayback) {
+            await playbackTask;
+          }
+        }
         setBrandEmotion('excited');
         return;
       }
 
-      const streamPayload = await streamChatResponse(contentForModel || content, (chunk) => {
-        if (!assistantMessage || !chunk) {
-          return;
-        }
+      const shouldSyncVoiceText = source === 'voice';
+      let streamedAssistantText = '';
+      const streamPayload = await streamChatResponse(
+        contentForModel || content,
+        (chunk) => {
+          if (!assistantMessage || !chunk) {
+            return;
+          }
 
-        assistantMessage.pending = false;
-        assistantMessage.content += chunk;
-        setStatus(chatStatus, 'Escribiendo respuesta...', false, { loading: true });
-        scheduleChatRender({
-          allowAutoScroll: false
-        });
-      });
+          streamedAssistantText += chunk;
+          if (shouldSyncVoiceText) {
+            assistantMessage.pending = true;
+            setStatus(chatStatus, 'Preparando respuesta de voz...', false, { loading: true });
+            return;
+          }
+
+          assistantMessage.pending = false;
+          assistantMessage.content += chunk;
+          setStatus(chatStatus, 'Escribiendo respuesta...', false, { loading: true });
+          scheduleChatRender({
+            allowAutoScroll: false
+          });
+        },
+        {
+          signal: generationAbortController.signal
+        }
+      );
 
       const output = String(streamPayload?.output || '').trim();
       const contextUsed = Array.isArray(streamPayload?.contextUsed)
@@ -8023,7 +10086,7 @@ export function initPanelApp() {
               onWarn: logWarn
             })
           : [];
-      let finalAssistantOutput = output;
+      let finalAssistantOutput = shouldSyncVoiceText ? streamedAssistantText.trim() || output : output;
 
       logDebug('sendChatMessage:model_output', {
         tool: selectedChatTool,
@@ -8058,10 +10121,18 @@ export function initPanelApp() {
           allowAutoScroll: false
         });
 
+        streamedAssistantText = '';
         const finalStream = await streamChatResponse(
           contentForModel || content,
           (chunk) => {
             if (!assistantMessage || !chunk) {
+              return;
+            }
+
+            streamedAssistantText += chunk;
+            if (shouldSyncVoiceText) {
+              assistantMessage.pending = true;
+              setStatus(chatStatus, 'Preparando respuesta final de voz...', false, { loading: true });
               return;
             }
 
@@ -8076,7 +10147,9 @@ export function initPanelApp() {
             additionalMessages: [
               { role: 'assistant', content: output },
               { role: 'user', content: followupPrompt }
-            ]
+            ],
+            refreshTabSnapshot: false,
+            signal: generationAbortController.signal
           }
         );
 
@@ -8088,7 +10161,9 @@ export function initPanelApp() {
           '```'
         ].join('\n');
 
-        finalAssistantOutput = String(finalStream?.output || '').trim() || fallbackFromTools;
+        const finalStreamOutput = String(finalStream?.output || '').trim();
+        finalAssistantOutput =
+          (shouldSyncVoiceText ? streamedAssistantText.trim() : '') || finalStreamOutput || fallbackFromTools;
         logDebug('sendChatMessage:final_after_tools', {
           outputPreview: finalAssistantOutput.slice(0, 600),
           outputLength: finalAssistantOutput.length
@@ -8099,6 +10174,14 @@ export function initPanelApp() {
       assistantMessage.content = assistantMessage.content.trim() || finalAssistantOutput.trim();
       if (!assistantMessage.content) {
         throw new Error('El provider no devolvio contenido.');
+      }
+
+      if (source === 'voice') {
+        assistantMessage.voiceRevealState = 'waiting';
+        assistantMessage.audioSyncVisibleChars = 0;
+      } else {
+        delete assistantMessage.voiceRevealState;
+        delete assistantMessage.audioSyncVisibleChars;
       }
 
       const turnMemory = await contextMemoryService.rememberChatTurn({
@@ -8126,11 +10209,38 @@ export function initPanelApp() {
       });
       await saveChatHistory();
       setStatus(chatStatus, `Respuesta generada con ${activeModel}.`);
+      if (source === 'voice') {
+        const playbackTask = speakAssistantReply({
+          message: assistantMessage,
+          awaitEnd: awaitVoicePlayback
+        }).catch((error) => {
+          const message = error instanceof Error ? error.message : 'No se pudo reproducir respuesta en voz.';
+          setStatus(chatStatus, message, true);
+          if (assistantMessage) {
+            delete assistantMessage.voiceRevealState;
+            delete assistantMessage.audioSyncVisibleChars;
+            scheduleChatRender({
+              allowAutoScroll: false
+            });
+          }
+          return false;
+        });
+        if (awaitVoicePlayback) {
+          await playbackTask;
+        }
+      }
     } catch (error) {
+      const aborted = isAbortLikeError(error);
       syncChatBottomReserve({
         streaming: false
       });
-      if (assistantMessage && !assistantMessage.content.trim()) {
+
+      if (aborted && assistantMessage) {
+        chatHistory = chatHistory.filter((msg) => msg.id !== assistantMessage.id);
+        renderChatMessages({
+          allowAutoScroll: false
+        });
+      } else if (assistantMessage && !assistantMessage.content.trim()) {
         chatHistory = chatHistory.filter((msg) => msg.id !== assistantMessage.id);
         syncChatBottomReserve({
           streaming: false
@@ -8145,17 +10255,24 @@ export function initPanelApp() {
         await saveChatHistory();
       }
 
-      const message = error instanceof Error ? error.message : 'Error inesperado al generar la respuesta.';
-      setStatus(chatStatus, message, true);
-      setBrandEmotion('disappointed');
-      window.setTimeout(() => {
-        if (!isGeneratingChat) {
-          startRandomEmotionCycle({ immediate: false });
-        }
-      }, 1200);
+      if (aborted) {
+        setStatus(chatStatus, 'Respuesta interrumpida.');
+      } else {
+        const message = error instanceof Error ? error.message : 'Error inesperado al generar la respuesta.';
+        setStatus(chatStatus, message, true);
+        setBrandEmotion('disappointed');
+        window.setTimeout(() => {
+          if (!isGeneratingChat) {
+            startRandomEmotionCycle({ immediate: false });
+          }
+        }, 1200);
+      }
     } finally {
+      if (activeChatAbortController === generationAbortController) {
+        activeChatAbortController = null;
+      }
       isGeneratingChat = false;
-      chatSendBtn.disabled = false;
+      renderChatSendButtonState();
       chatResetBtn.disabled = false;
       requestChatAutofocus(6, 60);
     }
@@ -8892,6 +11009,14 @@ export function initPanelApp() {
     };
   }
 
+  function canRunDynamicRelationsForTab(tabContext) {
+    if (!isGmailContext(tabContext)) {
+      return true;
+    }
+
+    return isGmailMessageOpenContext(tabContext);
+  }
+
   async function refreshDynamicRelationsContext(tabContext, signals, options = {}) {
     const activeTab = tabContext && typeof tabContext === 'object' ? tabContext : null;
     const safeSignals = signals && typeof signals === 'object' ? signals : { phones: [], emails: [] };
@@ -8909,6 +11034,18 @@ export function initPanelApp() {
         loading: false,
         cards: [],
         message: '',
+        isError: false
+      };
+      renderAiDynamicContext();
+      return;
+    }
+
+    if (!canRunDynamicRelationsForTab(activeTab)) {
+      dynamicRelationsContextState = {
+        signalKey,
+        loading: false,
+        cards: [],
+        message: 'En Gmail abre un correo para ejecutar relaciones.',
         isError: false
       };
       renderAiDynamicContext();
@@ -10236,7 +12373,8 @@ export function initPanelApp() {
     renderTabsContextJson();
 
     const activeTab = getActiveTabContext();
-    dynamicContextSignals = collectDynamicSignalsFromTab(activeTab);
+    const canRunDynamicRelations = canRunDynamicRelationsForTab(activeTab);
+    dynamicContextSignals = canRunDynamicRelations ? collectDynamicSignalsFromTab(activeTab) : { phones: [], emails: [] };
     void refreshDynamicRelationsContext(activeTab, dynamicContextSignals, { force: false });
 
     if (isAssistantSettingsPageVisible()) {
@@ -11056,6 +13194,8 @@ export function initPanelApp() {
     renderCrmErpDatabaseSettings({ syncInput: true });
     renderAppsIntegrationsSettings({ syncInput: true });
     renderAssistantBranding();
+    updateVoiceModeMetaLabel();
+    renderChatSendButtonState();
     syncLocationContextToBackground(panelSettings.integrations, {
       reason: 'panel_hydrate'
     });
@@ -11088,6 +13228,8 @@ export function initPanelApp() {
 
     await settingsScreenController.saveUserSettings();
     panelSettings = { ...settingsScreenController.getPanelSettings() };
+    updateVoiceModeMetaLabel();
+    renderChatSendButtonState();
     await contextMemoryService.syncIdentityProfile({
       user_name: panelSettings.displayName || ''
     });
@@ -11100,6 +13242,8 @@ export function initPanelApp() {
 
     await settingsScreenController.saveAssistantSettings();
     panelSettings = { ...settingsScreenController.getPanelSettings() };
+    updateVoiceModeMetaLabel();
+    renderChatSendButtonState();
   }
 
   function clearUserSettingsAutosaveTimer() {
@@ -11207,9 +13351,13 @@ export function initPanelApp() {
       }
 
       const nextLanguage = normalizeAssistantLanguage(settingsLanguageSelect?.value || DEFAULT_ASSISTANT_LANGUAGE);
+      const nextVoiceTtsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || VOICE_TTS_VOICE);
+      const nextVoiceTtsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value);
       const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
       const current = settingsScreenController.getPanelSettings() || {};
       const currentLanguage = normalizeAssistantLanguage(current.language || DEFAULT_ASSISTANT_LANGUAGE);
+      const currentVoiceTtsVoice = normalizeVoiceTtsVoice(current.voiceTtsVoice || VOICE_TTS_VOICE);
+      const currentVoiceTtsSpeed = normalizeVoiceTtsSpeed(current.voiceTtsSpeed);
       const currentPrompt = String(current.systemPrompt || '').trim();
 
       if (!nextPrompt) {
@@ -11217,7 +13365,12 @@ export function initPanelApp() {
         return;
       }
 
-      if (nextLanguage === currentLanguage && nextPrompt === currentPrompt) {
+      if (
+        nextLanguage === currentLanguage &&
+        nextVoiceTtsVoice === currentVoiceTtsVoice &&
+        nextVoiceTtsSpeed === currentVoiceTtsSpeed &&
+        nextPrompt === currentPrompt
+      ) {
         setStatus(settingsAssistantStatus, 'Sin cambios pendientes.');
         return;
       }
@@ -11738,8 +13891,12 @@ export function initPanelApp() {
     });
 
     settingsPermissionMicBtn?.addEventListener('click', () => {
+      logInfo('microphone:button_click', {
+        visibility: document.visibilityState,
+        hasFocus: document.hasFocus()
+      });
       setStatus(settingsIntegrationsStatus, 'Solicitando acceso a microfono...', false, { loading: true });
-      void requestMicrophonePermissionAndSync().catch((error) => {
+      void requestMicrophonePermissionAndSync({ source: 'settings_button' }).catch((error) => {
         const message = error instanceof Error ? error.message : 'No se pudo obtener permiso de microfono.';
         setStatus(settingsIntegrationsStatus, message, true);
       });
@@ -11860,8 +14017,30 @@ export function initPanelApp() {
 
     settingsLanguageSelect?.addEventListener('change', () => {
       settingsScreenController?.handleLanguageChange();
+      updateVoiceModeMetaLabel();
       scheduleAssistantSettingsAutosave({
         delayMs: 200
+      });
+    });
+
+    settingsVoiceTtsVoiceSelect?.addEventListener('change', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 220
+      });
+    });
+
+    settingsVoiceTtsSpeedInput?.addEventListener('input', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 320
+      });
+    });
+
+    settingsVoiceTtsSpeedInput?.addEventListener('change', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 180
       });
     });
 
@@ -11986,6 +14165,22 @@ export function initPanelApp() {
     });
 
     chatInput?.addEventListener('input', () => {
+      if (voiceSessionActive && String(chatInput.value || '').trim()) {
+        setVoiceSessionActive(false, {
+          reason: 'text_input'
+        });
+        if (voiceCaptureState.mode !== 'recording') {
+          releaseVoiceSessionResources({
+            preserveMode: voiceCaptureState.mode === 'transcribing'
+          });
+        }
+      }
+      if (voiceCaptureState.mode === 'recording' && String(chatInput.value || '').trim()) {
+        void stopVoiceCapture({
+          transcribe: false,
+          preserveStatus: true
+        });
+      }
       updateChatInputSize();
     });
 
@@ -11995,11 +14190,21 @@ export function initPanelApp() {
       }
 
       event.preventDefault();
-      sendChatMessage();
+      sendChatMessage({
+        source: 'text',
+        allowInterrupt: true
+      });
     });
 
     chatSendBtn?.addEventListener('click', () => {
-      sendChatMessage();
+      if (resolveChatSendMode() === 'voice') {
+        void handleVoiceSendButtonClick();
+        return;
+      }
+      sendChatMessage({
+        source: 'text',
+        allowInterrupt: true
+      });
     });
 
     dynamicSuggestionsList?.addEventListener('click', (event) => {
@@ -12144,6 +14349,23 @@ export function initPanelApp() {
     });
 
     window.addEventListener('beforeunload', () => {
+      detachRuntimeMessageListener();
+      setVoiceSessionActive(false, {
+        reason: 'beforeunload',
+        stopPlayback: false
+      });
+      if (voiceCaptureState.mode === 'recording') {
+        void stopVoiceCapture({
+          transcribe: false,
+          preserveStatus: true,
+          keepSession: false
+        });
+      } else {
+        releaseVoiceSessionResources({
+          preserveMode: voiceCaptureState.mode === 'transcribing'
+        });
+      }
+      stopAssistantSpeechPlayback();
       clearWhatsappPromptAutosaveTimer();
       clearAllSettingsAutosaveTimers();
       tabContextService.stop();
@@ -12181,6 +14403,10 @@ export function initPanelApp() {
           settingsNameInput,
           settingsBirthdayInput,
           settingsThemeModeSelect,
+          settingsVoiceModeMeta,
+          settingsVoiceTtsVoiceSelect,
+          settingsVoiceTtsSpeedInput,
+          settingsVoiceTtsSpeedValue,
           settingsLanguageSelect,
           settingsSystemPrompt,
           settingsUserStatus,
@@ -12204,6 +14430,7 @@ export function initPanelApp() {
       setStageTransitionEnabled(false);
       realignStageToScreen(app?.dataset?.screen || 'onboarding');
       renderAssistantBranding();
+      attachRuntimeMessageListener();
       wireEvents();
       setChatTool(DEFAULT_CHAT_TOOL);
       renderPendingConversationAttachments();

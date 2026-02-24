@@ -170,6 +170,233 @@
       return false;
     }
 
+    const CLOSE_QUERY_STOPWORDS = new Set([
+      'a',
+      'al',
+      'all',
+      'close',
+      'closeme',
+      'cierra',
+      'cierre',
+      'cierrame',
+      'con',
+      'de',
+      'del',
+      'el',
+      'en',
+      'la',
+      'las',
+      'los',
+      'me',
+      'mi',
+      'mis',
+      'please',
+      'por',
+      'pestana',
+      'pestanas',
+      'pestania',
+      'pestanias',
+      'tab',
+      'tabs',
+      'the',
+      'todas',
+      'todos',
+      'una',
+      'uno',
+      'y'
+    ]);
+
+    function normalizeLooseSearchText(value) {
+      return String(value || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+    }
+
+    function compactSearchText(value) {
+      return normalizeLooseSearchText(value).replace(/\s+/g, '');
+    }
+
+    function extractSearchTokens(value, maxTokens = 8) {
+      const source = normalizeLooseSearchText(value);
+      if (!source) {
+        return [];
+      }
+
+      const tokens = [];
+      const seen = new Set();
+      for (const token of source.split(/\s+/)) {
+        if (!token || token.length < 2 || CLOSE_QUERY_STOPWORDS.has(token) || seen.has(token)) {
+          continue;
+        }
+
+        seen.add(token);
+        tokens.push(token);
+        if (tokens.length >= Math.max(1, Number(maxTokens) || 8)) {
+          break;
+        }
+      }
+
+      return tokens;
+    }
+
+    function parseTabUrlDetails(tab) {
+      const rawUrl = String(tab?.url || '').trim();
+      if (!rawUrl) {
+        return {
+          host: '',
+          path: ''
+        };
+      }
+
+      try {
+        const parsed = new URL(rawUrl);
+        return {
+          host: normalizeLooseSearchText(parsed.hostname || ''),
+          path: normalizeLooseSearchText(`${parsed.pathname || ''} ${parsed.search || ''} ${parsed.hash || ''}`)
+        };
+      } catch (_) {
+        return {
+          host: '',
+          path: normalizeLooseSearchText(rawUrl)
+        };
+      }
+    }
+
+    function shouldCloseAllMatches(closeQuery, safeArgs = {}) {
+      if (
+        safeArgs.closeAll === true ||
+        safeArgs.allMatches === true ||
+        safeArgs.closeAllMatches === true ||
+        safeArgs.multiple === true
+      ) {
+        return true;
+      }
+
+      const numericMaxMatches = Number(safeArgs.maxMatches);
+      if (Number.isFinite(numericMaxMatches) && numericMaxMatches > 1) {
+        return true;
+      }
+
+      const query = normalizeLooseSearchText(closeQuery);
+      if (!query) {
+        return false;
+      }
+
+      const hasPluralHint = /\b(todas?|todos|all|varias?|many|multiple|multiples)\b/.test(query);
+      const hasTabsHint = /\b(tab|tabs|pestana|pestanas)\b/.test(query);
+      const hasGroupPattern = /\b(todas?\s+las\s+de|todos?\s+los\s+de|all\s+the)\b/.test(query);
+      return (hasPluralHint && hasTabsHint) || hasGroupPattern;
+    }
+
+    function scoreTabAgainstCloseQuery(tab, closeQuery) {
+      const rawQuery = String(closeQuery || '').trim();
+      if (!rawQuery) {
+        return 0;
+      }
+
+      const normalizedQuery = normalizeLooseSearchText(rawQuery);
+      if (!normalizedQuery) {
+        return 0;
+      }
+      const compactQuery = compactSearchText(rawQuery);
+
+      const title = normalizeLooseSearchText(tab?.title || '');
+      const site = normalizeLooseSearchText(detectSiteByUrl(tab?.url || '') || '');
+      const rawUrl = normalizeLooseSearchText(tab?.url || '');
+      const { host, path } = parseTabUrlDetails(tab);
+      const titleCompact = compactSearchText(title);
+      const siteCompact = compactSearchText(site);
+      const rawUrlCompact = compactSearchText(rawUrl);
+      const hostCompact = compactSearchText(host);
+      const pathCompact = compactSearchText(path);
+      const tokens = extractSearchTokens(rawQuery, 10);
+
+      let score = 0;
+      if (title && title.includes(normalizedQuery)) {
+        score += 85;
+      }
+      if (host && host.includes(normalizedQuery)) {
+        score += 75;
+      }
+      if (rawUrl && rawUrl.includes(normalizedQuery)) {
+        score += 55;
+      }
+      if (site && site.includes(normalizedQuery)) {
+        score += 35;
+      }
+      if (path && path.includes(normalizedQuery)) {
+        score += 25;
+      }
+      if (compactQuery) {
+        if (titleCompact.includes(compactQuery)) {
+          score += 36;
+        }
+        if (hostCompact.includes(compactQuery)) {
+          score += 32;
+        }
+        if (rawUrlCompact.includes(compactQuery)) {
+          score += 24;
+        }
+        if (siteCompact.includes(compactQuery)) {
+          score += 16;
+        }
+        if (pathCompact.includes(compactQuery)) {
+          score += 10;
+        }
+      }
+
+      if (!tokens.length) {
+        return score;
+      }
+
+      let tokenMatches = 0;
+      for (const token of tokens) {
+        let tokenScore = 0;
+        if (title.includes(token)) {
+          tokenScore = Math.max(tokenScore, 26);
+        }
+        if (host.includes(token)) {
+          tokenScore = Math.max(tokenScore, 24);
+        }
+        if (rawUrl.includes(token)) {
+          tokenScore = Math.max(tokenScore, 16);
+        }
+        if (path.includes(token)) {
+          tokenScore = Math.max(tokenScore, 12);
+        }
+        if (site.includes(token)) {
+          tokenScore = Math.max(tokenScore, 10);
+        }
+        if (tokenScore > 0) {
+          tokenMatches += 1;
+          score += tokenScore;
+        }
+      }
+
+      if (tokenMatches === tokens.length && tokenMatches > 1) {
+        score += 20;
+      }
+
+      return score;
+    }
+
+    function sortTabsByRecency(tabs) {
+      const source = Array.isArray(tabs) ? tabs.slice() : [];
+      source.sort((left, right) => {
+        const byAccess = (Number(right?.lastAccessed) || 0) - (Number(left?.lastAccessed) || 0);
+        if (byAccess) {
+          return byAccess;
+        }
+        return (Number(left?.id) || 0) - (Number(right?.id) || 0);
+      });
+      return source;
+    }
+
     async function run(action, args = {}) {
       const safeAction = String(action || '').trim();
       const safeArgs = args && typeof args === 'object' ? args : {};
@@ -478,44 +705,70 @@
       if (safeAction === 'closeTab') {
         const tabId = Number(safeArgs.tabId);
         const tabs = await queryTabs({});
-        let targetTab = null;
-
-        if (Number.isFinite(tabId) && tabId >= 0) {
-          targetTab = tabs.find((tab) => tab.id === tabId) || null;
+        const urlContains = String(safeArgs.urlContains || '').toLowerCase().trim();
+        const titleContains = String(safeArgs.titleContains || '').toLowerCase().trim();
+        const exactUrl = toSafeUrl(safeArgs.url);
+        const closeQuery = String(safeArgs.query || '').trim();
+        const preventActive = safeArgs.preventActive === true;
+        const hasValidTabId = Number.isFinite(tabId) && tabId >= 0;
+        const selectorProvided = hasValidTabId || Boolean(exactUrl || urlContains || titleContains || closeQuery);
+        if (!selectorProvided) {
+          return { ok: false, error: 'browser.closeTab requiere tabId o un selector (url/urlContains/titleContains/query).' };
         }
 
-        if (!targetTab) {
-          const urlContains = String(safeArgs.urlContains || '').toLowerCase();
-          const titleContains = String(safeArgs.titleContains || '').toLowerCase();
-          const exactUrl = toSafeUrl(safeArgs.url);
-          const closeQuery = String(safeArgs.query || '').toLowerCase().trim();
-
-          targetTab =
-            tabs.find((tab) => {
-              const title = String(tab.title || '').toLowerCase();
-              const url = String(tab.url || '').toLowerCase();
-              const byExactUrl = exactUrl ? url === exactUrl.toLowerCase() : true;
-              const byUrl = urlContains ? url.includes(urlContains) : true;
-              const byTitle = titleContains ? title.includes(titleContains) : true;
-              const byQuery = closeQuery ? title.includes(closeQuery) || url.includes(closeQuery) : true;
-              return byExactUrl && byUrl && byTitle && byQuery;
-            }) || null;
-
-          logDebug('runBrowserAction:closeTab:search', {
-            requestId,
-            criteria: {
-              tabId: Number.isFinite(tabId) ? tabId : null,
-              exactUrl: exactUrl || '',
-              urlContains,
-              titleContains,
-              query: closeQuery
-            },
-            tabCount: tabs.length,
-            tabs: summarizeTabsForLogs(tabs, 30)
+        let matchedTabs = [];
+        if (hasValidTabId) {
+          const byId = tabs.find((tab) => tab.id === tabId);
+          matchedTabs = byId ? [byId] : [];
+        } else {
+          matchedTabs = tabs.filter((tab) => {
+            const title = String(tab.title || '').toLowerCase();
+            const url = String(tab.url || '').toLowerCase();
+            const byExactUrl = exactUrl ? url === exactUrl.toLowerCase() : true;
+            const byUrl = urlContains ? url.includes(urlContains) : true;
+            const byTitle = titleContains ? title.includes(titleContains) : true;
+            return byExactUrl && byUrl && byTitle;
           });
         }
 
-        if (!targetTab || typeof targetTab.id !== 'number') {
+        if (closeQuery) {
+          const scoredMatches = matchedTabs
+            .map((tab) => ({
+              tab,
+              score: scoreTabAgainstCloseQuery(tab, closeQuery)
+            }))
+            .filter((item) => item.score > 0)
+            .sort((left, right) => {
+              if (right.score !== left.score) {
+                return right.score - left.score;
+              }
+              return (Number(right.tab?.lastAccessed) || 0) - (Number(left.tab?.lastAccessed) || 0);
+            });
+
+          if (scoredMatches.length) {
+            matchedTabs = scoredMatches.map((item) => item.tab);
+          } else if (!exactUrl && !urlContains && !titleContains && !(Number.isFinite(tabId) && tabId >= 0)) {
+            matchedTabs = [];
+          }
+        }
+
+        logDebug('runBrowserAction:closeTab:search', {
+          requestId,
+          criteria: {
+            tabId: hasValidTabId ? tabId : null,
+            exactUrl: exactUrl || '',
+            urlContains,
+            titleContains,
+            query: closeQuery,
+            preventActive
+          },
+          tabCount: tabs.length,
+          matchedCount: matchedTabs.length,
+          matches: summarizeTabsForLogs(matchedTabs, 40),
+          tabs: summarizeTabsForLogs(tabs, 30)
+        });
+
+        if (!matchedTabs.length) {
           logWarn(`runBrowserAction:fail:${safeAction}`, {
             requestId,
             reason: 'No tab matched for close.',
@@ -525,26 +778,54 @@
           return { ok: false, error: 'No se encontro pestana para cerrar.' };
         }
 
-        if (safeArgs.preventActive === true && targetTab.active) {
-          logWarn(`runBrowserAction:fail:${safeAction}`, {
-            requestId,
-            reason: 'Target tab active and preventActive=true.',
-            targetTab: normalizeTabForTool(targetTab)
-          });
-          return { ok: false, error: 'La pestana objetivo esta activa y preventActive=true.' };
+        const closeMany = shouldCloseAllMatches(closeQuery, safeArgs);
+        const safeMaxMatches = Math.round(clamp(Number(safeArgs.maxMatches) || (closeMany ? 24 : 1), 1, 120));
+        let candidates = closeMany ? matchedTabs.slice(0, safeMaxMatches) : [matchedTabs[0]];
+        candidates = sortTabsByRecency(candidates);
+
+        if (preventActive) {
+          candidates = candidates.filter((tab) => !tab?.active);
         }
 
-        await removeTabs(targetTab.id);
-        cleanupTabState(targetTab.id);
-        if (getActiveTabId() === targetTab.id) {
+        if (!candidates.length) {
+          logWarn(`runBrowserAction:fail:${safeAction}`, {
+            requestId,
+            reason: 'All matched tabs filtered by preventActive=true.',
+            args: safeArgs,
+            matchedTabs: summarizeTabsForLogs(matchedTabs, 30)
+          });
+          return { ok: false, error: 'No hay pestanas para cerrar despues de aplicar preventActive=true.' };
+        }
+
+        const targetTab = candidates[0];
+        const closeIds = candidates.map((tab) => tab.id).filter((id) => Number.isFinite(Number(id)));
+        await removeTabs(closeIds);
+        for (const tab of candidates) {
+          cleanupTabState(tab.id);
+        }
+        if (closeIds.includes(getActiveTabId())) {
           setActiveTab(-1);
           syncActiveTabFromWindow();
         }
 
         logDebug(`runBrowserAction:done:${safeAction}`, {
           requestId,
-          closedTab: normalizeTabForTool(targetTab)
+          closeMany,
+          closedCount: candidates.length,
+          closedTabs: candidates.map((tab) => normalizeTabForTool(tab))
         });
+
+        if (closeMany) {
+          return {
+            ok: true,
+            result: {
+              closed: candidates.length,
+              mode: 'multiple',
+              query: closeQuery,
+              tabs: candidates.map((tab) => normalizeTabForTool(tab))
+            }
+          };
+        }
 
         return {
           ok: true,
