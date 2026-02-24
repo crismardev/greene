@@ -756,6 +756,8 @@ a {
 .ai-dynamic-card--relation {
   cursor: pointer;
   padding: 8px 10px;
+  display: grid;
+  gap: 8px;
 }
 
 .ai-dynamic-card--relation:focus-visible {
@@ -763,36 +765,64 @@ a {
   outline-offset: 2px;
 }
 
-.ai-dynamic-relation-simple-row {
+.ai-dynamic-relation-card__head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 1.2fr);
-  align-items: center;
-  gap: 8px;
+  gap: 3px;
 }
 
-.ai-dynamic-relation-simple-col {
+.ai-dynamic-relation-card__title {
   margin: 0;
-  min-width: 0;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.25;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ai-dynamic-relation-simple-col--title {
   font-weight: 700;
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 
-.ai-dynamic-relation-simple-col--meta {
+.ai-dynamic-relation-card__caption {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.25;
   color: var(--text-soft);
-  text-align: center;
+  overflow-wrap: anywhere;
 }
 
-.ai-dynamic-relation-simple-col--detail {
+.ai-dynamic-relation-kv {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.ai-dynamic-relation-kv__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.ai-dynamic-relation-kv__item--empty {
+  grid-template-columns: minmax(0, 1fr);
   color: var(--text-soft);
+  font-size: 11px;
+}
+
+.ai-dynamic-relation-kv__label {
+  color: var(--text-soft);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ai-dynamic-relation-kv__value {
+  color: var(--text);
+  font-weight: 600;
   text-align: right;
+  max-width: 168px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .ai-dynamic-relation-list {
@@ -805,25 +835,24 @@ a {
 
 .ai-dynamic-relation-list li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   font-size: 13px;
 }
 
-.ai-dynamic-relation-list li span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.ai-dynamic-relation-list__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.ai-dynamic-relation-list li strong {
+.ai-dynamic-relation-list__value {
   font-size: 12px;
   color: var(--text-soft);
+  font-weight: 600;
   max-width: 55%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   text-align: right;
 }
 

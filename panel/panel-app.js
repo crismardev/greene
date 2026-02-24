@@ -239,6 +239,23 @@ export function initPanelApp() {
   const WHATSAPP_SUGGESTION_AUTO_DEBOUNCE_MS = 420;
   const WHATSAPP_SUGGESTION_MODEL_COOLDOWN_MS = 1000 * 45;
   const ENABLE_AUTO_WHATSAPP_SUGGESTION_WITH_OLLAMA = false;
+  const ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS = false;
+  const ENABLE_PANEL_DEBUG_LOGS = false;
+  const ENABLE_PANEL_INFO_LOGS = false;
+  const NOISY_CONTEXT_LOG_PREFIXES = Object.freeze([
+    'dynamic_context:',
+    'dynamic_relations:',
+    'whatsapp_contact:',
+    'whatsapp_history:',
+    'whatsapp_suggestion:',
+    'initial_context_sync:'
+  ]);
+  const RUNTIME_GC_INTERVAL_MS = 1000 * 45;
+  const TAB_SUMMARY_CACHE_MAX_ITEMS = 180;
+  const WHATSAPP_HISTORY_FINGERPRINT_CACHE_MAX_ITEMS = 320;
+  const TAB_SUMMARY_QUEUE_MAX_ITEMS = 72;
+  const RUNTIME_LISTENER_WARN_THRESHOLD = 260;
+  const RUNTIME_LISTENER_WARN_COOLDOWN_MS = 1000 * 90;
   const MEMORY_USER_PROFILE_MAX_ITEMS = 480;
   const MEMORY_USER_PROFILE_MAX_ITEMS_STORAGE_LIMIT = 3000;
   const MAX_WHATSAPP_PROMPT_ENTRIES = 320;
@@ -746,6 +763,7 @@ export function initPanelApp() {
     text: '',
     loading: false
   };
+  let whatsappSuggestionActiveChatKey = '';
   let whatsappSuggestionToken = 0;
   let whatsappSuggestionRefreshTimer = 0;
   let queuedWhatsappSuggestionTab = null;
@@ -821,10 +839,19 @@ export function initPanelApp() {
   let whatsappAliasDbIndexSyncedAt = 0;
   let initialContextSyncPromise = null;
   const runtimeScriptPromiseByPath = new Map();
+  const runtimeListenerMonitor = createRuntimeListenerMonitor();
+  let runtimeGcTimerId = 0;
+  let runtimeListenerWarnedAt = 0;
   let voiceRuntimeDependenciesPromise = null;
   let initialContextBootstrapTimerId = 0;
   let initialContextBootstrapIdleId = 0;
   let initialContextBootstrapStarted = false;
+  let chatInputResizeRafId = 0;
+  let chatInputSizeMetrics = {
+    width: -1,
+    maxHeight: 0,
+    minimum: 0
+  };
   function createInitialVoiceCaptureState() {
     return {
       mode: 'idle',
@@ -908,7 +935,200 @@ export function initPanelApp() {
     breaks: true
   });
 
+  function createRuntimeListenerMonitor() {
+    const targetIndex = new WeakMap();
+    const listenerIds = new WeakMap();
+    let listenerIdSeq = 0;
+    let activeCount = 0;
+    let peakCount = 0;
+    let installed = false;
+    let originalAdd = null;
+    let originalRemove = null;
+
+    function normalizeType(type) {
+      return String(type || '').trim();
+    }
+
+    function isSupportedListener(listener) {
+      return typeof listener === 'function' || (listener && typeof listener === 'object');
+    }
+
+    function isOnce(options) {
+      return Boolean(options && typeof options === 'object' && options.once === true);
+    }
+
+    function resolveCapture(options) {
+      if (typeof options === 'boolean') {
+        return options === true;
+      }
+      return Boolean(options && typeof options === 'object' && options.capture === true);
+    }
+
+    function resolveListenerToken(listener) {
+      if (!isSupportedListener(listener)) {
+        return '';
+      }
+
+      let token = listenerIds.get(listener);
+      if (token) {
+        return token;
+      }
+
+      listenerIdSeq += 1;
+      token = `l${listenerIdSeq}`;
+      listenerIds.set(listener, token);
+      return token;
+    }
+
+    function getTargetTypes(target, create = false) {
+      if (!target) {
+        return null;
+      }
+      let typeMap = targetIndex.get(target) || null;
+      if (!typeMap && create) {
+        typeMap = new Map();
+        targetIndex.set(target, typeMap);
+      }
+      return typeMap;
+    }
+
+    function trackAdd(target, type, listener, options) {
+      const safeType = normalizeType(type);
+      if (!safeType || !isSupportedListener(listener) || isOnce(options)) {
+        return;
+      }
+
+      const token = resolveListenerToken(listener);
+      if (!token) {
+        return;
+      }
+
+      const typeMap = getTargetTypes(target, true);
+      if (!typeMap) {
+        return;
+      }
+
+      let listeners = typeMap.get(safeType) || null;
+      if (!listeners) {
+        listeners = new Set();
+        typeMap.set(safeType, listeners);
+      }
+
+      const key = `${resolveCapture(options) ? '1' : '0'}:${token}`;
+      if (listeners.has(key)) {
+        return;
+      }
+
+      listeners.add(key);
+      activeCount += 1;
+      if (activeCount > peakCount) {
+        peakCount = activeCount;
+      }
+    }
+
+    function trackRemove(target, type, listener, options) {
+      const safeType = normalizeType(type);
+      if (!safeType || !isSupportedListener(listener)) {
+        return;
+      }
+
+      const token = resolveListenerToken(listener);
+      if (!token) {
+        return;
+      }
+
+      const typeMap = getTargetTypes(target, false);
+      if (!typeMap) {
+        return;
+      }
+
+      const listeners = typeMap.get(safeType);
+      if (!listeners || !listeners.size) {
+        return;
+      }
+
+      const key = `${resolveCapture(options) ? '1' : '0'}:${token}`;
+      if (!listeners.delete(key)) {
+        return;
+      }
+
+      activeCount = Math.max(0, activeCount - 1);
+      if (!listeners.size) {
+        typeMap.delete(safeType);
+      }
+    }
+
+    function install() {
+      if (installed || !window?.EventTarget?.prototype) {
+        return false;
+      }
+
+      originalAdd = EventTarget.prototype.addEventListener;
+      originalRemove = EventTarget.prototype.removeEventListener;
+      if (typeof originalAdd !== 'function' || typeof originalRemove !== 'function') {
+        return false;
+      }
+
+      EventTarget.prototype.addEventListener = function patchedAddEventListener(type, listener, options) {
+        trackAdd(this, type, listener, options);
+        return originalAdd.call(this, type, listener, options);
+      };
+
+      EventTarget.prototype.removeEventListener = function patchedRemoveEventListener(type, listener, options) {
+        trackRemove(this, type, listener, options);
+        return originalRemove.call(this, type, listener, options);
+      };
+
+      installed = true;
+      return true;
+    }
+
+    function uninstall() {
+      if (!installed || !window?.EventTarget?.prototype) {
+        return false;
+      }
+      if (typeof originalAdd === 'function') {
+        EventTarget.prototype.addEventListener = originalAdd;
+      }
+      if (typeof originalRemove === 'function') {
+        EventTarget.prototype.removeEventListener = originalRemove;
+      }
+      installed = false;
+      return true;
+    }
+
+    function snapshot() {
+      return {
+        installed,
+        activeCount: Math.max(0, Number(activeCount) || 0),
+        peakCount: Math.max(0, Number(peakCount) || 0)
+      };
+    }
+
+    return {
+      install,
+      uninstall,
+      snapshot
+    };
+  }
+
+  function isNoisyContextLogMessage(message) {
+    const token = String(message || '')
+      .trim()
+      .toLowerCase();
+    if (!token) {
+      return false;
+    }
+    return NOISY_CONTEXT_LOG_PREFIXES.some((prefix) => token.startsWith(prefix));
+  }
+
   function logDebug(message, payload) {
+    if (!ENABLE_PANEL_DEBUG_LOGS) {
+      return;
+    }
+    if (isNoisyContextLogMessage(message)) {
+      return;
+    }
     if (payload === undefined) {
       console.debug(`${LOG_PREFIX} ${message}`);
       return;
@@ -927,6 +1147,12 @@ export function initPanelApp() {
   }
 
   function logInfo(message, payload) {
+    if (!ENABLE_PANEL_INFO_LOGS) {
+      return;
+    }
+    if (isNoisyContextLogMessage(message)) {
+      return;
+    }
     if (payload === undefined) {
       console.info(`${LOG_PREFIX} ${message}`);
       return;
@@ -945,6 +1171,46 @@ export function initPanelApp() {
     return text.slice(0, limit);
   }
 
+  function summarizeWhatsappTraceContext(tabContext) {
+    const context = tabContext && typeof tabContext === 'object' ? tabContext : {};
+    const details = context.details && typeof context.details === 'object' ? context.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const messages = Array.isArray(details.messages) ? details.messages : [];
+    const tail = messages.slice(-3).map((item) => ({
+      id: toSafeLogText(item?.id || '', 80),
+      role: item?.role === 'me' ? 'me' : 'contact',
+      kind: toSafeLogText(item?.kind || '', 24),
+      text: toSafeLogText(item?.text || '', 120)
+    }));
+
+    return {
+      tabId: Number(context.tabId) || -1,
+      site: toSafeLogText(context.site || '', 24),
+      url: toSafeLogText(context.url || '', 120),
+      chatKey: toSafeLogText(getWhatsappChatKey(context), 120),
+      chatTitle: toSafeLogText(currentChat.title || '', 120),
+      chatPhone: toSafeLogText(currentChat.phone || '', 42),
+      channelId: toSafeLogText(currentChat.channelId || '', 120),
+      messageCount: messages.length,
+      lastMessageId: toSafeLogText(messages.length ? messages[messages.length - 1]?.id || '' : '', 80),
+      tail
+    };
+  }
+
+  function logWhatsappSuggestionTrace(stage, payload) {
+    if (!ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+      return;
+    }
+
+    const tag = `${LOG_PREFIX} [wa-suggestion] ${stage}`;
+    if (payload === undefined) {
+      console.log(tag);
+      return;
+    }
+
+    console.log(tag, payload);
+  }
+
   const dynamicRelationsService = createDynamicRelationsService({
     isWhatsappContext,
     isLikelyUserTableName,
@@ -959,7 +1225,6 @@ export function initPanelApp() {
   });
   const {
     buildDynamicRelationsSignalKey,
-    buildRelationSimpleColumns,
     collectDynamicSignalsFromTab,
     fetchDynamicRelationCards,
     fetchDynamicRelationGroups,
@@ -7074,9 +7339,220 @@ export function initPanelApp() {
     if (!safeChunks.length) {
       return null;
     }
+
+    if (safeChunks.length === 1) {
+      return safeChunks[0];
+    }
+
+    const isContainerChunk = (chunk) => {
+      const type = String(chunk?.type || '')
+        .trim()
+        .toLowerCase();
+      return type.includes('webm') || type.includes('ogg') || type.includes('mp4');
+    };
+
+    const shouldPreferSingleChunk =
+      VOICE_MEDIA_RECORDER_TIMESLICE_MS <= 0 || safeChunks.every((chunk) => isContainerChunk(chunk));
+    if (shouldPreferSingleChunk) {
+      const largestChunk = safeChunks.reduce((best, item) => (item.size > best.size ? item : best), safeChunks[0]);
+      if (safeChunks.length > 1) {
+        logInfo('voice:chunks:select_largest', {
+          chunks: safeChunks.length,
+          selectedSize: Number(largestChunk?.size) || 0,
+          selectedType: String(largestChunk?.type || ''),
+          sizes: safeChunks.map((chunk) => Number(chunk.size) || 0).slice(0, 8)
+        });
+      }
+      return largestChunk;
+    }
+
     const firstType = String(safeChunks[0]?.type || '').trim();
     const type = firstType || 'audio/webm';
     return new Blob(safeChunks, { type });
+  }
+
+  function downmixAudioBufferToMono(audioBuffer) {
+    const buffer = audioBuffer && typeof audioBuffer === 'object' ? audioBuffer : null;
+    const channels = Math.max(1, Number(buffer?.numberOfChannels) || 1);
+    const sampleCount = Math.max(0, Number(buffer?.length) || 0);
+    const mono = new Float32Array(sampleCount);
+    if (!sampleCount) {
+      return mono;
+    }
+
+    if (channels === 1) {
+      const channel = buffer.getChannelData(0);
+      mono.set(channel);
+      return mono;
+    }
+
+    for (let channelIndex = 0; channelIndex < channels; channelIndex += 1) {
+      const channelData = buffer.getChannelData(channelIndex);
+      for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+        mono[sampleIndex] += channelData[sampleIndex];
+      }
+    }
+
+    const scale = 1 / channels;
+    for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+      mono[sampleIndex] *= scale;
+    }
+    return mono;
+  }
+
+  function resampleMonoAudio(samples, inputSampleRate, outputSampleRate) {
+    const source = samples instanceof Float32Array ? samples : new Float32Array(0);
+    const inRate = Math.max(1, Number(inputSampleRate) || 16000);
+    const outRate = Math.max(1, Number(outputSampleRate) || 16000);
+    if (!source.length || inRate === outRate) {
+      return source;
+    }
+
+    const ratio = inRate / outRate;
+    const outputLength = Math.max(1, Math.round(source.length / ratio));
+    const output = new Float32Array(outputLength);
+
+    for (let index = 0; index < outputLength; index += 1) {
+      const position = index * ratio;
+      const leftIndex = Math.floor(position);
+      const rightIndex = Math.min(leftIndex + 1, source.length - 1);
+      const mix = position - leftIndex;
+      output[index] = source[leftIndex] + (source[rightIndex] - source[leftIndex]) * mix;
+    }
+
+    return output;
+  }
+
+  function encodeMonoPcm16Wav(samples, sampleRate = 16000) {
+    const source = samples instanceof Float32Array ? samples : new Float32Array(0);
+    const safeSampleRate = Math.max(8000, Math.min(96000, Number(sampleRate) || 16000));
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const bytesPerSample = bitsPerSample / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = safeSampleRate * blockAlign;
+    const dataSize = source.length * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    const writeAscii = (offset, value) => {
+      for (let index = 0; index < value.length; index += 1) {
+        view.setUint8(offset + index, value.charCodeAt(index));
+      }
+    };
+
+    writeAscii(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeAscii(8, 'WAVE');
+    writeAscii(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, safeSampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeAscii(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (let index = 0; index < source.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, source[index]));
+      view.setInt16(offset, sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7fff), true);
+      offset += 2;
+    }
+
+    return buffer;
+  }
+
+  function decodeAudioDataSafe(audioContext, buffer) {
+    if (!audioContext || typeof audioContext.decodeAudioData !== 'function') {
+      return Promise.reject(new Error('decodeAudioData no disponible.'));
+    }
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength <= 0) {
+      return Promise.reject(new Error('Buffer de audio vacio.'));
+    }
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finishResolve = (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(value);
+      };
+      const finishReject = (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error instanceof Error ? error : new Error(String(error || 'No se pudo decodificar audio.')));
+      };
+
+      try {
+        const promise = audioContext.decodeAudioData(buffer.slice(0), finishResolve, finishReject);
+        if (promise && typeof promise.then === 'function') {
+          promise.then(finishResolve).catch(finishReject);
+        }
+      } catch (error) {
+        finishReject(error);
+      }
+    });
+  }
+
+  async function normalizeVoiceBlobForTranscription(blob, options = {}) {
+    const sourceBlob = blob instanceof Blob ? blob : null;
+    if (!sourceBlob || sourceBlob.size <= 0) {
+      return sourceBlob;
+    }
+
+    const targetRate = Math.max(8000, Math.min(48000, Number(options.targetSampleRate) || 16000));
+    const sourceType = String(sourceBlob.type || '')
+      .trim()
+      .toLowerCase();
+    if (sourceType.includes('wav')) {
+      return sourceBlob;
+    }
+
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (typeof AudioContextCtor !== 'function') {
+      return sourceBlob;
+    }
+
+    let context = null;
+    try {
+      context = new AudioContextCtor();
+      const rawBuffer = await sourceBlob.arrayBuffer();
+      const audioBuffer = await decodeAudioDataSafe(context, rawBuffer);
+      const mono = downmixAudioBufferToMono(audioBuffer);
+      if (!mono.length) {
+        return sourceBlob;
+      }
+      const normalized = resampleMonoAudio(mono, audioBuffer.sampleRate, targetRate);
+      if (!normalized.length) {
+        return sourceBlob;
+      }
+      const wavBuffer = encodeMonoPcm16Wav(normalized, targetRate);
+      return new Blob([wavBuffer], {
+        type: 'audio/wav'
+      });
+    } catch (error) {
+      logWarn('voice:audio:normalize_failed', {
+        inputType: sourceType,
+        inputSize: Number(sourceBlob.size) || 0,
+        error: error instanceof Error ? error.message : String(error || '')
+      });
+      return sourceBlob;
+    } finally {
+      if (context && typeof context.close === 'function') {
+        try {
+          await context.close();
+        } catch (_) {
+          // Ignore audio context close failures.
+        }
+      }
+    }
   }
 
   function clearVoiceCaptureTimers() {
@@ -7179,6 +7655,17 @@ export function initPanelApp() {
       throw new Error('No se detecto audio para transcribir.');
     }
 
+    const normalizedBlob = await normalizeVoiceBlobForTranscription(blob, {
+      targetSampleRate: 16000
+    });
+    logInfo('voice:transcribe:blob_ready', {
+      inputType: String(blob.type || ''),
+      inputSize: Number(blob.size) || 0,
+      outputType: String(normalizedBlob?.type || ''),
+      outputSize: Number(normalizedBlob?.size || 0),
+      normalized: normalizedBlob !== blob
+    });
+
     const { apiKey } = await getSpeechAuthContext();
     const rawSignal = options && typeof options === 'object' ? options.signal : null;
     const signal =
@@ -7190,7 +7677,7 @@ export function initPanelApp() {
         : null;
     const result = await aiProviderService.transcribeOpenAiAudio({
       apiKey,
-      audioBlob: blob,
+      audioBlob: normalizedBlob instanceof Blob && normalizedBlob.size > 0 ? normalizedBlob : blob,
       model: VOICE_TRANSCRIPTION_MODEL,
       language: normalizeVoiceInputLanguage(),
       signal
@@ -7877,10 +8364,12 @@ export function initPanelApp() {
       await new Promise((resolve) => {
         const finish = () => resolve(true);
         recorder.addEventListener('stop', finish, { once: true });
-        try {
-          recorder.requestData();
-        } catch (_) {
-          // Ignore requestData failures before stop.
+        if (VOICE_MEDIA_RECORDER_TIMESLICE_MS > 0) {
+          try {
+            recorder.requestData();
+          } catch (_) {
+            // Ignore requestData failures before stop.
+          }
         }
         try {
           recorder.stop();
@@ -8162,19 +8651,75 @@ export function initPanelApp() {
     chatToolBtn.setAttribute('aria-expanded', 'false');
   }
 
-  function updateChatInputSize() {
-    chatInput.style.height = 'auto';
+  function refreshChatInputSizeMetrics(force = false) {
+    if (!chatInput) {
+      return chatInputSizeMetrics;
+    }
+
+    const width = Math.max(0, Number(chatInput.clientWidth) || 0);
+    if (!force && width === chatInputSizeMetrics.width && chatInputSizeMetrics.maxHeight > 0) {
+      return chatInputSizeMetrics;
+    }
 
     const computed = window.getComputedStyle(chatInput);
     const lineHeight = parseFloat(computed.lineHeight) || 20;
     const paddingTop = parseFloat(computed.paddingTop) || 0;
     const paddingBottom = parseFloat(computed.paddingBottom) || 0;
     const maxHeight = lineHeight * MAX_CHAT_INPUT_ROWS + paddingTop + paddingBottom;
-
-    const next = Math.min(chatInput.scrollHeight, maxHeight);
     const minimum = lineHeight + paddingTop + paddingBottom;
+    chatInputSizeMetrics = {
+      width,
+      maxHeight,
+      minimum
+    };
 
-    chatInput.style.height = `${Math.max(next, minimum)}px`;
+    return chatInputSizeMetrics;
+  }
+
+  function cancelScheduledChatInputResize() {
+    if (!chatInputResizeRafId) {
+      return;
+    }
+    cancelAnimationFrame(chatInputResizeRafId);
+    chatInputResizeRafId = 0;
+  }
+
+  function requestChatInputResize(options = {}) {
+    const immediate = options?.immediate === true || typeof requestAnimationFrame !== 'function';
+    const forceMeasure = options?.forceMeasure === true;
+    if (immediate) {
+      cancelScheduledChatInputResize();
+      updateChatInputSize({
+        forceMeasure
+      });
+      return;
+    }
+
+    if (chatInputResizeRafId) {
+      return;
+    }
+
+    chatInputResizeRafId = requestAnimationFrame(() => {
+      chatInputResizeRafId = 0;
+      updateChatInputSize({
+        forceMeasure
+      });
+    });
+  }
+
+  function updateChatInputSize(options = {}) {
+    if (!chatInput) {
+      return;
+    }
+
+    chatInput.style.height = 'auto';
+    const metrics = refreshChatInputSizeMetrics(options?.forceMeasure === true);
+    const maxHeight = Math.max(0, Number(metrics?.maxHeight) || 0);
+    const minimum = Math.max(0, Number(metrics?.minimum) || 0);
+    const next = Math.min(chatInput.scrollHeight, maxHeight || chatInput.scrollHeight);
+    const safeHeight = Math.max(next, minimum || 0);
+
+    chatInput.style.height = `${safeHeight}px`;
     chatInput.style.overflowY = chatInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
     renderChatSendButtonState();
   }
@@ -9140,7 +9685,7 @@ export function initPanelApp() {
       return [];
     }
 
-    const details = context.details && typeof details === 'object' ? details : {};
+    const details = context.details && typeof context.details === 'object' ? context.details : {};
     const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
     const inbox = Array.isArray(details.inbox) ? details.inbox : [];
     const assignments = [];
@@ -12659,6 +13204,122 @@ export function initPanelApp() {
     }
   }
 
+  function trimMapToMaxItems(map, maxItems) {
+    if (!map || typeof map.size !== 'number') {
+      return 0;
+    }
+    const limit = Math.max(0, Number(maxItems) || 0);
+    if (map.size <= limit) {
+      return 0;
+    }
+    let removed = 0;
+    const overflow = map.size - limit;
+    for (let index = 0; index < overflow; index += 1) {
+      const firstKey = map.keys().next().value;
+      if (firstKey === undefined) {
+        break;
+      }
+      map.delete(firstKey);
+      removed += 1;
+    }
+    return removed;
+  }
+
+  function pruneTabSummaryQueue(knownTabIds = null) {
+    if (!Array.isArray(tabSummaryQueue) || !tabSummaryQueue.length) {
+      return;
+    }
+
+    const safeKnownTabIds = knownTabIds instanceof Set ? knownTabIds : null;
+    const seen = new Set();
+    const nextQueue = [];
+    for (const entry of tabSummaryQueue) {
+      const key = String(entry?.key || '').trim();
+      const tabContext = entry?.tabContext && typeof entry.tabContext === 'object' ? entry.tabContext : null;
+      const tabId = Number(tabContext?.tabId);
+      if (!key || !tabContext || seen.has(key) || tabSummaryByKey.has(key)) {
+        continue;
+      }
+      if (safeKnownTabIds && Number.isFinite(tabId) && tabId >= 0 && !safeKnownTabIds.has(tabId)) {
+        continue;
+      }
+      seen.add(key);
+      nextQueue.push({ key, tabContext });
+    }
+
+    tabSummaryQueue = nextQueue.slice(-TAB_SUMMARY_QUEUE_MAX_ITEMS);
+  }
+
+  function runRuntimeGarbageCollector(options = {}) {
+    const now = Date.now();
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const knownTabIds =
+      safeOptions.knownTabIds instanceof Set
+        ? safeOptions.knownTabIds
+        : new Set(
+            (Array.isArray(tabContextSnapshot?.tabs) ? tabContextSnapshot.tabs : [])
+              .map((item) => Number(item?.tabId))
+              .filter((item) => Number.isFinite(item) && item >= 0)
+          );
+
+    trimTabSummaryCache();
+    pruneTabSummaryQueue(knownTabIds);
+    trimMapToMaxItems(tabSummaryByKey, TAB_SUMMARY_CACHE_MAX_ITEMS);
+    trimMapToMaxItems(whatsappHistoryVectorFingerprintByKey, WHATSAPP_HISTORY_FINGERPRINT_CACHE_MAX_ITEMS);
+
+    const syncCutoff = now - WHATSAPP_HISTORY_SYNC_MIN_INTERVAL_MS * 6;
+    for (const [tabId, nextAllowed] of whatsappHistorySyncNextAllowedByTab.entries()) {
+      if (!knownTabIds.has(Number(tabId)) || Number(nextAllowed) < syncCutoff) {
+        whatsappHistorySyncNextAllowedByTab.delete(tabId);
+      }
+    }
+
+    const blockedCutoff =
+      now - Math.max(WHATSAPP_LIVE_CONTEXT_RETRY_COOLDOWN_MS, WHATSAPP_LIVE_CONTEXT_NO_RECEIVER_COOLDOWN_MS) * 6;
+    for (const [tabId, blockedUntil] of whatsappLiveContextBlockedUntilByTab.entries()) {
+      if (!knownTabIds.has(Number(tabId)) || Number(blockedUntil) < blockedCutoff) {
+        whatsappLiveContextBlockedUntilByTab.delete(tabId);
+      }
+    }
+
+    const listenerSnapshot = runtimeListenerMonitor.snapshot();
+    if (
+      listenerSnapshot.installed &&
+      listenerSnapshot.activeCount > RUNTIME_LISTENER_WARN_THRESHOLD &&
+      now - runtimeListenerWarnedAt >= RUNTIME_LISTENER_WARN_COOLDOWN_MS
+    ) {
+      runtimeListenerWarnedAt = now;
+      logWarn('runtime_gc:listener_pressure', {
+        activeListeners: listenerSnapshot.activeCount,
+        peakListeners: listenerSnapshot.peakCount,
+        threshold: RUNTIME_LISTENER_WARN_THRESHOLD,
+        reason: String(safeOptions.reason || 'runtime_gc')
+      });
+    }
+  }
+
+  function startRuntimeGarbageCollector() {
+    if (runtimeGcTimerId) {
+      return;
+    }
+    runRuntimeGarbageCollector({
+      reason: 'boot'
+    });
+    runtimeGcTimerId = window.setInterval(() => {
+      runRuntimeGarbageCollector({
+        reason: 'interval'
+      });
+    }, RUNTIME_GC_INTERVAL_MS);
+  }
+
+  function stopRuntimeGarbageCollector() {
+    if (!runtimeGcTimerId) {
+      return;
+    }
+    window.clearInterval(runtimeGcTimerId);
+    runtimeGcTimerId = 0;
+  }
+
   function buildSystemVariableEntries() {
     const editable = SYSTEM_VARIABLE_DEFINITIONS.map((definition) => ({
       ...definition,
@@ -13209,14 +13870,38 @@ export function initPanelApp() {
     }
 
     const force = options.force === true;
+    if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+      logWhatsappSuggestionTrace('schedule:received', {
+        force,
+        hasTimer: Boolean(whatsappSuggestionRefreshTimer),
+        activeChatKeyCache: toSafeLogText(whatsappSuggestionActiveChatKey, 120),
+        state: {
+          loading: whatsappSuggestionState.loading,
+          signalKey: toSafeLogText(whatsappSuggestionState.signalKey, 160),
+          hasText: Boolean(whatsappSuggestionState.text)
+        },
+        context: summarizeWhatsappTraceContext(context)
+      });
+    }
+
     if (force) {
       clearWhatsappSuggestionRefreshTimer();
+      if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+        logWhatsappSuggestionTrace('schedule:force_dispatch', {
+          context: summarizeWhatsappTraceContext(context)
+        });
+      }
       void generateWhatsappSuggestion(context, { force: true });
       return;
     }
 
     queuedWhatsappSuggestionTab = context;
     if (whatsappSuggestionRefreshTimer) {
+      if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+        logWhatsappSuggestionTrace('schedule:debounce_pending', {
+          context: summarizeWhatsappTraceContext(context)
+        });
+      }
       return;
     }
 
@@ -13226,6 +13911,11 @@ export function initPanelApp() {
       queuedWhatsappSuggestionTab = null;
       if (!queued) {
         return;
+      }
+      if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+        logWhatsappSuggestionTrace('schedule:debounce_dispatch', {
+          context: summarizeWhatsappTraceContext(queued)
+        });
       }
       void generateWhatsappSuggestion(queued, { force: false });
     }, WHATSAPP_SUGGESTION_AUTO_DEBOUNCE_MS);
@@ -13366,16 +14056,46 @@ export function initPanelApp() {
     }
 
     const readLimit = Math.max(20, Math.min(140, Number(safeOptions.messageLimit) || 80));
-    const [chatResponse, messagesResponse] = await Promise.all([
+    const [automationPackResponse, chatResponse, messagesResponse] = await Promise.all([
+      tabContextService.runSiteActionInTab(tabId, 'whatsapp', 'getAutomationPack', {
+        messageLimit: readLimit,
+        inboxLimit: 40
+      }),
       tabContextService.runSiteActionInTab(tabId, 'whatsapp', 'getCurrentChat', {}),
       tabContextService.runSiteActionInTab(tabId, 'whatsapp', 'readMessages', { limit: readLimit })
     ]);
 
-    const liveChat = chatResponse?.result && typeof chatResponse.result === 'object' ? chatResponse.result : {};
-    const liveMessages = Array.isArray(messagesResponse?.result) ? messagesResponse.result : [];
+    const automationPack =
+      automationPackResponse?.result && typeof automationPackResponse.result === 'object' ? automationPackResponse.result : {};
+    const automationChat =
+      automationPack.currentChat && typeof automationPack.currentChat === 'object' ? automationPack.currentChat : {};
+    const automationMessages = Array.isArray(automationPack.messages) ? automationPack.messages : [];
+    const directChat = chatResponse?.result && typeof chatResponse.result === 'object' ? chatResponse.result : {};
+    const directMessages = Array.isArray(messagesResponse?.result) ? messagesResponse.result : [];
+    const liveChat = Object.keys(automationChat).length ? automationChat : directChat;
+    const liveMessages = automationMessages.length ? automationMessages : directMessages;
+    const packError = String(automationPackResponse?.error || '').trim();
     const chatError = String(chatResponse?.error || '').trim();
     const messagesError = String(messagesResponse?.error || '').trim();
-    const firstError = chatError || messagesError;
+    const firstError = packError || chatError || messagesError;
+    if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+      logWhatsappSuggestionTrace('context:live_sources', {
+        tabId,
+        readLimit,
+        packOk: automationPackResponse?.ok === true,
+        packError: toSafeLogText(packError, 220),
+        packChatKeys: Object.keys(automationChat).length,
+        packMessages: automationMessages.length,
+        directChatOk: chatResponse?.ok === true,
+        directChatError: toSafeLogText(chatError, 220),
+        directChatKeys: Object.keys(directChat).length,
+        directMessagesOk: messagesResponse?.ok === true,
+        directMessagesError: toSafeLogText(messagesError, 220),
+        directMessages: directMessages.length,
+        chosenMessages: liveMessages.length,
+        chosenChatKeys: Object.keys(liveChat).length
+      });
+    }
     const noReceiver = isNoReceiverRuntimeError(firstError);
     if (!liveMessages.length && !Object.keys(liveChat).length) {
       if (firstError) {
@@ -13421,12 +14141,20 @@ export function initPanelApp() {
     };
   }
 
-  async function buildWhatsappSuggestionContext(tabContext) {
+  async function buildWhatsappSuggestionContext(tabContext, options = {}) {
     if (!tabContext || !isWhatsappContext(tabContext)) {
       return tabContext;
     }
 
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+      logWhatsappSuggestionTrace('context:build_start', {
+        forceLiveHydration: safeOptions.forceLiveHydration === true,
+        input: summarizeWhatsappTraceContext(tabContext)
+      });
+    }
     const hydratedContext = await hydrateWhatsappContextFromLiveTab(tabContext, {
+      force: safeOptions.forceLiveHydration === true,
       minMessages: 1,
       messageLimit: getSystemVariableNumber('whatsapp.suggestionHistoryLimit', WHATSAPP_SUGGESTION_HISTORY_LIMIT)
     });
@@ -13458,6 +14186,26 @@ export function initPanelApp() {
       }
     });
 
+    if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+      logWhatsappSuggestionTrace('context:build_done', {
+        forceLiveHydration: safeOptions.forceLiveHydration === true,
+        hydrated: summarizeWhatsappTraceContext(hydratedContext),
+        merged: summarizeWhatsappTraceContext(mergedContext),
+        sync: {
+          ok: Boolean(syncResult?.ok),
+          reason: toSafeLogText(syncResult?.reason || '', 40),
+          upserted: Math.max(0, Number(syncResult?.messagesUpserted) || 0),
+          total: Math.max(0, Number(syncResult?.totalMessages) || 0)
+        },
+        db: {
+          found: Boolean(historyPayload?.found),
+          key: toSafeLogText(historyPayload?.key || '', 120),
+          messages: Math.max(0, Number(historyPayload?.messages?.length) || 0),
+          updatedAt: Math.max(0, Number(historyPayload?.updatedAt) || 0)
+        }
+      });
+    }
+
     return mergedContext;
   }
 
@@ -13467,21 +14215,24 @@ export function initPanelApp() {
     const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
     const messages = Array.isArray(details.messages) ? details.messages : [];
 
+    const includeTail = ENABLE_PANEL_DEBUG_LOGS || ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS;
     return {
       tabId: Number(context.tabId) || -1,
       chatKey: toSafeLogText(currentChat.key || getWhatsappChatKey(context), 160),
       chatTitle: toSafeLogText(currentChat.title || '', 120),
       chatPhone: toSafeLogText(currentChat.phone || '', 42),
       messageCount: messages.length,
-      messageTail: messages.slice(-tailLimit).map((item) => ({
-        id: toSafeLogText(item?.id || '', 120),
-        role: item?.role === 'me' ? 'me' : 'contact',
-        kind: toSafeLogText(item?.kind || '', 24),
-        timestamp: toSafeLogText(item?.timestamp || '', 80),
-        text: toSafeLogText(item?.text || '', 160),
-        transcript: toSafeLogText(item?.transcript || item?.enriched?.transcript || '', 120),
-        ocrText: toSafeLogText(item?.ocrText || item?.enriched?.ocrText || '', 120)
-      }))
+      messageTail: includeTail
+        ? messages.slice(-tailLimit).map((item) => ({
+            id: toSafeLogText(item?.id || '', 120),
+            role: item?.role === 'me' ? 'me' : 'contact',
+            kind: toSafeLogText(item?.kind || '', 24),
+            timestamp: toSafeLogText(item?.timestamp || '', 80),
+            text: toSafeLogText(item?.text || '', 160),
+            transcript: toSafeLogText(item?.transcript || item?.enriched?.transcript || '', 120),
+            ocrText: toSafeLogText(item?.ocrText || item?.enriched?.ocrText || '', 120)
+          })
+        : []
     };
   }
 
@@ -13789,6 +14540,43 @@ export function initPanelApp() {
     return empty;
   }
 
+  function buildRelationCardPreviewItems(cardModel, limit = 4) {
+    const card = cardModel && typeof cardModel === 'object' ? cardModel : {};
+    const maxItems = Math.max(1, Math.min(8, Number(limit) || 4));
+    const detailFields = Array.isArray(card.detailFields) ? card.detailFields : [];
+    const rows = Array.isArray(card.rows) ? card.rows : [];
+
+    const detailItems = detailFields
+      .map((item) => {
+        const label = String(item?.label || '').trim();
+        const value = String(item?.value || '').trim();
+        if (!label || !value) {
+          return null;
+        }
+        return { label, value };
+      })
+      .filter(Boolean);
+    if (detailItems.length) {
+      return detailItems.slice(0, maxItems);
+    }
+
+    return rows
+      .map((row) => {
+        const label = String(row?.label || '').trim();
+        if (!label) {
+          return null;
+        }
+        const directValue = String(row?.value || '').trim();
+        if (directValue) {
+          return { label, value: directValue };
+        }
+        const count = Math.max(0, Number(row?.count) || 0);
+        return { label, value: String(count) };
+      })
+      .filter(Boolean)
+      .slice(0, maxItems);
+  }
+
   function appendRelationListItem(list, row) {
     if (!list) {
       return;
@@ -13796,8 +14584,10 @@ export function initPanelApp() {
 
     const item = document.createElement('li');
     const label = document.createElement('span');
+    label.className = 'ai-dynamic-relation-list__label';
     label.textContent = String(row?.label || '(sin etiqueta)');
     const value = document.createElement('strong');
+    value.className = 'ai-dynamic-relation-list__value';
     const hasValue = String(row?.value || '').trim();
     if (hasValue) {
       value.textContent = hasValue;
@@ -13961,21 +14751,55 @@ export function initPanelApp() {
           }
           card.tabIndex = 0;
           card.setAttribute('role', 'button');
-          card.setAttribute('aria-label', `Abrir detalle de ${cardModel.title}`);
-          const columns = buildRelationSimpleColumns(cardModel);
-          const simpleRow = document.createElement('div');
-          simpleRow.className = 'ai-dynamic-relation-simple-row';
-          const columnKinds = ['title', 'meta', 'detail'];
+          const titleText = String(cardModel?.title || 'Relacion').trim() || 'Relacion';
+          card.setAttribute('aria-label', `Abrir detalle de ${titleText}`);
 
-          for (let index = 0; index < 3; index += 1) {
-            const column = document.createElement('p');
-            column.className = `ai-dynamic-relation-simple-col ai-dynamic-relation-simple-col--${columnKinds[index]}`;
-            column.textContent = String(columns[index] || '');
-            column.title = column.textContent;
-            simpleRow.appendChild(column);
+          const head = document.createElement('div');
+          head.className = 'ai-dynamic-relation-card__head';
+
+          const title = document.createElement('p');
+          title.className = 'ai-dynamic-relation-card__title';
+          title.textContent = titleText;
+          title.title = titleText;
+
+          const captionText =
+            String(cardModel?.caption || '').trim() || String(cardModel?.tableQualifiedName || '').trim();
+          const caption = document.createElement('p');
+          caption.className = 'ai-dynamic-relation-card__caption';
+          caption.textContent = captionText || '-';
+          caption.title = caption.textContent;
+
+          head.append(title, caption);
+
+          const kvList = document.createElement('ul');
+          kvList.className = 'ai-dynamic-relation-kv';
+          const previewItems = buildRelationCardPreviewItems(cardModel, 4);
+
+          if (previewItems.length) {
+            for (const item of previewItems) {
+              const row = document.createElement('li');
+              row.className = 'ai-dynamic-relation-kv__item';
+
+              const label = document.createElement('span');
+              label.className = 'ai-dynamic-relation-kv__label';
+              label.textContent = String(item?.label || '(sin etiqueta)');
+
+              const value = document.createElement('span');
+              value.className = 'ai-dynamic-relation-kv__value';
+              value.textContent = String(item?.value || '-');
+              value.title = value.textContent;
+
+              row.append(label, value);
+              kvList.appendChild(row);
+            }
+          } else {
+            const empty = document.createElement('li');
+            empty.className = 'ai-dynamic-relation-kv__item ai-dynamic-relation-kv__item--empty';
+            empty.textContent = 'Sin detalle disponible.';
+            kvList.appendChild(empty);
           }
 
-          card.append(simpleRow);
+          card.append(head, kvList);
           dynamicRelationsList.appendChild(card);
         }
       }
@@ -13983,20 +14807,23 @@ export function initPanelApp() {
     dynamicSuggestionRenderIds = nextSuggestionIds;
     dynamicRelationRenderIds = nextRelationIds;
 
-    const relationToastMessage = String(dynamicRelationsContextState.message || '').trim();
-    const shouldShowRelationToast = Boolean(relationToastMessage) && hasSignals;
-    const relationToastKey = `${dynamicRelationsContextState.loading ? 'loading' : 'ready'}|${
-      dynamicRelationsContextState.isError === true ? 'error' : 'ok'
-    }|${relationToastMessage}|${showRelationsArea ? 'shown' : 'hidden'}`;
-    if (shouldShowRelationToast && relationToastKey !== dynamicUiToastKey) {
-      dynamicUiToastKey = relationToastKey;
-      showDynamicUiToast(relationToastMessage, dynamicRelationsContextState.isError === true, {
-        durationMs: dynamicRelationsContextState.loading ? 1600 : 2600
-      });
-    } else if (!shouldShowRelationToast) {
-      dynamicUiToastKey = '';
-      showDynamicUiToast('');
-    }
+    // Toast flotante de relaciones deshabilitado temporalmente.
+    // const relationToastMessage = String(dynamicRelationsContextState.message || '').trim();
+    // const shouldShowRelationToast = Boolean(relationToastMessage) && hasSignals;
+    // const relationToastKey = `${dynamicRelationsContextState.loading ? 'loading' : 'ready'}|${
+    //   dynamicRelationsContextState.isError === true ? 'error' : 'ok'
+    // }|${relationToastMessage}|${showRelationsArea ? 'shown' : 'hidden'}`;
+    // if (shouldShowRelationToast && relationToastKey !== dynamicUiToastKey) {
+    //   dynamicUiToastKey = relationToastKey;
+    //   showDynamicUiToast(relationToastMessage, dynamicRelationsContextState.isError === true, {
+    //     durationMs: dynamicRelationsContextState.loading ? 1600 : 2600
+    //   });
+    // } else if (!shouldShowRelationToast) {
+    //   dynamicUiToastKey = '';
+    //   showDynamicUiToast('');
+    // }
+    dynamicUiToastKey = '';
+    showDynamicUiToast('');
 
     renderDynamicRelationDetailScreen();
   }
@@ -14274,25 +15101,61 @@ export function initPanelApp() {
 
   async function generateWhatsappSuggestion(tabContext, options = {}) {
     if (!tabContext || !isWhatsappContext(tabContext)) {
+      if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+        logWhatsappSuggestionTrace('generate:skip_not_whatsapp', {
+          context: summarizeWhatsappTraceContext(tabContext)
+        });
+      }
       hideWhatsappSuggestion();
       return;
     }
 
     const force = Boolean(options.force);
+    const forceLiveHydration = force || options.forceLiveHydration === true;
+    const traceEnabled = ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS;
+    if (traceEnabled) {
+      logWhatsappSuggestionTrace('generate:start', {
+        force,
+        forceLiveHydration,
+        cooldownUntil: Math.max(0, Number(whatsappSuggestionModelCooldownUntil) || 0),
+        cooldownRemainingMs: Math.max(0, (Number(whatsappSuggestionModelCooldownUntil) || 0) - Date.now()),
+        input: summarizeWhatsappTraceContext(tabContext),
+        state: {
+          loading: whatsappSuggestionState.loading,
+          signalKey: toSafeLogText(whatsappSuggestionState.signalKey, 180),
+          hasText: Boolean(whatsappSuggestionState.text),
+          dismissedSignalKey: toSafeLogText(whatsappSuggestionDismissedSignalKey, 180)
+        }
+      });
+    }
     if (!force && Date.now() < whatsappSuggestionModelCooldownUntil) {
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:skip_model_cooldown', {
+          cooldownRemainingMs: Math.max(0, whatsappSuggestionModelCooldownUntil - Date.now()),
+          input: summarizeWhatsappTraceContext(tabContext)
+        });
+      }
       return;
     }
 
     let suggestionContext = tabContext;
 
     try {
-      suggestionContext = await buildWhatsappSuggestionContext(tabContext);
+      suggestionContext = await buildWhatsappSuggestionContext(tabContext, {
+        forceLiveHydration
+      });
     } catch (error) {
       logWarn('whatsapp_history:context_build_error', {
         tabId: Number(tabContext.tabId) || -1,
         chatKey: toSafeLogText(getWhatsappChatKey(tabContext), 160),
         error: error instanceof Error ? error.message : String(error || '')
       });
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:context_build_error', {
+          error: error instanceof Error ? error.message : String(error || ''),
+          input: summarizeWhatsappTraceContext(tabContext)
+        });
+      }
       suggestionContext = tabContext;
     }
 
@@ -14311,12 +15174,30 @@ export function initPanelApp() {
       dismissedSignalKey: toSafeLogText(whatsappSuggestionDismissedSignalKey, 220),
       hasChatPrompt: Boolean(chatPrompt)
     });
+    if (traceEnabled) {
+      logWhatsappSuggestionTrace('generate:context_ready', {
+        force,
+        forceLiveHydration,
+        chatKey: toSafeLogText(chatKey, 160),
+        signalKey: toSafeLogText(signalKey, 220),
+        promptSignatureChars: promptSignature.length,
+        hasChatPrompt: Boolean(chatPrompt),
+        chatPromptChars: chatPrompt.length,
+        summary: contextSummary
+      });
+    }
 
     if (!signalKey || signalKey === '::') {
       logWarn('whatsapp_suggestion:skip_no_signal', {
         ...contextSummary,
         signalKey: toSafeLogText(signalKey, 120)
       });
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:skip_no_signal', {
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 120)
+        });
+      }
       hideWhatsappSuggestion();
       return;
     }
@@ -14327,6 +15208,13 @@ export function initPanelApp() {
         signalKey: toSafeLogText(signalKey, 220)
       });
       const waitingMessage = 'Aun no hay historial suficiente para sugerir next message en este chat.';
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:skip_no_messages', {
+          waitingMessage,
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220)
+        });
+      }
       whatsappSuggestionState = {
         tabId: Number(suggestionContext.tabId) || -1,
         chatKey,
@@ -14347,6 +15235,12 @@ export function initPanelApp() {
         chatKey: contextSummary.chatKey,
         signalKey: toSafeLogText(signalKey, 220)
       });
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:skip_dismissed', {
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220)
+        });
+      }
       hideWhatsappSuggestion();
       return;
     }
@@ -14364,15 +15258,35 @@ export function initPanelApp() {
         promptSignatureChars: promptSignature.length,
         suggestionChars: whatsappSuggestionState.text.length
       });
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:reuse_cached', {
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220),
+          promptSignatureChars: promptSignature.length,
+          suggestionChars: whatsappSuggestionState.text.length
+        });
+      }
       setWhatsappSuggestionResult(suggestionContext, whatsappSuggestionState.text);
       return;
     }
 
     if (!force && whatsappSuggestionState.loading && whatsappSuggestionState.signalKey === signalKey) {
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:skip_already_loading', {
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220)
+        });
+      }
       return;
     }
 
     if (!profileForSuggestion) {
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:skip_no_profile', {
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220)
+        });
+      }
       setWhatsappSuggestionUiStatus('No hay modelo disponible para sugerencias.', true);
       setStatus(whatsappSuggestionStatus, 'No hay modelo disponible para sugerencias.', true);
       renderAiDynamicContext(suggestionContext);
@@ -14384,6 +15298,14 @@ export function initPanelApp() {
       profileForSuggestion.provider === AI_PROVIDER_IDS.OLLAMA &&
       !ENABLE_AUTO_WHATSAPP_SUGGESTION_WITH_OLLAMA
     ) {
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:skip_ollama_auto_disabled', {
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220),
+          provider: toSafeLogText(profileForSuggestion.provider || '', 40),
+          model: toSafeLogText(profileForSuggestion.model || '', 80)
+        });
+      }
       hideWhatsappSuggestion();
       return;
     }
@@ -14398,6 +15320,14 @@ export function initPanelApp() {
       text: whatsappSuggestionState.text,
       loading: true
     };
+    if (traceEnabled) {
+      logWhatsappSuggestionTrace('generate:state_loading', {
+        token,
+        summary: contextSummary,
+        signalKey: toSafeLogText(signalKey, 220),
+        promptSignatureChars: promptSignature.length
+      });
+    }
 
     setWhatsappSuggestionLoading(suggestionContext);
     const startedAt = Date.now();
@@ -14424,6 +15354,23 @@ export function initPanelApp() {
           model: toSafeLogText(profileForSuggestion.model || '', 80)
         }
       });
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:model_start', {
+          token,
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220),
+          promptSignatureChars: promptSignature.length,
+          basePromptChars: basePrompt.length,
+          chatPromptChars: chatPrompt.length,
+          promptChars: prompt.length,
+          promptPreview: toSafeLogText(prompt, 640),
+          profile: {
+            id: toSafeLogText(profileForSuggestion.id || '', 80),
+            provider: toSafeLogText(profileForSuggestion.provider || '', 40),
+            model: toSafeLogText(profileForSuggestion.model || '', 80)
+          }
+        });
+      }
 
       const suggestionRaw = await generateWithActiveModel(prompt, {
         temperature: 0.35,
@@ -14444,6 +15391,17 @@ export function initPanelApp() {
         suggestionChars: suggestion.length,
         suggestionPreview: toSafeLogText(suggestion, 200)
       });
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:model_done', {
+          token,
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220),
+          elapsedMs: Date.now() - startedAt,
+          rawChars: suggestionRaw.length,
+          suggestionChars: suggestion.length,
+          suggestionPreview: toSafeLogText(suggestion, 200)
+        });
+      }
 
       if (token !== whatsappSuggestionToken) {
         logDebug('whatsapp_suggestion:ignored_outdated_token', {
@@ -14452,6 +15410,13 @@ export function initPanelApp() {
           tabId: contextSummary.tabId,
           chatKey: contextSummary.chatKey
         });
+        if (traceEnabled) {
+          logWhatsappSuggestionTrace('generate:skip_outdated_token', {
+            token,
+            currentToken: whatsappSuggestionToken,
+            summary: contextSummary
+          });
+        }
         return;
       }
 
@@ -14468,9 +15433,24 @@ export function initPanelApp() {
         loading: false
       };
 
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:success', {
+          token,
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220),
+          suggestionChars: suggestion.length,
+          suggestionPreview: toSafeLogText(suggestion, 200)
+        });
+      }
       setWhatsappSuggestionResult(suggestionContext, suggestion);
     } catch (error) {
       if (token !== whatsappSuggestionToken) {
+        if (traceEnabled) {
+          logWhatsappSuggestionTrace('generate:skip_error_outdated_token', {
+            token,
+            currentToken: whatsappSuggestionToken
+          });
+        }
         return;
       }
 
@@ -14493,6 +15473,16 @@ export function initPanelApp() {
       const message = error instanceof Error ? error.message : 'No se pudo generar sugerencia.';
       if (!force && isLikelyModelOfflineError(message)) {
         whatsappSuggestionModelCooldownUntil = Date.now() + WHATSAPP_SUGGESTION_MODEL_COOLDOWN_MS;
+      }
+      if (traceEnabled) {
+        logWhatsappSuggestionTrace('generate:error', {
+          token,
+          summary: contextSummary,
+          signalKey: toSafeLogText(signalKey, 220),
+          elapsedMs: Date.now() - startedAt,
+          error: message,
+          cooldownUntil: Math.max(0, Number(whatsappSuggestionModelCooldownUntil) || 0)
+        });
       }
       setWhatsappSuggestionUiStatus(message, true);
       setStatus(whatsappSuggestionStatus, message, true);
@@ -14908,16 +15898,10 @@ export function initPanelApp() {
 
     trimTabSummaryCache();
     const knownTabIds = new Set(tabs.map((item) => Number(item?.tabId)).filter((item) => Number.isFinite(item) && item >= 0));
-    for (const tabId of whatsappHistorySyncNextAllowedByTab.keys()) {
-      if (!knownTabIds.has(tabId)) {
-        whatsappHistorySyncNextAllowedByTab.delete(tabId);
-      }
-    }
-    for (const tabId of whatsappLiveContextBlockedUntilByTab.keys()) {
-      if (!knownTabIds.has(tabId)) {
-        whatsappLiveContextBlockedUntilByTab.delete(tabId);
-      }
-    }
+    runRuntimeGarbageCollector({
+      reason: 'snapshot',
+      knownTabIds
+    });
 
     const tabsForSummary = tabs.slice(0, getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY));
     for (const tab of tabsForSummary) {
@@ -14931,6 +15915,23 @@ export function initPanelApp() {
     renderTabsContextJson();
 
     const activeTab = getActiveTabContext();
+    if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+      logWhatsappSuggestionTrace('snapshot:received', {
+        snapshotReason: toSafeLogText(snapshot.reason || '', 80),
+        snapshotUpdatedAt: Number(snapshot.updatedAt) || 0,
+        activeTabId: Number(tabContextSnapshot.activeTabId) || -1,
+        activeIsWhatsapp: Boolean(activeTab && isWhatsappContext(activeTab)),
+        active: summarizeWhatsappTraceContext(activeTab),
+        state: {
+          activeChatKeyCache: toSafeLogText(whatsappSuggestionActiveChatKey, 120),
+          loading: whatsappSuggestionState.loading,
+          signalKey: toSafeLogText(whatsappSuggestionState.signalKey, 180),
+          hasText: Boolean(whatsappSuggestionState.text),
+          dismissedSignalKey: toSafeLogText(whatsappSuggestionDismissedSignalKey, 180),
+          hasTimer: Boolean(whatsappSuggestionRefreshTimer)
+        }
+      });
+    }
     const canRunDynamicRelations = canRunDynamicRelationsForTab(activeTab);
     dynamicContextSignals = canRunDynamicRelations ? collectDynamicSignalsFromTab(activeTab) : { phones: [], emails: [] };
     void refreshDynamicRelationsContext(activeTab, dynamicContextSignals, { force: false });
@@ -14946,11 +15947,44 @@ export function initPanelApp() {
 
     if (!activeTab || !isWhatsappContext(activeTab)) {
       clearWhatsappSuggestionRefreshTimer();
+      whatsappSuggestionActiveChatKey = '';
+      if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+        logWhatsappSuggestionTrace('snapshot:hide_non_whatsapp', {
+          activeTabId: Number(tabContextSnapshot.activeTabId) || -1
+        });
+      }
       hideWhatsappSuggestion();
       return;
     }
 
-    scheduleWhatsappSuggestionForTab(activeTab, { force: false });
+    const activeChatKey = String(getWhatsappChatKey(activeTab) || '').trim();
+    const previousActiveChatKey = String(whatsappSuggestionActiveChatKey || '').trim();
+    const shouldForceSuggestionRefresh = Boolean(
+      activeChatKey && activeChatKey !== whatsappSuggestionActiveChatKey
+    );
+    whatsappSuggestionActiveChatKey = activeChatKey;
+    if (shouldForceSuggestionRefresh) {
+      clearWhatsappSuggestionRefreshTimer();
+      if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+        logWhatsappSuggestionTrace('snapshot:force_refresh_chat_changed', {
+          activeChatKey: toSafeLogText(activeChatKey, 120),
+          previousChatKey: toSafeLogText(previousActiveChatKey, 120),
+          active: summarizeWhatsappTraceContext(activeTab)
+        });
+      }
+      void generateWhatsappSuggestion(activeTab, {
+        force: true,
+        forceLiveHydration: true
+      });
+    } else {
+      if (ENABLE_WHATSAPP_SUGGESTION_TRACE_LOGS) {
+        logWhatsappSuggestionTrace('snapshot:schedule_refresh', {
+          activeChatKey: toSafeLogText(activeChatKey, 120),
+          active: summarizeWhatsappTraceContext(activeTab)
+        });
+      }
+      scheduleWhatsappSuggestionForTab(activeTab, { force: false });
+    }
     renderAiDynamicContext(activeTab);
   }
 
@@ -17131,7 +18165,7 @@ export function initPanelApp() {
           preserveStatus: true
         });
       }
-      updateChatInputSize();
+      requestChatInputResize();
     });
 
     chatInput?.addEventListener('keydown', (event) => {
@@ -17322,6 +18356,9 @@ export function initPanelApp() {
 
     window.addEventListener('beforeunload', () => {
       detachRuntimeMessageListener();
+      stopRuntimeGarbageCollector();
+      runtimeListenerMonitor.uninstall();
+      cancelScheduledChatInputResize();
       setVoiceSessionActive(false, {
         reason: 'beforeunload',
         stopPlayback: false
@@ -17353,6 +18390,13 @@ export function initPanelApp() {
     window.addEventListener('focus', () => {
       requestPrimaryScreenAutofocus(app?.dataset?.screen || '', 8, 70);
       scheduleStageStabilization(app?.dataset?.screen || '');
+    });
+
+    window.addEventListener('resize', () => {
+      requestChatInputResize({
+        immediate: true,
+        forceMeasure: true
+      });
     });
 
     document.addEventListener('visibilitychange', () => {
@@ -17424,12 +18468,16 @@ export function initPanelApp() {
       setStageTransitionEnabled(false);
       realignStageToScreen(app?.dataset?.screen || 'onboarding');
       renderAssistantBranding();
+      runtimeListenerMonitor.install();
+      startRuntimeGarbageCollector();
       attachRuntimeMessageListener();
       wireEvents();
       setChatTool(DEFAULT_CHAT_TOOL);
       renderPendingConversationAttachments();
       closeToolMenu();
-      updateChatInputSize();
+      updateChatInputSize({
+        forceMeasure: true
+      });
       renderImageQueue();
       hideWhatsappSuggestion();
       renderTabsContextJson();
@@ -17496,6 +18544,9 @@ export function initPanelApp() {
         });
       });
     } catch (error) {
+      stopRuntimeGarbageCollector();
+      runtimeListenerMonitor.uninstall();
+      cancelScheduledChatInputResize();
       const message = error instanceof Error ? error.message : 'No se pudo inicializar el panel.';
       setStatus(chatStatus, message, true);
       logWarn('init:error', { error: message });

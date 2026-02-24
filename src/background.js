@@ -39,6 +39,12 @@
   const LOG_PREFIX = '[greene/background]';
   const WHATSAPP_WEB_BASE_URL = 'https://web.whatsapp.com/';
   const WHATSAPP_WEB_MATCH_PATTERN = 'https://web.whatsapp.com/*';
+  const TAB_CONTEXT_CONTENT_SCRIPT_FILES = Object.freeze([
+    'node_modules/@mozilla/readability/Readability.js',
+    'src/tab-context/site-handlers/generic-handler.js',
+    'src/tab-context/site-handlers/whatsapp-handler.js',
+    'src/content-tab-context.js'
+  ]);
   const tabContextState = new Map();
   const tabTemporalState = new Map();
   const recentHistoryByUrl = new Map();
@@ -68,6 +74,7 @@
   const NUWWE_LOGIN_HOSTS = new Set(['nuwwe.com', 'www.nuwwe.com']);
   const NUWWE_LOGIN_PATH_PREFIX = '/login';
   const whatsappContextLogByTab = new Map();
+  const tabContextScriptInjectionPromiseByTab = new Map();
   let runtimeContextState = {
     updatedAt: 0,
     reason: 'init',
@@ -1432,6 +1439,107 @@
     return token.includes('could not establish connection') || token.includes('receiving end does not exist');
   }
 
+  function isInjectableTabUrl(url = '') {
+    const safeUrl = toSafeUrl(url);
+    if (!safeUrl) {
+      return false;
+    }
+
+    return !/^https:\/\/chrome\.google\.com\/webstore(\/|$)/i.test(safeUrl);
+  }
+
+  async function injectTabContextScripts(tabId, url = '') {
+    if (typeof tabId !== 'number' || tabId < 0) {
+      return {
+        ok: false,
+        reason: 'invalid_tab_id'
+      };
+    }
+
+    if (!isInjectableTabUrl(url)) {
+      return {
+        ok: false,
+        reason: 'url_not_injectable',
+        url: toSafeText(url || '', 220)
+      };
+    }
+
+    if (!chrome.scripting || typeof chrome.scripting.executeScript !== 'function') {
+      return {
+        ok: false,
+        reason: 'scripting_unavailable'
+      };
+    }
+
+    const inFlight = tabContextScriptInjectionPromiseByTab.get(tabId);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const promise = new Promise((resolve) => {
+      chrome.scripting.executeScript(
+        {
+          target: { tabId },
+          files: TAB_CONTEXT_CONTENT_SCRIPT_FILES
+        },
+        () => {
+          if (chrome.runtime.lastError) {
+            resolve({
+              ok: false,
+              reason: 'execute_script_failed',
+              error: toSafeText(chrome.runtime.lastError.message || 'execute_script_failed', 260)
+            });
+            return;
+          }
+
+          resolve({
+            ok: true,
+            reason: 'injected'
+          });
+        }
+      );
+    }).finally(() => {
+      tabContextScriptInjectionPromiseByTab.delete(tabId);
+    });
+
+    tabContextScriptInjectionPromiseByTab.set(tabId, promise);
+    return promise;
+  }
+
+  async function requestTabContextPayloadFromContentScript(tabId, reason = 'refresh') {
+    if (typeof tabId !== 'number' || tabId < 0) {
+      return {
+        ok: false,
+        error: 'tab_id_invalido'
+      };
+    }
+
+    return new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, { type: MESSAGE_TYPES.GET_TAB_CONTEXT, reason }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            error: toSafeText(chrome.runtime.lastError.message || 'No se pudo leer contexto del tab.', 260)
+          });
+          return;
+        }
+
+        if (!response || response.ok !== true || !response.context) {
+          resolve({
+            ok: false,
+            error: toSafeText(response?.error || 'Sin respuesta valida del content script.', 260)
+          });
+          return;
+        }
+
+        resolve({
+          ok: true,
+          context: response.context
+        });
+      });
+    });
+  }
+
   async function waitForTabReadyForSiteAction(tabId, site, options = {}) {
     const attempts = Math.max(1, Math.min(40, Number(options.attempts) || 16));
     const delayMs = Math.max(60, Number(options.delayMs) || 160);
@@ -1526,7 +1634,22 @@
         break;
       }
 
-      if (safeSite === 'whatsapp' && noReceiver) {
+      if (noReceiver) {
+        const targetTab = await getTabById(tabId);
+        const injection = await injectTabContextScripts(tabId, targetTab?.url || '');
+        logDebug('runSiteActionInTab:no_receiver_reinject', {
+          tabId,
+          site: safeSite,
+          action: safeAction,
+          attempt,
+          injectOk: Boolean(injection?.ok),
+          injectReason: toSafeText(injection?.reason || '', 80),
+          injectError: toSafeText(injection?.error || '', 220)
+        });
+        if (injection?.ok) {
+          await waitForMs(120);
+          continue;
+        }
         break;
       }
 
@@ -1981,14 +2104,44 @@
       return;
     }
 
-    chrome.tabs.sendMessage(tabId, { type: MESSAGE_TYPES.GET_TAB_CONTEXT, reason }, (response) => {
-      if (chrome.runtime.lastError || !response || response.ok !== true || !response.context) {
-        upsertFallbackContext(tabId, `${reason}_fallback`);
-        return;
-      }
+    const firstAttempt = await requestTabContextPayloadFromContentScript(tabId, reason);
+    if (firstAttempt?.ok === true && firstAttempt.context) {
+      upsertContextFromTab(tab, firstAttempt.context, reason);
+      return;
+    }
 
-      upsertContextFromTab(tab, response.context, reason);
-    });
+    const firstError = toSafeText(firstAttempt?.error || '', 260);
+    const recoverable = isRecoverableSiteActionError(firstError);
+    let injected = null;
+
+    if (recoverable) {
+      injected = await injectTabContextScripts(tabId, tab.url || '');
+      logDebug('requestContextFromTab:reinject_attempt', {
+        tabId,
+        reason,
+        url: toSafeText(tab.url || '', 220),
+        initialError: firstError,
+        injectOk: Boolean(injected?.ok),
+        injectReason: toSafeText(injected?.reason || '', 80),
+        injectError: toSafeText(injected?.error || '', 220)
+      });
+      if (injected?.ok) {
+        await waitForMs(90);
+        const secondAttempt = await requestTabContextPayloadFromContentScript(tabId, `${reason}_reinjected`);
+        if (secondAttempt?.ok === true && secondAttempt.context) {
+          upsertContextFromTab(tab, secondAttempt.context, reason);
+          return;
+        }
+
+        logWarn('requestContextFromTab:reinject_failed_to_recover', {
+          tabId,
+          reason,
+          secondError: toSafeText(secondAttempt?.error || '', 260)
+        });
+      }
+    }
+
+    upsertFallbackContext(tabId, `${reason}_fallback`);
   }
 
   async function refreshAllTabs(reason = 'refresh_all') {

@@ -870,8 +870,12 @@ export function createAiProviderService({
     const mime = String(blob.type || '').trim().toLowerCase();
     const extension = mime.includes('wav')
       ? 'wav'
+      : mime.includes('m4a')
+        ? 'm4a'
       : mime.includes('ogg')
         ? 'ogg'
+        : mime.includes('webm')
+          ? 'webm'
         : mime.includes('mp4')
           ? 'mp4'
           : mime.includes('mpeg') || mime.includes('mp3')
