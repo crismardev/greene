@@ -187,6 +187,12 @@ export function initPanelApp() {
   const MAX_WHATSAPP_PERSISTED_MESSAGES = 640;
   const MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT = 2000;
   const WHATSAPP_SUGGESTION_HISTORY_LIMIT = 120;
+  const WHATSAPP_ALIAS_STORAGE_KEY = 'greene_whatsapp_alias_book_v1';
+  const WHATSAPP_ALIAS_STORAGE_VERSION = 1;
+  const WHATSAPP_ALIAS_MAX_ITEMS = 240;
+  const WHATSAPP_ALIAS_DB_INDEX_SYNC_COOLDOWN_MS = 1000 * 45;
+  const MEMORY_USER_PROFILE_MAX_ITEMS = 480;
+  const MEMORY_USER_PROFILE_MAX_ITEMS_STORAGE_LIMIT = 3000;
   const MAX_WHATSAPP_PROMPT_ENTRIES = 320;
   const MAX_WHATSAPP_PROMPT_CHARS = 1800;
   const VOICE_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
@@ -199,17 +205,18 @@ export function initPanelApp() {
   const VOICE_TTS_SPEED_DEFAULT = 1;
   const VOICE_TTS_SPEED_MIN = 0.25;
   const VOICE_TTS_SPEED_MAX = 2;
+  const VOICE_PAUSE_MS_DEFAULT = 650;
+  const VOICE_PAUSE_MS_MIN = 300;
+  const VOICE_PAUSE_MS_MAX = 5000;
   const VOICE_TTS_FORMAT = 'mp3';
   const VOICE_AUTO_STOP_MAX_MS = 1000 * 60 * 2;
   const VOICE_MIN_ACTIVE_RECORDING_MS = 650;
-  const VOICE_SILENCE_HOLD_MS = 650;
   const VOICE_SILENCE_RMS_THRESHOLD = 0.026;
   const VOICE_VAD_MODEL = 'v5';
   const VOICE_VAD_ASSET_BASE_PATH = new URL('../node_modules/@ricky0123/vad-web/dist/', import.meta.url).href;
   const VOICE_VAD_WASM_BASE_PATH = new URL('../node_modules/onnxruntime-web/dist/', import.meta.url).href;
   const VOICE_VAD_POSITIVE_THRESHOLD = 0.28;
   const VOICE_VAD_NEGATIVE_THRESHOLD = 0.22;
-  const VOICE_VAD_REDEMPTION_MS = 560;
   const VOICE_VAD_MIN_SPEECH_MS = 220;
   const VOICE_VAD_PRESPEECH_PAD_MS = 260;
   const VOICE_MEDIA_RECORDER_TIMESLICE_MS = 0;
@@ -269,7 +276,9 @@ export function initPanelApp() {
     initialContextSyncStaleMs: INITIAL_CONTEXT_SYNC_STALE_MS,
     maxWhatsappPersistedMessages: MAX_WHATSAPP_PERSISTED_MESSAGES,
     maxWhatsappPersistedMessagesStorageLimit: MAX_WHATSAPP_PERSISTED_MESSAGES_STORAGE_LIMIT,
-    whatsappSuggestionHistoryLimit: WHATSAPP_SUGGESTION_HISTORY_LIMIT
+    whatsappSuggestionHistoryLimit: WHATSAPP_SUGGESTION_HISTORY_LIMIT,
+    memoryUserProfileMaxItems: MEMORY_USER_PROFILE_MAX_ITEMS,
+    memoryUserProfileMaxItemsStorageLimit: MEMORY_USER_PROFILE_MAX_ITEMS_STORAGE_LIMIT
   });
   const SYSTEM_VARIABLE_SCOPE_ORDER = systemVariablesController.scopeOrder;
   const SYSTEM_VARIABLE_DEFINITIONS = systemVariablesController.definitions;
@@ -383,6 +392,7 @@ export function initPanelApp() {
     language: BROWSER_DEFAULT_ASSISTANT_LANGUAGE,
     voiceTtsVoice: VOICE_TTS_VOICE,
     voiceTtsSpeed: VOICE_TTS_SPEED_DEFAULT,
+    voicePauseMs: VOICE_PAUSE_MS_DEFAULT,
     onboardingDone: false,
     systemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
     systemVariables: { ...SYSTEM_VARIABLE_DEFAULTS },
@@ -487,6 +497,8 @@ export function initPanelApp() {
   const settingsVoiceTtsVoiceSelect = document.getElementById('settingsVoiceTtsVoiceSelect');
   const settingsVoiceTtsSpeedInput = document.getElementById('settingsVoiceTtsSpeedInput');
   const settingsVoiceTtsSpeedValue = document.getElementById('settingsVoiceTtsSpeedValue');
+  const settingsVoicePauseMsInput = document.getElementById('settingsVoicePauseMsInput');
+  const settingsVoicePauseMsValue = document.getElementById('settingsVoicePauseMsValue');
   const settingsLanguageSelect = document.getElementById('settingsLanguageSelect');
   const settingsSystemPrompt = document.getElementById('settingsSystemPrompt');
   const settingsUserStatus = document.getElementById('settingsUserStatus');
@@ -713,6 +725,20 @@ export function initPanelApp() {
   let contextIngestionPromise = Promise.resolve();
   let whatsappHistorySyncPromise = Promise.resolve();
   let whatsappHistoryVectorFingerprintByKey = new Map();
+  let whatsappAliasBook = {
+    version: WHATSAPP_ALIAS_STORAGE_VERSION,
+    updatedAt: 0,
+    aliases: {}
+  };
+  let whatsappAliasWritePromise = Promise.resolve();
+  let whatsappAliasDbIndexSyncPromise = Promise.resolve({
+    changed: false,
+    added: 0,
+    updated: 0,
+    scannedChats: 0,
+    assignments: 0
+  });
+  let whatsappAliasDbIndexSyncedAt = 0;
   let initialContextSyncPromise = null;
   function createInitialVoiceCaptureState() {
     return {
@@ -720,6 +746,7 @@ export function initPanelApp() {
       mediaStream: null,
       mediaRecorder: null,
       vad: null,
+      vadRedemptionMs: 0,
       usingVad: false,
       chunks: [],
       audioContext: null,
@@ -4156,6 +4183,7 @@ export function initPanelApp() {
     next.voiceActiveListening = true;
     next.voiceTtsVoice = normalizeVoiceTtsVoice(next.voiceTtsVoice || VOICE_TTS_VOICE);
     next.voiceTtsSpeed = normalizeVoiceTtsSpeed(next.voiceTtsSpeed);
+    next.voicePauseMs = normalizeVoicePauseMs(next.voicePauseMs);
     next.securityConfig = pinCryptoService.isConfigured(next.securityConfig) ? next.securityConfig : null;
     next.systemVariables = normalizeSystemVariables(next.systemVariables);
     next.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(next.crmErpDatabaseUrl || '');
@@ -5501,6 +5529,7 @@ export function initPanelApp() {
     panelSettings.voiceActiveListening = true;
     panelSettings.voiceTtsVoice = normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
     panelSettings.voiceTtsSpeed = normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed);
+    panelSettings.voicePauseMs = normalizeVoicePauseMs(panelSettings.voicePauseMs);
     panelSettings.systemVariables = normalizeSystemVariables(panelSettings.systemVariables);
     panelSettings.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
     panelSettings.crmErpDatabaseSchemaSnapshot = normalizeCrmErpDatabaseSnapshot(panelSettings.crmErpDatabaseSchemaSnapshot);
@@ -5518,6 +5547,7 @@ export function initPanelApp() {
         voiceActiveListening: true,
         voiceTtsVoice: panelSettings.voiceTtsVoice,
         voiceTtsSpeed: panelSettings.voiceTtsSpeed,
+        voicePauseMs: panelSettings.voicePauseMs,
         systemPrompt: panelSettings.systemPrompt,
         systemVariables: { ...panelSettings.systemVariables },
         crmErpDatabaseUrl: panelSettings.crmErpDatabaseUrl,
@@ -6060,12 +6090,30 @@ export function initPanelApp() {
     return Number(clamped.toFixed(2));
   }
 
+  function normalizeVoicePauseMs(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return VOICE_PAUSE_MS_DEFAULT;
+    }
+
+    const clamped = Math.max(VOICE_PAUSE_MS_MIN, Math.min(VOICE_PAUSE_MS_MAX, numeric));
+    return Math.round(clamped);
+  }
+
   function getConfiguredVoiceTtsVoice() {
     return normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
   }
 
   function getConfiguredVoiceTtsSpeed() {
     return normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
+  }
+
+  function getConfiguredVoicePauseMs() {
+    return normalizeVoicePauseMs(settingsVoicePauseMsInput?.value ?? panelSettings.voicePauseMs);
+  }
+
+  function getConfiguredVoiceVadRedemptionMs() {
+    return Math.max(220, getConfiguredVoicePauseMs());
   }
 
   function isVoiceActiveListeningEnabled() {
@@ -6078,16 +6126,20 @@ export function initPanelApp() {
     );
     const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
     const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
+    const pauseMs = getConfiguredVoicePauseMs();
 
     if (settingsVoiceTtsSpeedValue) {
       settingsVoiceTtsSpeedValue.textContent = `${ttsSpeed.toFixed(2)}x`;
+    }
+    if (settingsVoicePauseMsValue) {
+      settingsVoicePauseMsValue.textContent = `${pauseMs} ms`;
     }
 
     if (!settingsVoiceModeMeta) {
       return;
     }
 
-    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x`;
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
   }
 
   function getOpenAiSpeechProfile() {
@@ -6507,6 +6559,7 @@ export function initPanelApp() {
     if (voiceCaptureState.vad) {
       const vadInstance = voiceCaptureState.vad;
       voiceCaptureState.vad = null;
+      voiceCaptureState.vadRedemptionMs = 0;
       voiceCaptureState.usingVad = false;
       try {
         void vadInstance.pause().catch(() => {});
@@ -6624,8 +6677,30 @@ export function initPanelApp() {
       return null;
     }
 
+    const configuredRedemptionMs = getConfiguredVoiceVadRedemptionMs();
     if (voiceCaptureState.vad) {
-      return voiceCaptureState.vad;
+      if (Number(voiceCaptureState.vadRedemptionMs) === configuredRedemptionMs) {
+        return voiceCaptureState.vad;
+      }
+
+      const staleVad = voiceCaptureState.vad;
+      voiceCaptureState.vad = null;
+      voiceCaptureState.vadRedemptionMs = 0;
+      voiceCaptureState.usingVad = false;
+      try {
+        if (typeof staleVad.pause === 'function') {
+          await staleVad.pause();
+        }
+      } catch (_) {
+        // Ignore VAD pause cleanup issues.
+      }
+      try {
+        if (typeof staleVad.destroy === 'function') {
+          await staleVad.destroy();
+        }
+      } catch (_) {
+        // Ignore VAD destroy cleanup issues.
+      }
     }
 
     const sharedGetStream = async () => {
@@ -6652,7 +6727,7 @@ export function initPanelApp() {
       onnxWASMBasePath: VOICE_VAD_WASM_BASE_PATH,
       positiveSpeechThreshold: VOICE_VAD_POSITIVE_THRESHOLD,
       negativeSpeechThreshold: VOICE_VAD_NEGATIVE_THRESHOLD,
-      redemptionMs: VOICE_VAD_REDEMPTION_MS,
+      redemptionMs: configuredRedemptionMs,
       minSpeechMs: VOICE_VAD_MIN_SPEECH_MS,
       preSpeechPadMs: VOICE_VAD_PRESPEECH_PAD_MS,
       getStream: sharedGetStream,
@@ -6687,6 +6762,7 @@ export function initPanelApp() {
     });
 
     voiceCaptureState.vad = vadInstance;
+    voiceCaptureState.vadRedemptionMs = configuredRedemptionMs;
     return vadInstance;
   }
 
@@ -7112,6 +7188,7 @@ export function initPanelApp() {
 
     if (!usingVad) {
       const canAutoStopBySilence = Boolean(voiceCaptureState.analyser && voiceCaptureState.sampleBuffer);
+      const configuredPauseMs = getConfiguredVoicePauseMs();
       const monitorSilence = () => {
         if (voiceCaptureState.mode !== 'recording') {
           return;
@@ -7139,7 +7216,7 @@ export function initPanelApp() {
           if (
             canAutoStopBySilence &&
             now - voiceCaptureState.startedAt >= VOICE_MIN_ACTIVE_RECORDING_MS &&
-            now - voiceCaptureState.silenceSince >= VOICE_SILENCE_HOLD_MS
+            now - voiceCaptureState.silenceSince >= configuredPauseMs
           ) {
             void stopVoiceCapture({
               transcribe: true,
@@ -7170,8 +7247,8 @@ export function initPanelApp() {
     setStatus(
       chatStatus,
       usingVad
-        ? 'Escucha por voz activa (VAD). Se enviara automaticamente al terminar de hablar.'
-        : 'Escucha por silencio iniciada. Se enviara en cuanto detecte pausa.',
+        ? `Escucha por voz activa (VAD). Pausa configurada: ${getConfiguredVoicePauseMs()} ms.`
+        : `Escucha por silencio iniciada. Se enviara al detectar ${getConfiguredVoicePauseMs()} ms de pausa.`,
       false,
       { loading: true }
     );
@@ -7234,6 +7311,7 @@ export function initPanelApp() {
         }
       }
       voiceCaptureState.vad = null;
+      voiceCaptureState.vadRedemptionMs = 0;
       voiceCaptureState.usingVad = false;
       cleanupVoiceCaptureGraph();
       stopVoiceCaptureTracks(stream);
@@ -7879,6 +7957,726 @@ export function initPanelApp() {
     return `Navegacion reciente (historial):\n${lines.join('\n')}`;
   }
 
+  const WHATSAPP_ALIAS_STOPWORDS = new Set([
+    'a',
+    'al',
+    'la',
+    'el',
+    'de',
+    'del',
+    'para',
+    'to',
+    'send',
+    'mensaje',
+    'message',
+    'envia',
+    'enviar',
+    'manda',
+    'mandar',
+    'escribe',
+    'escribir',
+    'whatsapp',
+    'chat',
+    'numero',
+    'numero',
+    'telefono',
+    'phone'
+  ]);
+
+  function normalizeWhatsappAliasToken(value, limit = 64) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9._\-\s]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, Math.max(8, Number(limit) || 64));
+
+    if (!token || token.length < 2) {
+      return '';
+    }
+
+    if (/^\d+$/.test(token)) {
+      return '';
+    }
+
+    return token;
+  }
+
+  function normalizeWhatsappAliasLabel(value, fallbackToken = '', limit = 72) {
+    const safe = String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, Math.max(24, Number(limit) || 72));
+    if (safe) {
+      return safe;
+    }
+
+    return String(fallbackToken || '').slice(0, Math.max(24, Number(limit) || 72));
+  }
+
+  function normalizeWhatsappAliasRecord(rawRecord, fallbackAlias = '') {
+    const record = rawRecord && typeof rawRecord === 'object' ? rawRecord : {};
+    const alias = normalizeWhatsappAliasToken(record.alias || fallbackAlias || '');
+    const phone = normalizeWhatsappPhoneForUrl(record.phone || record.number || '');
+    if (!alias || !phone) {
+      return null;
+    }
+
+    const createdAt = Math.max(0, Number(record.createdAt) || 0) || Date.now();
+    const updatedAt = Math.max(createdAt, Number(record.updatedAt) || createdAt);
+    const lastUsedAt = Math.max(0, Number(record.lastUsedAt) || 0);
+    const useCount = Math.max(0, Number(record.useCount) || 0);
+    const source = String(record.source || 'manual').trim().slice(0, 40) || 'manual';
+
+    return {
+      alias,
+      label: normalizeWhatsappAliasLabel(record.label || record.name || alias, alias),
+      phone,
+      createdAt,
+      updatedAt,
+      lastUsedAt,
+      useCount,
+      source
+    };
+  }
+
+  function normalizeWhatsappAliasBook(rawBook) {
+    const raw = rawBook && typeof rawBook === 'object' ? rawBook : {};
+    const aliasSource = raw.aliases && typeof raw.aliases === 'object' ? raw.aliases : raw;
+    const normalizedByAlias = new Map();
+    const entries = Object.entries(aliasSource || {});
+
+    for (const [aliasKey, value] of entries) {
+      const record = normalizeWhatsappAliasRecord(
+        typeof value === 'string'
+          ? {
+              alias: aliasKey,
+              label: aliasKey,
+              phone: value
+            }
+          : {
+              ...(value && typeof value === 'object' ? value : {}),
+              alias: aliasKey
+            },
+        aliasKey
+      );
+      if (!record) {
+        continue;
+      }
+
+      const known = normalizedByAlias.get(record.alias);
+      if (!known) {
+        normalizedByAlias.set(record.alias, record);
+        continue;
+      }
+
+      normalizedByAlias.set(record.alias, {
+        ...known,
+        phone: record.phone || known.phone,
+        label: record.label.length > known.label.length ? record.label : known.label,
+        updatedAt: Math.max(known.updatedAt || 0, record.updatedAt || 0),
+        lastUsedAt: Math.max(known.lastUsedAt || 0, record.lastUsedAt || 0),
+        useCount: Math.max(known.useCount || 0, record.useCount || 0),
+        source: record.source || known.source || 'manual'
+      });
+    }
+
+    const sorted = Array.from(normalizedByAlias.values()).sort((left, right) => {
+      const leftUsed = Math.max(0, Number(left.lastUsedAt) || 0);
+      const rightUsed = Math.max(0, Number(right.lastUsedAt) || 0);
+      if (leftUsed !== rightUsed) {
+        return rightUsed - leftUsed;
+      }
+
+      const leftCount = Math.max(0, Number(left.useCount) || 0);
+      const rightCount = Math.max(0, Number(right.useCount) || 0);
+      if (leftCount !== rightCount) {
+        return rightCount - leftCount;
+      }
+
+      return (Number(right.updatedAt) || 0) - (Number(left.updatedAt) || 0);
+    });
+    const trimmed = sorted.slice(0, WHATSAPP_ALIAS_MAX_ITEMS);
+    const aliases = {};
+    let updatedAt = 0;
+
+    for (const item of trimmed) {
+      aliases[item.alias] = item;
+      updatedAt = Math.max(updatedAt, Number(item.updatedAt) || 0);
+    }
+
+    return {
+      version: WHATSAPP_ALIAS_STORAGE_VERSION,
+      updatedAt: Math.max(0, Number(raw.updatedAt) || 0, updatedAt),
+      aliases
+    };
+  }
+
+  function getWhatsappAliasEntries(limit = 40) {
+    const safeLimit = Math.max(1, Math.min(WHATSAPP_ALIAS_MAX_ITEMS, Number(limit) || 40));
+    const entries = Object.values(
+      whatsappAliasBook?.aliases && typeof whatsappAliasBook.aliases === 'object' ? whatsappAliasBook.aliases : {}
+    );
+
+    return entries
+      .map((item) => normalizeWhatsappAliasRecord(item, item?.alias || ''))
+      .filter(Boolean)
+      .sort((left, right) => {
+        const leftCount = Math.max(0, Number(left.useCount) || 0);
+        const rightCount = Math.max(0, Number(right.useCount) || 0);
+        if (leftCount !== rightCount) {
+          return rightCount - leftCount;
+        }
+
+        const leftUsed = Math.max(0, Number(left.lastUsedAt || left.updatedAt) || 0);
+        const rightUsed = Math.max(0, Number(right.lastUsedAt || right.updatedAt) || 0);
+        return rightUsed - leftUsed;
+      })
+      .slice(0, safeLimit);
+  }
+
+  async function persistWhatsappAliasBook() {
+    whatsappAliasBook = normalizeWhatsappAliasBook(whatsappAliasBook);
+    const payload = {
+      [WHATSAPP_ALIAS_STORAGE_KEY]: whatsappAliasBook
+    };
+
+    whatsappAliasWritePromise = whatsappAliasWritePromise
+      .catch(() => {})
+      .then(() => writeChromeLocal(payload));
+    await whatsappAliasWritePromise;
+    return true;
+  }
+
+  async function hydrateWhatsappAliasBook() {
+    const payload = await readChromeLocal({
+      [WHATSAPP_ALIAS_STORAGE_KEY]: null
+    });
+    whatsappAliasBook = normalizeWhatsappAliasBook(payload?.[WHATSAPP_ALIAS_STORAGE_KEY]);
+    return whatsappAliasBook;
+  }
+
+  function buildWhatsappAliasCandidatesFromText(value = '') {
+    const source = String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!source) {
+      return [];
+    }
+
+    const normalized = normalizeWhatsappAliasToken(source, 120);
+    const candidates = [];
+    const pushCandidate = (item) => {
+      const token = normalizeWhatsappAliasToken(item, 64);
+      if (!token || WHATSAPP_ALIAS_STOPWORDS.has(token) || candidates.includes(token)) {
+        return;
+      }
+      candidates.push(token);
+    };
+
+    if (normalized) {
+      pushCandidate(normalized);
+    }
+
+    const tail = normalized.match(/\b(?:a|to|para)\s+([a-z0-9._-]{2,40})$/i);
+    if (tail && tail[1]) {
+      pushCandidate(tail[1]);
+    }
+
+    const words = normalized.split(' ');
+    for (const token of words) {
+      if (token.length < 2 || token.length > 40) {
+        continue;
+      }
+      pushCandidate(token);
+      if (candidates.length >= 8) {
+        break;
+      }
+    }
+
+    return candidates.slice(0, 8);
+  }
+
+  function resolveWhatsappAliasEntryFromText(value = '') {
+    const candidates = buildWhatsappAliasCandidatesFromText(value);
+    if (!candidates.length) {
+      return null;
+    }
+
+    const aliases = whatsappAliasBook?.aliases && typeof whatsappAliasBook.aliases === 'object' ? whatsappAliasBook.aliases : {};
+    for (const token of candidates) {
+      const record = normalizeWhatsappAliasRecord(aliases[token], token);
+      if (record) {
+        return record;
+      }
+    }
+
+    return null;
+  }
+
+  function getWhatsappAliasEntryFromArgs(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const candidateFields = [
+      safeArgs.query,
+      safeArgs.name,
+      safeArgs.chat,
+      safeArgs.title,
+      safeArgs.search,
+      safeArgs.contact,
+      safeArgs.recipient,
+      safeArgs.destinatario,
+      safeArgs.person,
+      safeArgs.persona,
+      safeArgs.client,
+      safeArgs.cliente,
+      safeArgs.to
+    ];
+
+    for (const field of candidateFields) {
+      const resolved = resolveWhatsappAliasEntryFromText(field);
+      if (resolved) {
+        return resolved;
+      }
+    }
+
+    return null;
+  }
+
+  function getPrimaryWhatsappAliasCandidateFromArgs(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const candidateFields = [
+      safeArgs.query,
+      safeArgs.name,
+      safeArgs.chat,
+      safeArgs.title,
+      safeArgs.search,
+      safeArgs.contact,
+      safeArgs.recipient,
+      safeArgs.destinatario,
+      safeArgs.person,
+      safeArgs.persona,
+      safeArgs.client,
+      safeArgs.cliente,
+      safeArgs.to
+    ];
+
+    for (const field of candidateFields) {
+      const text = String(field || '').replace(/\s+/g, ' ').trim();
+      if (!text) {
+        continue;
+      }
+      const tokens = buildWhatsappAliasCandidatesFromText(text);
+      if (!tokens.length) {
+        continue;
+      }
+      const preferred = tokens.find((item) => !String(item || '').includes(' ')) || tokens[0];
+      const alias = normalizeWhatsappAliasToken(preferred, 64);
+      if (!alias) {
+        continue;
+      }
+      return {
+        alias,
+        label: normalizeWhatsappAliasLabel(text, alias)
+      };
+    }
+
+    return null;
+  }
+
+  function getWhatsappPhoneFromToolResult(result = {}, fallbackPhone = '') {
+    const safeResult = result && typeof result === 'object' ? result : {};
+    const openChat = safeResult.openChat && typeof safeResult.openChat === 'object' ? safeResult.openChat : {};
+    const selected = safeResult.selected && typeof safeResult.selected === 'object' ? safeResult.selected : {};
+    const openChatSelected =
+      openChat.selected && typeof openChat.selected === 'object' ? openChat.selected : {};
+    const candidates = [
+      safeResult.phone,
+      safeResult.chatPhone,
+      safeResult.currentPhone,
+      selected.phone,
+      openChat.phone,
+      openChatSelected.phone,
+      fallbackPhone
+    ];
+
+    for (const value of candidates) {
+      const normalized = normalizeWhatsappPhoneForUrl(value || '');
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    return '';
+  }
+
+  function extractWhatsappAliasAssignmentsFromText(text = '') {
+    const source = String(text || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!source) {
+      return [];
+    }
+
+    const aliasChunk = '([A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ._\\-\\s]{2,48})';
+    const phoneChunk = '(\\+?[\\d][\\d\\s().-]{6,22})';
+    const patterns = [
+      new RegExp(`(?:guarda(?:r)?|save|recuerda(?:r)?|recorda(?:r)?)(?:\\s+que)?\\s+${aliasChunk}\\s*(?:es|is|=|:)\\s*${phoneChunk}`, 'giu'),
+      new RegExp(`${aliasChunk}\\s*(?:es|is|=|:)\\s*(?:mi\\s+|my\\s+)?(?:numero\\s+de\\s+|number\\s+for\\s+)?(?:whatsapp\\s+)?${phoneChunk}`, 'giu'),
+      new RegExp(`${phoneChunk}\\s*(?:es|is|=|:)\\s*(?:de\\s+|for\\s+)?${aliasChunk}`, 'giu')
+    ];
+
+    const assignments = [];
+    const seen = new Set();
+
+    for (const pattern of patterns) {
+      for (const match of source.matchAll(pattern)) {
+        const left = String(match[1] || '').trim();
+        const right = String(match[2] || '').trim();
+        const leftPhone = normalizeWhatsappPhoneForUrl(left);
+        const rightPhone = normalizeWhatsappPhoneForUrl(right);
+        const aliasRaw = leftPhone ? right : left;
+        const phoneRaw = leftPhone ? left : rightPhone ? right : '';
+        const alias = normalizeWhatsappAliasToken(aliasRaw, 64);
+        const phone = normalizeWhatsappPhoneForUrl(phoneRaw);
+        if (!alias || !phone) {
+          continue;
+        }
+
+        const dedupeKey = `${alias}|${phone}`;
+        if (seen.has(dedupeKey)) {
+          continue;
+        }
+        seen.add(dedupeKey);
+        assignments.push({
+          alias,
+          label: normalizeWhatsappAliasLabel(aliasRaw, alias),
+          phone,
+          source: 'user_text'
+        });
+        if (assignments.length >= 10) {
+          return assignments;
+        }
+      }
+    }
+
+    return assignments;
+  }
+
+  async function upsertWhatsappAliasEntries(assignments = [], options = {}) {
+    const source = Array.isArray(assignments) ? assignments : [];
+    if (!source.length) {
+      return {
+        changed: false,
+        added: 0,
+        updated: 0
+      };
+    }
+
+    let added = 0;
+    let updated = 0;
+    let changed = false;
+    const now = Date.now();
+    const aliases = whatsappAliasBook?.aliases && typeof whatsappAliasBook.aliases === 'object' ? { ...whatsappAliasBook.aliases } : {};
+
+    for (const item of source) {
+      const record = normalizeWhatsappAliasRecord(item, item?.alias || item?.label || '');
+      if (!record) {
+        continue;
+      }
+
+      const known = normalizeWhatsappAliasRecord(aliases[record.alias], record.alias);
+      if (!known) {
+        aliases[record.alias] = {
+          ...record,
+          createdAt: now,
+          updatedAt: now,
+          lastUsedAt: Math.max(0, Number(record.lastUsedAt) || 0),
+          useCount: Math.max(0, Number(record.useCount) || 0)
+        };
+        added += 1;
+        changed = true;
+        continue;
+      }
+
+      const nextPhone = record.phone || known.phone;
+      const nextLabel = record.label && record.label.length > known.label.length ? record.label : known.label;
+      const nextSource = record.source || known.source || 'manual';
+      const changedPhone = nextPhone && nextPhone !== known.phone;
+      const changedLabel = nextLabel !== known.label;
+      const changedSource = nextSource !== known.source;
+      if (!changedPhone && !changedLabel && !changedSource) {
+        continue;
+      }
+
+      aliases[record.alias] = {
+        ...known,
+        phone: nextPhone,
+        label: nextLabel,
+        source: nextSource,
+        updatedAt: now
+      };
+      updated += 1;
+      changed = true;
+    }
+
+    if (!changed) {
+      return {
+        changed: false,
+        added: 0,
+        updated: 0
+      };
+    }
+
+    whatsappAliasBook = normalizeWhatsappAliasBook({
+      ...whatsappAliasBook,
+      aliases,
+      updatedAt: now
+    });
+
+    if (options.persist !== false) {
+      await persistWhatsappAliasBook();
+    }
+
+    return {
+      changed: true,
+      added,
+      updated
+    };
+  }
+
+  async function ingestWhatsappAliasesFromUserText(text = '') {
+    const assignments = extractWhatsappAliasAssignmentsFromText(text);
+    if (!assignments.length) {
+      return {
+        changed: false,
+        added: 0,
+        updated: 0
+      };
+    }
+
+    const result = await upsertWhatsappAliasEntries(assignments, { persist: true });
+    if (result.changed) {
+      logDebug('whatsapp_alias:user_text_updated', {
+        added: result.added,
+        updated: result.updated,
+        aliases: assignments.map((item) => item.alias)
+      });
+    }
+    return result;
+  }
+
+  function buildWhatsappAliasAssignmentsFromTab(tab) {
+    const context = tab && typeof tab === 'object' ? tab : {};
+    if (!isWhatsappContext(context)) {
+      return [];
+    }
+
+    const details = context.details && typeof details === 'object' ? details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const inbox = Array.isArray(details.inbox) ? details.inbox : [];
+    const assignments = [];
+    const pushPair = (aliasValue, phoneValue) => {
+      const alias = normalizeWhatsappAliasToken(aliasValue, 64);
+      const phone = normalizeWhatsappPhoneForUrl(phoneValue);
+      if (!alias || !phone) {
+        return;
+      }
+      assignments.push({
+        alias,
+        label: normalizeWhatsappAliasLabel(aliasValue, alias),
+        phone,
+        source: 'whatsapp_snapshot'
+      });
+    };
+
+    pushPair(currentChat.title || currentChat.key || '', currentChat.phone || '');
+    for (const entry of inbox.slice(0, 80)) {
+      pushPair(entry?.title || '', entry?.phone || '');
+    }
+
+    return assignments;
+  }
+
+  async function syncWhatsappAliasesFromSnapshot(snapshot) {
+    const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs : [];
+    const assignments = [];
+    for (const tab of tabs) {
+      if (!isWhatsappContext(tab)) {
+        continue;
+      }
+      assignments.push(...buildWhatsappAliasAssignmentsFromTab(tab));
+    }
+
+    if (!assignments.length) {
+      return {
+        changed: false,
+        added: 0,
+        updated: 0
+      };
+    }
+
+    return upsertWhatsappAliasEntries(assignments, {
+      persist: true
+    });
+  }
+
+  function buildWhatsappAliasAssignmentsFromIndexedHistories(histories = []) {
+    const rows = Array.isArray(histories) ? histories : [];
+    const assignments = [];
+    const dedupe = new Set();
+    const pushPair = (aliasValue, phoneValue) => {
+      const alias = normalizeWhatsappAliasToken(aliasValue, 64);
+      const phone = normalizeWhatsappPhoneForUrl(phoneValue);
+      if (!alias || !phone) {
+        return;
+      }
+
+      const dedupeKey = `${alias}|${phone}`;
+      if (dedupe.has(dedupeKey)) {
+        return;
+      }
+
+      dedupe.add(dedupeKey);
+      assignments.push({
+        alias,
+        label: normalizeWhatsappAliasLabel(aliasValue, alias),
+        phone,
+        source: 'whatsapp_indexdb'
+      });
+    };
+
+    for (const item of rows) {
+      const history = item && typeof item === 'object' ? item : {};
+      pushPair(history.title || history.chatKey || history.channelId || '', history.phone || '');
+    }
+
+    return assignments;
+  }
+
+  async function syncWhatsappAliasesFromIndexedDb(options = {}) {
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const force = safeOptions.force === true;
+    const now = Date.now();
+    if (!force && now - whatsappAliasDbIndexSyncedAt < WHATSAPP_ALIAS_DB_INDEX_SYNC_COOLDOWN_MS) {
+      return {
+        changed: false,
+        added: 0,
+        updated: 0,
+        scannedChats: 0,
+        assignments: 0,
+        skipped: 'cooldown'
+      };
+    }
+
+    const desiredChatLimit = Math.max(
+      40,
+      Math.min(WHATSAPP_ALIAS_MAX_ITEMS * 2, Number(safeOptions.chatLimit) || 180)
+    );
+
+    whatsappAliasDbIndexSyncPromise = whatsappAliasDbIndexSyncPromise
+      .catch(() => {})
+      .then(async () => {
+        whatsappAliasDbIndexSyncedAt = Date.now();
+        let histories = [];
+        try {
+          histories = await readAllWhatsappChatHistories({
+            chatLimit: desiredChatLimit,
+            messageLimit: 1
+          });
+        } catch (error) {
+          logWarn('whatsapp_alias:indexdb_read_failed', {
+            error: error instanceof Error ? error.message : String(error || '')
+          });
+          return {
+            changed: false,
+            added: 0,
+            updated: 0,
+            scannedChats: 0,
+            assignments: 0,
+            error: 'indexdb_read_failed'
+          };
+        }
+
+        const assignments = buildWhatsappAliasAssignmentsFromIndexedHistories(histories);
+        if (!assignments.length) {
+          return {
+            changed: false,
+            added: 0,
+            updated: 0,
+            scannedChats: histories.length,
+            assignments: 0
+          };
+        }
+
+        const result = await upsertWhatsappAliasEntries(assignments, {
+          persist: true
+        });
+        if (result.changed) {
+          logDebug('whatsapp_alias:indexdb_updated', {
+            scannedChats: histories.length,
+            assignments: assignments.length,
+            added: result.added,
+            updated: result.updated
+          });
+        }
+        return {
+          ...result,
+          scannedChats: histories.length,
+          assignments: assignments.length
+        };
+      });
+
+    return whatsappAliasDbIndexSyncPromise;
+  }
+
+  async function markWhatsappAliasUsageByEntry(aliasEntry = null, options = {}) {
+    const entry = aliasEntry && typeof aliasEntry === 'object' ? aliasEntry : null;
+    if (!entry?.alias) {
+      return false;
+    }
+
+    const aliases = whatsappAliasBook?.aliases && typeof whatsappAliasBook.aliases === 'object' ? { ...whatsappAliasBook.aliases } : {};
+    const known = normalizeWhatsappAliasRecord(aliases[entry.alias], entry.alias);
+    if (!known) {
+      return false;
+    }
+
+    const now = Date.now();
+    aliases[entry.alias] = {
+      ...known,
+      phone: entry.phone || known.phone,
+      lastUsedAt: now,
+      updatedAt: now,
+      useCount: Math.max(0, Number(known.useCount) || 0) + 1,
+      source: String(options.source || known.source || 'tool').trim().slice(0, 40) || 'tool'
+    };
+    whatsappAliasBook = normalizeWhatsappAliasBook({
+      ...whatsappAliasBook,
+      aliases,
+      updatedAt: now
+    });
+    await persistWhatsappAliasBook();
+    return true;
+  }
+
+  function buildWhatsappAliasSystemContext(limit = 12) {
+    const aliases = getWhatsappAliasEntries(limit);
+    if (!aliases.length) {
+      return 'Alias WhatsApp guardados: ninguno.';
+    }
+
+    const lines = aliases.map((item, index) => {
+      const label = String(item.label || item.alias || '').trim();
+      const phone = String(item.phone || '').trim();
+      return `${index + 1}. ${label} -> +${phone}`;
+    });
+
+    return ['Alias WhatsApp guardados (memoria local):', ...lines].join('\n');
+  }
+
   function normalizeWhatsappInboxKind(value) {
     const token = String(value || '')
       .trim()
@@ -7932,7 +8730,7 @@ export function initPanelApp() {
     return withoutPlus.slice(0, 24);
   }
 
-  function getWhatsappToolTargetPhone(args = {}) {
+  function getWhatsappToolTargetExplicitPhone(args = {}) {
     const safeArgs = args && typeof args === 'object' ? args : {};
     const phoneFields = [
       safeArgs.phone,
@@ -7955,6 +8753,21 @@ export function initPanelApp() {
       if (normalized) {
         return normalized;
       }
+    }
+
+    return '';
+  }
+
+  function getWhatsappToolTargetPhone(args = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const explicitPhone = getWhatsappToolTargetExplicitPhone(safeArgs);
+    if (explicitPhone) {
+      return explicitPhone;
+    }
+
+    const aliasEntry = getWhatsappAliasEntryFromArgs(safeArgs);
+    if (aliasEntry?.phone) {
+      return aliasEntry.phone;
     }
 
     return '';
@@ -8168,7 +8981,10 @@ export function initPanelApp() {
   function buildWhatsappToolsSystemContext(limit = 24) {
     const whatsappTab = getPreferredWhatsappTab();
     if (!whatsappTab) {
-      return 'Contexto WhatsApp: no hay tab activa detectada; las tools whatsapp.* intentaran abrir/enfocar WhatsApp Web automaticamente.';
+      return [
+        'Contexto WhatsApp: no hay tab activa detectada; las tools whatsapp.* intentaran abrir/enfocar WhatsApp Web automaticamente.',
+        buildWhatsappAliasSystemContext(10)
+      ].join('\n');
     }
 
     const details = whatsappTab.details && typeof whatsappTab.details === 'object' ? whatsappTab.details : {};
@@ -8190,6 +9006,7 @@ export function initPanelApp() {
     return [
       `Contexto WhatsApp activo: tabId ${Number(whatsappTab.tabId) || -1}.`,
       `Chat actual: ${buildWhatsappMetaLabel(whatsappTab)}.`,
+      buildWhatsappAliasSystemContext(12),
       'Inbox disponible para decidir acciones (ej. archivar grupos):',
       lines.length ? lines.join('\n') : 'Sin chats en inbox detectados.'
     ].join('\n');
@@ -8757,6 +9574,7 @@ export function initPanelApp() {
       'Modo voice activo: si el usuario pide una accion del navegador, debes ejecutar la accion en tu primer mensaje.',
       'No respondas con conversacion tipo "ya lo abri" sin ejecutar realmente una tool.',
       'Para solicitudes operativas (abrir/cerrar/enfocar/enviar), responde primero con bloque ```tool``` sin texto adicional.',
+      'Cuando respondas en voice sin usar tools, se ultra directo: maximo 2 frases cortas, sin introducciones, sin relleno.',
       spotifyHint
     ]
       .filter(Boolean)
@@ -8792,6 +9610,334 @@ export function initPanelApp() {
     }
 
     return [];
+  }
+
+  function normalizeIntentWordToken(value = '') {
+    return String(value || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/^[^a-z0-9+]+|[^a-z0-9+]+$/g, '')
+      .trim();
+  }
+
+  function splitIntentWords(value = '') {
+    return String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+  }
+
+  function isLikelyDirectWhatsappMessageIntent(userQuery = '') {
+    const source = String(userQuery || '').trim();
+    if (!source) {
+      return false;
+    }
+
+    const normalized = normalizeVoiceIntentText(source);
+    if (!normalized) {
+      return false;
+    }
+
+    if (/[?]/.test(source) || /^(como|how|que|what|cuando|where|donde)\b/.test(normalized)) {
+      return false;
+    }
+    if (/\b(no|cancela|cancelar|deten|detener)\b/.test(normalized)) {
+      return false;
+    }
+
+    const hasSendVerb = /\b(envia|enviar|manda|mandar|escribe|escribir|send|text)\b/.test(normalized);
+    const hasMessageToken = /\b(mensaje|message|whatsapp|wsp|wa)\b/.test(normalized);
+    const hasRecipientToken = /\b(a|para|to)\b/.test(normalized);
+    return hasRecipientToken && (hasSendVerb || hasMessageToken);
+  }
+
+  function extractWhatsappIntentRecipientSegment(userQuery = '') {
+    const sourceWords = splitIntentWords(userQuery);
+    if (!sourceWords.length) {
+      return '';
+    }
+
+    const normalizedWords = sourceWords.map((item) => normalizeIntentWordToken(item));
+    const sendOrMessageTokens = new Set([
+      'envia',
+      'enviar',
+      'manda',
+      'mandar',
+      'escribe',
+      'escribir',
+      'send',
+      'text',
+      'mensaje',
+      'message',
+      'whatsapp',
+      'wsp',
+      'wa'
+    ]);
+    const recipientTokens = new Set(['a', 'para', 'to']);
+
+    const firstCommandIndex = normalizedWords.findIndex((token) => sendOrMessageTokens.has(token));
+    const startIndex = firstCommandIndex >= 0 ? firstCommandIndex : 0;
+    let recipientIndex = -1;
+
+    for (let index = startIndex; index < normalizedWords.length; index += 1) {
+      if (!recipientTokens.has(normalizedWords[index])) {
+        continue;
+      }
+      if (index >= normalizedWords.length - 1) {
+        continue;
+      }
+      recipientIndex = index;
+      break;
+    }
+
+    if (recipientIndex < 0) {
+      return '';
+    }
+
+    return sourceWords.slice(recipientIndex + 1).join(' ').trim();
+  }
+
+  function sanitizeDirectWhatsappMessageText(value = '') {
+    let text = String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) {
+      return '';
+    }
+
+    text = text.replace(/^[,:;\-.!?]+/g, '').trim();
+    text = text.replace(/^(que|diciendo|decirle|say|that)\s+/i, '').trim();
+    return text.slice(0, 1200);
+  }
+
+  function matchWhatsappAliasPrefixFromSegment(segmentText = '') {
+    const sourceWords = splitIntentWords(segmentText);
+    if (!sourceWords.length) {
+      return null;
+    }
+
+    const normalizedSegment = normalizeWhatsappAliasToken(sourceWords.join(' '), 120);
+    if (!normalizedSegment) {
+      return null;
+    }
+
+    const aliasEntries = getWhatsappAliasEntries(WHATSAPP_ALIAS_MAX_ITEMS);
+    let best = null;
+
+    for (const entry of aliasEntries) {
+      const variants = Array.from(
+        new Set(
+          [entry?.alias, entry?.label]
+            .map((item) => normalizeWhatsappAliasToken(item, 64))
+            .filter(Boolean)
+        )
+      );
+
+      for (const variant of variants) {
+        const matches = normalizedSegment === variant || normalizedSegment.startsWith(`${variant} `);
+        if (!matches) {
+          continue;
+        }
+
+        const variantWordCount = Math.max(1, variant.split(' ').filter(Boolean).length);
+        const score = variant.length * 100 + Math.max(0, Number(entry?.useCount) || 0);
+        if (!best || score > best.score) {
+          best = {
+            entry,
+            variant,
+            score,
+            variantWordCount
+          };
+        }
+      }
+    }
+
+    if (!best) {
+      return null;
+    }
+
+    const remainderWords = sourceWords.slice(best.variantWordCount);
+    return {
+      entry: best.entry,
+      remainderText: remainderWords.join(' ').trim()
+    };
+  }
+
+  function splitDirectRecipientAndMessageFallback(segmentText = '') {
+    const source = String(segmentText || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!source) {
+      return {
+        recipientQuery: '',
+        messageText: ''
+      };
+    }
+
+    const quotedMatch = source.match(/^["'“”]([^"'“”]{2,80})["'“”]\s*[:,]?\s*(.*)$/u);
+    if (quotedMatch) {
+      return {
+        recipientQuery: String(quotedMatch[1] || '').trim(),
+        messageText: sanitizeDirectWhatsappMessageText(quotedMatch[2] || '')
+      };
+    }
+
+    const separatorIndex = source.search(/\s*[:,]\s*/);
+    if (separatorIndex > 1) {
+      const recipient = source.slice(0, separatorIndex).trim();
+      const message = source.slice(separatorIndex).replace(/^\s*[:,]\s*/, '').trim();
+      if (recipient) {
+        return {
+          recipientQuery: recipient,
+          messageText: sanitizeDirectWhatsappMessageText(message)
+        };
+      }
+    }
+
+    const words = splitIntentWords(source);
+    if (words.length <= 2) {
+      return {
+        recipientQuery: source,
+        messageText: ''
+      };
+    }
+
+    const messageStarterTokens = new Set([
+      'que',
+      'q',
+      'hola',
+      'hi',
+      'hello',
+      'buenos',
+      'buenas',
+      'voy',
+      'te',
+      'le',
+      'por',
+      'please',
+      'pls'
+    ]);
+    const secondToken = normalizeIntentWordToken(words[1] || '');
+    const recipientWordCount = messageStarterTokens.has(secondToken) ? 1 : 2;
+    const recipientWords = words.slice(0, recipientWordCount);
+    const messageWords = words.slice(recipientWordCount);
+    return {
+      recipientQuery: recipientWords.join(' ').trim(),
+      messageText: sanitizeDirectWhatsappMessageText(messageWords.join(' '))
+    };
+  }
+
+  function parseDirectWhatsappMessageIntent(userQuery = '') {
+    if (!isLikelyDirectWhatsappMessageIntent(userQuery)) {
+      return null;
+    }
+
+    const recipientSegment = extractWhatsappIntentRecipientSegment(userQuery);
+    if (!recipientSegment) {
+      return null;
+    }
+
+    const aliasMatch = matchWhatsappAliasPrefixFromSegment(recipientSegment);
+    if (aliasMatch?.entry) {
+      const recipientQuery = String(aliasMatch.entry.label || aliasMatch.entry.alias || '').trim();
+      return {
+        aliasEntry: aliasMatch.entry,
+        recipientQuery,
+        messageText: sanitizeDirectWhatsappMessageText(aliasMatch.remainderText || '')
+      };
+    }
+
+    const fallback = splitDirectRecipientAndMessageFallback(recipientSegment);
+    const recipientQuery = String(fallback.recipientQuery || '').trim().slice(0, 120);
+    if (!recipientQuery) {
+      return null;
+    }
+
+    const aliasEntry = resolveWhatsappAliasEntryFromText(recipientQuery);
+    return {
+      aliasEntry,
+      recipientQuery,
+      messageText: sanitizeDirectWhatsappMessageText(fallback.messageText || '')
+    };
+  }
+
+  function buildDirectWhatsappMessageToolCall(intentPayload = null) {
+    const intent = intentPayload && typeof intentPayload === 'object' ? intentPayload : null;
+    if (!intent) {
+      return null;
+    }
+
+    const aliasEntry = intent.aliasEntry && typeof intent.aliasEntry === 'object' ? intent.aliasEntry : null;
+    const resolvedPhone = normalizeWhatsappPhoneForUrl(aliasEntry?.phone || '');
+    const recipientQuery = String(intent.recipientQuery || aliasEntry?.label || aliasEntry?.alias || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120);
+    if (!resolvedPhone && !recipientQuery) {
+      return null;
+    }
+
+    const messageText = sanitizeDirectWhatsappMessageText(intent.messageText || '');
+    const baseArgs = resolvedPhone
+      ? { phone: resolvedPhone }
+      : {
+          query: recipientQuery,
+          name: recipientQuery
+        };
+    if (aliasEntry?.alias) {
+      baseArgs.alias = aliasEntry.alias;
+    }
+    if (aliasEntry?.label && !baseArgs.name) {
+      baseArgs.name = aliasEntry.label;
+    }
+
+    if (messageText) {
+      return {
+        tool: 'whatsapp.openChatAndSendMessage',
+        args: {
+          ...baseArgs,
+          text: messageText
+        }
+      };
+    }
+
+    return {
+      tool: 'whatsapp.openChat',
+      args: baseArgs
+    };
+  }
+
+  async function detectDirectToolCalls(userQuery = '', options = {}) {
+    const source = options?.source === 'voice' ? 'voice' : 'text';
+    if (source === 'voice') {
+      const voiceCalls = detectVoiceDirectToolCalls(userQuery);
+      if (voiceCalls.length) {
+        return voiceCalls;
+      }
+    }
+
+    if (!isLikelyDirectWhatsappMessageIntent(userQuery)) {
+      return [];
+    }
+
+    await syncWhatsappAliasesFromIndexedDb().catch(() => {});
+    const intent = parseDirectWhatsappMessageIntent(userQuery);
+    const toolCall = buildDirectWhatsappMessageToolCall(intent);
+    if (!toolCall) {
+      return [];
+    }
+
+    logDebug('detectDirectToolCalls:whatsapp_message', {
+      source,
+      tool: toolCall.tool,
+      hasMessageText: Boolean(String(toolCall.args?.text || '').trim()),
+      recipientQuery: String(toolCall.args?.query || toolCall.args?.name || '').trim(),
+      hasPhone: Boolean(String(toolCall.args?.phone || '').trim())
+    });
+    return [toolCall];
   }
 
   function buildLocalToolSystemPrompt() {
@@ -8856,6 +10002,9 @@ export function initPanelApp() {
       'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
       'Si el usuario pide cerrar/focar una tab y hay duda de coincidencia, usa browser.listTabs y luego ejecuta browser.closeTab/browser.focusTab con criterios precisos.',
       'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
+      'Si el usuario pide "enviar/mandar mensaje a <persona>", interpreta "mensaje" como WhatsApp por defecto.',
+      'Si el usuario usa alias de contacto en WhatsApp, usa query/name/chat normalmente; el sistema puede resolver alias guardados a phone.',
+      'Tambien puedes resolver contactos por nombres almacenados en el indice local de chats WhatsApp (IndexedDB) para obtener su phone.',
       'Para preguntas de CRM/ERP, usa db.refreshSchema si falta contexto y luego db.queryRead/db.queryWrite segun corresponda.',
       'smtp.sendMail usa bridge interno en background y transporte SMTP configurable (http_agent o native_host).',
       `Estado actual smtp.sendMail: ${smtpAvailability.enabled ? 'habilitada' : `deshabilitada (${smtpAvailability.reason})`}.`,
@@ -9698,8 +10847,10 @@ export function initPanelApp() {
         }
 
         const whatsappAction = tool.replace(/^whatsapp\./, '');
+        const aliasEntry = getWhatsappAliasEntryFromArgs(args);
+        const explicitPhoneTarget = getWhatsappToolTargetExplicitPhone(args);
+        const phoneTarget = explicitPhoneTarget || aliasEntry?.phone || getWhatsappToolTargetPhone(args);
         const hasLookupArgs = hasWhatsappChatLookupArgs(args);
-        const phoneTarget = getWhatsappToolTargetPhone(args);
         const routeSendThroughOpen = whatsappAction === 'sendMessage' && hasLookupArgs;
         const requestedWhatsappAction = routeSendThroughOpen ? 'openChatAndSendMessage' : whatsappAction;
         const needsPhoneRoute = Boolean(phoneTarget) && (
@@ -9724,6 +10875,12 @@ export function initPanelApp() {
           ...args
         };
         delete siteArgs.tabId;
+        if (!explicitPhoneTarget && phoneTarget) {
+          siteArgs.phone = phoneTarget;
+        }
+        if (!siteArgs.alias && aliasEntry?.alias) {
+          siteArgs.alias = aliasEntry.alias;
+        }
         if (!siteArgs.text && typeof siteArgs.message === 'string') {
           siteArgs.text = siteArgs.message;
         }
@@ -9787,7 +10944,9 @@ export function initPanelApp() {
             requestedAction: whatsappAction,
             executedAction: executedWhatsappAction,
             openedViaUrl: ensuredWhatsapp.openedViaUrl === true,
-            openedUrl: ensuredWhatsapp.openedUrl || ''
+            openedUrl: ensuredWhatsapp.openedUrl || '',
+            resolvedAlias: aliasEntry?.alias || '',
+            resolvedPhone: phoneTarget || ''
           },
           error: response?.ok === true ? '' : failureMessage
         });
@@ -9797,6 +10956,32 @@ export function initPanelApp() {
         });
 
         if (response?.ok === true) {
+          const resolvedPhoneFromResult = getWhatsappPhoneFromToolResult(
+            responseResult,
+            phoneTarget || ensuredWhatsapp.phone || ''
+          );
+          const aliasCandidate = aliasEntry || getPrimaryWhatsappAliasCandidateFromArgs(args);
+          if (aliasCandidate?.alias && resolvedPhoneFromResult) {
+            await upsertWhatsappAliasEntries(
+              [
+                {
+                  alias: aliasCandidate.alias,
+                  label: aliasCandidate.label || aliasCandidate.alias,
+                  phone: resolvedPhoneFromResult,
+                  source: 'tool_success'
+                }
+              ],
+              { persist: false }
+            );
+            await markWhatsappAliasUsageByEntry(
+              {
+                alias: aliasCandidate.alias,
+                label: aliasCandidate.label || aliasCandidate.alias,
+                phone: resolvedPhoneFromResult
+              },
+              { source: 'tool_success' }
+            );
+          }
           await tabContextService.requestSnapshot();
         }
       } catch (error) {
@@ -10062,6 +11247,26 @@ export function initPanelApp() {
       const activeModel = activeProfile ? `${activeProfile.name} · ${activeProfile.model}` : getActiveModel();
       const attachmentsPromptBlock = buildAttachmentsPromptBlock(attachmentsForTurn);
       const contentForModel = [content, attachmentsPromptBlock].filter(Boolean).join('\n\n').trim() || content;
+      const memoryProfileMaxItems = Math.max(
+        120,
+        Math.min(
+          MEMORY_USER_PROFILE_MAX_ITEMS_STORAGE_LIMIT,
+          Number(
+            getSystemVariableNumber('memory.userProfileMaxItems', MEMORY_USER_PROFILE_MAX_ITEMS)
+          ) || MEMORY_USER_PROFILE_MAX_ITEMS
+        )
+      );
+      const memoryProfileContext = {
+        activeTab: getActiveTabContext(),
+        historyEntries: Array.isArray(tabContextSnapshot?.history) ? tabContextSnapshot.history.slice(0, 80) : []
+      };
+      if (content) {
+        try {
+          await ingestWhatsappAliasesFromUserText(content);
+        } catch (_) {
+          // Keep chat flow resilient if alias extraction fails.
+        }
+      }
       const userMessage = await pushChatMessage('user', content, {
         attachments: attachmentsForTurn
       });
@@ -10126,7 +11331,11 @@ export function initPanelApp() {
         const turnMemory = await contextMemoryService.rememberChatTurn({
           userMessage: contentForModel || content || '[Adjuntos]',
           assistantMessage: assistantMessage.content,
-          contextUsed
+          contextUsed,
+          profileContext: memoryProfileContext,
+          memoryLimits: {
+            maxProfileItems: memoryProfileMaxItems
+          }
         });
         assistantMessage.extracted_facts = Array.isArray(turnMemory?.extracted_facts) ? turnMemory.extracted_facts : [];
         if (userMessage && Array.isArray(userMessage.extracted_facts) && assistantMessage.extracted_facts.length) {
@@ -10200,11 +11409,11 @@ export function initPanelApp() {
               onWarn: logWarn
             })
           : [];
-      const fallbackVoiceToolCalls =
-        selectedChatTool === 'chat' && source === 'voice' && detectedToolCalls.length === 0
-          ? detectVoiceDirectToolCalls(contentForModel || content)
+      const fallbackDirectToolCalls =
+        selectedChatTool === 'chat' && detectedToolCalls.length === 0
+          ? await detectDirectToolCalls(contentForModel || content, { source })
           : [];
-      const toolCallsToExecute = detectedToolCalls.length ? detectedToolCalls : fallbackVoiceToolCalls;
+      const toolCallsToExecute = detectedToolCalls.length ? detectedToolCalls : fallbackDirectToolCalls;
       let finalAssistantOutput = shouldSyncVoiceText ? streamedAssistantText.trim() || output : output;
 
       logDebug('sendChatMessage:model_output', {
@@ -10212,7 +11421,7 @@ export function initPanelApp() {
         outputPreview: output.slice(0, 600),
         outputLength: output.length,
         detectedToolCalls,
-        fallbackVoiceToolCalls,
+        fallbackDirectToolCalls,
         toolCallsToExecute
       });
 
@@ -10222,15 +11431,15 @@ export function initPanelApp() {
       }
 
       if (toolCallsToExecute.length) {
-        const usedVoiceDirectFallback = detectedToolCalls.length === 0 && fallbackVoiceToolCalls.length > 0;
+        const usedDirectFallback = detectedToolCalls.length === 0 && fallbackDirectToolCalls.length > 0;
         setStatus(
           chatStatus,
-          usedVoiceDirectFallback ? 'Ejecutando accion directa por voz...' : 'Ejecutando acciones locales del navegador...',
+          usedDirectFallback ? 'Ejecutando accion directa...' : 'Ejecutando acciones locales del navegador...',
           false,
           { loading: true }
         );
         assistantMessage.pending = true;
-        assistantMessage.content = usedVoiceDirectFallback ? 'Ejecutando accion directa de voz...' : 'Ejecutando tools locales...';
+        assistantMessage.content = usedDirectFallback ? 'Ejecutando accion directa...' : 'Ejecutando tools locales...';
         scheduleChatRender({
           allowAutoScroll: false
         });
@@ -10315,7 +11524,11 @@ export function initPanelApp() {
       const turnMemory = await contextMemoryService.rememberChatTurn({
         userMessage: contentForModel || content || '[Adjuntos]',
         assistantMessage: assistantMessage.content,
-        contextUsed
+        contextUsed,
+        profileContext: memoryProfileContext,
+        memoryLimits: {
+          maxProfileItems: memoryProfileMaxItems
+        }
       });
       assistantMessage.extracted_facts = Array.isArray(turnMemory?.extracted_facts) ? turnMemory.extracted_facts : [];
       if (userMessage && Array.isArray(userMessage.extracted_facts) && assistantMessage.extracted_facts.length) {
@@ -12497,6 +13710,7 @@ export function initPanelApp() {
 
     queueContextIngestion(tabContextSnapshot);
     queueWhatsappHistorySync(tabContextSnapshot);
+    void syncWhatsappAliasesFromSnapshot(tabContextSnapshot).catch(() => {});
 
     renderTabsContextJson();
 
@@ -13481,11 +14695,13 @@ export function initPanelApp() {
       const nextLanguage = normalizeAssistantLanguage(settingsLanguageSelect?.value || DEFAULT_ASSISTANT_LANGUAGE);
       const nextVoiceTtsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || VOICE_TTS_VOICE);
       const nextVoiceTtsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value);
+      const nextVoicePauseMs = normalizeVoicePauseMs(settingsVoicePauseMsInput?.value);
       const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
       const current = settingsScreenController.getPanelSettings() || {};
       const currentLanguage = normalizeAssistantLanguage(current.language || DEFAULT_ASSISTANT_LANGUAGE);
       const currentVoiceTtsVoice = normalizeVoiceTtsVoice(current.voiceTtsVoice || VOICE_TTS_VOICE);
       const currentVoiceTtsSpeed = normalizeVoiceTtsSpeed(current.voiceTtsSpeed);
+      const currentVoicePauseMs = normalizeVoicePauseMs(current.voicePauseMs);
       const currentPrompt = String(current.systemPrompt || '').trim();
 
       if (!nextPrompt) {
@@ -13497,6 +14713,7 @@ export function initPanelApp() {
         nextLanguage === currentLanguage &&
         nextVoiceTtsVoice === currentVoiceTtsVoice &&
         nextVoiceTtsSpeed === currentVoiceTtsSpeed &&
+        nextVoicePauseMs === currentVoicePauseMs &&
         nextPrompt === currentPrompt
       ) {
         setStatus(settingsAssistantStatus, 'Sin cambios pendientes.');
@@ -14172,6 +15389,20 @@ export function initPanelApp() {
       });
     });
 
+    settingsVoicePauseMsInput?.addEventListener('input', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 280
+      });
+    });
+
+    settingsVoicePauseMsInput?.addEventListener('change', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 160
+      });
+    });
+
     settingsSystemPrompt?.addEventListener('input', () => {
       scheduleAssistantSettingsAutosave({
         delayMs: 460
@@ -14535,6 +15766,8 @@ export function initPanelApp() {
           settingsVoiceTtsVoiceSelect,
           settingsVoiceTtsSpeedInput,
           settingsVoiceTtsSpeedValue,
+          settingsVoicePauseMsInput,
+          settingsVoicePauseMsValue,
           settingsLanguageSelect,
           settingsSystemPrompt,
           settingsUserStatus,
@@ -14569,6 +15802,8 @@ export function initPanelApp() {
       renderTabsContextJson();
 
       await contextMemoryService.init();
+      await hydrateWhatsappAliasBook();
+      void syncWhatsappAliasesFromIndexedDb({ force: true }).catch(() => {});
       await tabContextService.start();
 
       await hydrateSettings();

@@ -11,6 +11,11 @@ const WORKER_PATH = 'panel/workers/embedding-worker.js';
 const MODEL_SIMILARITY_THRESHOLD = 0.75;
 const DEFAULT_TOP_K = 5;
 const IDENTITY_STORAGE_KEY = 'greene_identity_profile';
+const USER_BEHAVIOR_PROFILE_STORAGE_KEY = 'greene_behavior_profile';
+const USER_BEHAVIOR_PROFILE_VERSION = 1;
+const USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT = 480;
+const USER_BEHAVIOR_PROFILE_MAX_ITEMS_LIMIT = 3000;
+const USER_BEHAVIOR_HEADER_ITEMS_LIMIT = 3;
 const IDB_NAME = 'greene-context-vector-db';
 const IDB_VERSION = 1;
 const IDB_STORE = 'vector_store';
@@ -18,6 +23,35 @@ const IDB_KEY = 'orama_state_v1';
 const EMBEDDING_WARMUP_TEXT = 'greene bootstrap warmup';
 const WHATSAPP_MESSAGE_DOC_LIMIT = 28;
 const WHATSAPP_CONTACT_DOC_LIMIT = 36;
+const USER_BEHAVIOR_PROFILE_DOC_ID = 'profile:user_behavior';
+const RELATION_ROLE_KEYWORDS = Object.freeze([
+  'cliente principal',
+  'cliente',
+  'clienta',
+  'socio',
+  'socia',
+  'partner',
+  'manager',
+  'jefe',
+  'jefa',
+  'colega',
+  'mentor',
+  'mentora',
+  'amigo',
+  'amiga',
+  'wife',
+  'husband',
+  'novia',
+  'novio',
+  'hermano',
+  'hermana',
+  'padre',
+  'madre',
+  'cto',
+  'ceo',
+  'lead',
+  'developer'
+]);
 
 function clamp(value, min = 0, max = 1) {
   return Math.max(min, Math.min(max, value));
@@ -164,6 +198,577 @@ function detectCategory(text, url, site) {
   }
 
   return String(site || 'general').toLowerCase() || 'general';
+}
+
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const RELATION_ROLE_PATTERN = RELATION_ROLE_KEYWORDS.map((item) => escapeRegex(item))
+  .sort((left, right) => right.length - left.length)
+  .join('|');
+
+function toMemoryKey(value, limit = 160) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9@._:/+-]+/g, ' ')
+    .trim()
+    .slice(0, Math.max(16, Number(limit) || 160));
+}
+
+function toHostname(url) {
+  const raw = toSafeText(url || '', 1200);
+  if (!raw) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(raw);
+    return toSafeText(parsed.hostname.replace(/^www\./i, '').toLowerCase(), 140);
+  } catch (_) {
+    return '';
+  }
+}
+
+function resolveUserBehaviorLimit(value) {
+  return Math.max(
+    120,
+    Math.min(USER_BEHAVIOR_PROFILE_MAX_ITEMS_LIMIT, Number(value) || USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT)
+  );
+}
+
+function resolveUserBehaviorCategoryLimits(maxItems = USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT) {
+  const total = resolveUserBehaviorLimit(maxItems);
+  const minimums = {
+    relations: 24,
+    contacts: 24,
+    sites: 32,
+    preferences: 16
+  };
+
+  const limits = {
+    relations: Math.max(minimums.relations, Math.round(total * 0.24)),
+    contacts: Math.max(minimums.contacts, Math.round(total * 0.24)),
+    sites: Math.max(minimums.sites, Math.round(total * 0.34)),
+    preferences: Math.max(minimums.preferences, Math.round(total * 0.18))
+  };
+
+  let sum = limits.relations + limits.contacts + limits.sites + limits.preferences;
+  if (sum > total) {
+    for (const key of ['sites', 'contacts', 'relations', 'preferences']) {
+      while (sum > total && limits[key] > minimums[key]) {
+        limits[key] -= 1;
+        sum -= 1;
+      }
+      if (sum <= total) {
+        break;
+      }
+    }
+  }
+
+  if (sum < total) {
+    limits.preferences += total - sum;
+  }
+
+  return {
+    total,
+    ...limits
+  };
+}
+
+function normalizeBehaviorRole(value, limit = 80) {
+  return toSafeText(String(value || '').replace(/\s+/g, ' '), Math.max(24, Number(limit) || 80));
+}
+
+function normalizeBehaviorEntry(rawEntry, options = {}) {
+  const raw = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
+  const labelLimit = Math.max(40, Math.min(320, Number(options.labelLimit) || 220));
+  const roleLimit = Math.max(16, Math.min(120, Number(options.roleLimit) || 80));
+  const labelCandidate = toSafeText(
+    raw.label || raw.name || raw.text || raw.host || raw.value || raw.domain || '',
+    labelLimit
+  );
+  const keyCandidate = toSafeText(raw.key || raw.id || raw.slug || labelCandidate, 160);
+  const key = toMemoryKey(keyCandidate, 160);
+  const label = labelCandidate || toSafeText(keyCandidate, labelLimit);
+  if (!key || !label) {
+    return null;
+  }
+
+  const count = Math.max(1, Number(raw.count || raw.weight || raw.visits || raw.valueCount || 1) || 1);
+  const lastSeenAt = Math.max(
+    0,
+    Number(raw.lastSeenAt || raw.updatedAt || raw.timestamp || raw.lastVisitTime || Date.now()) || Date.now()
+  );
+  const role =
+    options.allowRole === false
+      ? ''
+      : normalizeBehaviorRole(raw.role || raw.relationship || raw.title || raw.relation || '', roleLimit);
+
+  return {
+    key,
+    label,
+    role,
+    count,
+    lastSeenAt
+  };
+}
+
+function sortBehaviorEntries(left, right) {
+  const leftCount = Number(left?.count) || 0;
+  const rightCount = Number(right?.count) || 0;
+  if (leftCount !== rightCount) {
+    return rightCount - leftCount;
+  }
+
+  const leftSeen = Number(left?.lastSeenAt) || 0;
+  const rightSeen = Number(right?.lastSeenAt) || 0;
+  if (leftSeen !== rightSeen) {
+    return rightSeen - leftSeen;
+  }
+
+  return String(left?.label || '').localeCompare(String(right?.label || ''));
+}
+
+function mergeBehaviorEntries(currentEntries, incomingEntries, limit = 120, options = {}) {
+  const safeLimit = Math.max(1, Math.min(3000, Number(limit) || 120));
+  const mode = options.countMode === 'max' ? 'max' : 'sum';
+  const byKey = new Map();
+  const seed = Array.isArray(currentEntries) ? currentEntries : [];
+  const incoming = Array.isArray(incomingEntries) ? incomingEntries : [];
+
+  for (const item of seed) {
+    const normalized = normalizeBehaviorEntry(item, options);
+    if (!normalized) {
+      continue;
+    }
+    byKey.set(normalized.key, normalized);
+  }
+
+  for (const item of incoming) {
+    const normalized = normalizeBehaviorEntry(item, options);
+    if (!normalized) {
+      continue;
+    }
+
+    const known = byKey.get(normalized.key);
+    if (!known) {
+      byKey.set(normalized.key, normalized);
+      continue;
+    }
+
+    const nextCount = mode === 'max' ? Math.max(known.count, normalized.count) : known.count + normalized.count;
+    byKey.set(normalized.key, {
+      ...known,
+      label: normalized.label.length > known.label.length ? normalized.label : known.label,
+      role: normalized.role || known.role,
+      count: nextCount,
+      lastSeenAt: Math.max(known.lastSeenAt || 0, normalized.lastSeenAt || 0)
+    });
+  }
+
+  return Array.from(byKey.values()).sort(sortBehaviorEntries).slice(0, safeLimit);
+}
+
+function buildUserBehaviorProfileDefaults(maxItems = USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT) {
+  const safeMax = resolveUserBehaviorLimit(maxItems);
+  return {
+    version: USER_BEHAVIOR_PROFILE_VERSION,
+    maxItems: safeMax,
+    updatedAt: 0,
+    relations: [],
+    contacts: [],
+    sites: [],
+    preferences: []
+  };
+}
+
+function normalizeUserBehaviorProfile(rawProfile, maxItems = USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT) {
+  const raw = rawProfile && typeof rawProfile === 'object' ? rawProfile : {};
+  const limits = resolveUserBehaviorCategoryLimits(
+    Number(raw.maxItems) > 0 ? Number(raw.maxItems) : maxItems
+  );
+
+  return {
+    version: USER_BEHAVIOR_PROFILE_VERSION,
+    maxItems: limits.total,
+    updatedAt: Math.max(0, Number(raw.updatedAt) || 0),
+    relations: mergeBehaviorEntries([], raw.relations, limits.relations, {
+      countMode: 'max',
+      labelLimit: 220,
+      roleLimit: 80
+    }),
+    contacts: mergeBehaviorEntries([], raw.contacts, limits.contacts, {
+      countMode: 'max',
+      labelLimit: 220,
+      allowRole: false
+    }),
+    sites: mergeBehaviorEntries([], raw.sites, limits.sites, {
+      countMode: 'max',
+      labelLimit: 180,
+      allowRole: false
+    }),
+    preferences: mergeBehaviorEntries([], raw.preferences, limits.preferences, {
+      countMode: 'max',
+      labelLimit: 260,
+      allowRole: false
+    })
+  };
+}
+
+function collectTopBehaviorDescriptors(entries, maxItems = 3, formatter) {
+  const source = Array.isArray(entries) ? entries : [];
+  const safeMax = Math.max(1, Math.min(8, Number(maxItems) || 3));
+  return source
+    .slice(0, safeMax)
+    .map((item) => {
+      if (typeof formatter === 'function') {
+        return formatter(item);
+      }
+      return `${item?.label || ''} (${Math.max(0, Number(item?.count) || 0)})`;
+    })
+    .filter(Boolean);
+}
+
+function buildUserBehaviorHeaderSummary(profile, maxItemsPerSection = USER_BEHAVIOR_HEADER_ITEMS_LIMIT) {
+  const safe = normalizeUserBehaviorProfile(profile, profile?.maxItems || USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT);
+  const totalItems =
+    safe.relations.length + safe.contacts.length + safe.sites.length + safe.preferences.length;
+  if (!totalItems) {
+    return 'Perfil conductual local: aun sin datos suficientes.';
+  }
+
+  const relations = collectTopBehaviorDescriptors(safe.relations, maxItemsPerSection, (item) => {
+    const role = toSafeText(item?.role || '', 60);
+    return role ? `${item?.label || ''} [${role}] (${item?.count || 0})` : `${item?.label || ''} (${item?.count || 0})`;
+  });
+  const contacts = collectTopBehaviorDescriptors(safe.contacts, maxItemsPerSection);
+  const sites = collectTopBehaviorDescriptors(safe.sites, maxItemsPerSection);
+  const preferences = collectTopBehaviorDescriptors(safe.preferences, maxItemsPerSection, (item) => item?.label || '');
+
+  return [
+    `Perfil conductual local: relaciones=${safe.relations.length}, contactos=${safe.contacts.length}, sitios=${safe.sites.length}, preferencias=${safe.preferences.length}.`,
+    relations.length ? `Relaciones cercanas: ${relations.join(' | ')}` : '',
+    contacts.length ? `Contactos frecuentes: ${contacts.join(' | ')}` : '',
+    sites.length ? `Sitios frecuentes: ${sites.join(' | ')}` : '',
+    preferences.length ? `Preferencias: ${preferences.join(' | ')}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildUserBehaviorProfileDoc(profile) {
+  const safe = normalizeUserBehaviorProfile(profile, profile?.maxItems || USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT);
+  const totalItems =
+    safe.relations.length + safe.contacts.length + safe.sites.length + safe.preferences.length;
+  if (!totalItems) {
+    return null;
+  }
+
+  const relationLines = safe.relations
+    .slice(0, 14)
+    .map((item, index) => `${index + 1}. ${item.label}${item.role ? ` [${item.role}]` : ''} (${item.count})`);
+  const contactLines = safe.contacts
+    .slice(0, 14)
+    .map((item, index) => `${index + 1}. ${item.label} (${item.count})`);
+  const siteLines = safe.sites
+    .slice(0, 16)
+    .map((item, index) => `${index + 1}. ${item.label} (${item.count})`);
+  const preferenceLines = safe.preferences
+    .slice(0, 14)
+    .map((item, index) => `${index + 1}. ${item.label} (${item.count})`);
+
+  const lines = [
+    'Perfil conductual local autogenerado.',
+    `Limite configurado: ${safe.maxItems} items agregados.`,
+    relationLines.length ? `Relaciones cercanas:\n${relationLines.join('\n')}` : '',
+    contactLines.length ? `Contactos frecuentes:\n${contactLines.join('\n')}` : '',
+    siteLines.length ? `Sitios frecuentes:\n${siteLines.join('\n')}` : '',
+    preferenceLines.length ? `Preferencias detectadas:\n${preferenceLines.join('\n')}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const entities = normalizeArray(
+    [
+      ...safe.relations.slice(0, 5).map((item) => item.label),
+      ...safe.contacts.slice(0, 5).map((item) => item.label),
+      ...safe.sites.slice(0, 5).map((item) => item.label)
+    ],
+    12
+  );
+
+  return {
+    id: USER_BEHAVIOR_PROFILE_DOC_ID,
+    text: lines,
+    source: 'profile',
+    category: 'identity',
+    topic: 'user_behavior_profile',
+    tag: 'profile_behavior',
+    url: '',
+    site: 'profile',
+    author: 'user',
+    timestamp: Math.max(0, Number(safe.updatedAt) || Date.now()),
+    durationMs: 0,
+    importanceScore: 0.93,
+    entities,
+    metadata: {
+      url: '',
+      source: 'profile',
+      category: 'identity',
+      importance_score: 0.93,
+      entities
+    }
+  };
+}
+
+function buildRelationSignalsFromText(text, timestamp = Date.now()) {
+  const safeText = toSafeText(text || '', 3200);
+  if (!safeText) {
+    return [];
+  }
+
+  const namePattern = "[A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ'\\-]{1,30}(?:\\s+[A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ'\\-]{1,30}){0,2}";
+  const signals = [];
+  const patternA = new RegExp(
+    `\\b(${namePattern})\\s+(?:es|is)\\s+(?:mi\\s+|my\\s+)?(${RELATION_ROLE_PATTERN})\\b`,
+    'gi'
+  );
+  const patternB = new RegExp(
+    `\\b(?:mi|my)\\s+(${RELATION_ROLE_PATTERN})\\s+(?:es|is|se llama|called)\\s+(${namePattern})\\b`,
+    'gi'
+  );
+
+  for (const match of safeText.matchAll(patternA)) {
+    const name = toSafeText(match[1] || '', 160);
+    const role = normalizeBehaviorRole(match[2] || '', 80);
+    if (!name) {
+      continue;
+    }
+    signals.push({
+      key: toMemoryKey(name, 160),
+      label: name,
+      role,
+      count: 2,
+      lastSeenAt: timestamp
+    });
+  }
+
+  for (const match of safeText.matchAll(patternB)) {
+    const role = normalizeBehaviorRole(match[1] || '', 80);
+    const name = toSafeText(match[2] || '', 160);
+    if (!name) {
+      continue;
+    }
+    signals.push({
+      key: toMemoryKey(name, 160),
+      label: name,
+      role,
+      count: 2,
+      lastSeenAt: timestamp
+    });
+  }
+
+  const clientColon = /(?:cliente principal|main client)\s*[:=-]\s*([^,\n.]+)/gi;
+  for (const match of safeText.matchAll(clientColon)) {
+    const name = toSafeText(match[1] || '', 160);
+    if (!name) {
+      continue;
+    }
+    signals.push({
+      key: toMemoryKey(name, 160),
+      label: name,
+      role: 'cliente principal',
+      count: 3,
+      lastSeenAt: timestamp
+    });
+  }
+
+  return mergeBehaviorEntries([], signals, 36, {
+    countMode: 'max',
+    labelLimit: 220,
+    roleLimit: 80
+  });
+}
+
+function buildPreferenceSignalsFromText(text, timestamp = Date.now()) {
+  const safeText = toSafeText(text || '', 3200);
+  if (!safeText) {
+    return [];
+  }
+
+  const lines = safeText
+    .split(/[\n.!?]+/)
+    .map((item) => toSafeText(item, 240))
+    .filter(Boolean);
+  const tokens = ['me gusta', 'prefiero', 'no me gusta', 'odio', 'i like', 'i prefer', 'i hate'];
+  const signals = [];
+
+  for (const line of lines) {
+    const normalized = line.toLowerCase();
+    if (!tokens.some((token) => normalized.includes(token))) {
+      continue;
+    }
+
+    signals.push({
+      key: toMemoryKey(line, 180),
+      label: line,
+      count: 1,
+      lastSeenAt: timestamp
+    });
+  }
+
+  return mergeBehaviorEntries([], signals, 36, {
+    countMode: 'max',
+    labelLimit: 260,
+    allowRole: false
+  });
+}
+
+function buildBehaviorSignalsFromFacts(rawFacts, timestamp = Date.now()) {
+  const facts = Array.isArray(rawFacts) ? rawFacts : [];
+  const relationSignals = [];
+  const preferenceSignals = [];
+
+  for (const fact of facts) {
+    const type = toSafeText(fact?.type || 'user_fact', 40).toLowerCase();
+    const text = toSafeText(fact?.text || '', 320);
+    if (!text) {
+      continue;
+    }
+
+    if (type === 'client') {
+      const name = toSafeText(text.replace(/^cliente principal:\s*/i, ''), 160);
+      if (name) {
+        relationSignals.push({
+          key: toMemoryKey(name, 160),
+          label: name,
+          role: 'cliente principal',
+          count: 3,
+          lastSeenAt: timestamp
+        });
+      }
+    }
+
+    if (type === 'preference') {
+      preferenceSignals.push({
+        key: toMemoryKey(text, 180),
+        label: text,
+        count: 2,
+        lastSeenAt: timestamp
+      });
+    }
+
+    relationSignals.push(...buildRelationSignalsFromText(text, timestamp));
+    preferenceSignals.push(...buildPreferenceSignalsFromText(text, timestamp));
+  }
+
+  return {
+    relations: mergeBehaviorEntries([], relationSignals, 40, {
+      countMode: 'sum',
+      labelLimit: 220,
+      roleLimit: 80
+    }),
+    preferences: mergeBehaviorEntries([], preferenceSignals, 40, {
+      countMode: 'sum',
+      labelLimit: 260,
+      allowRole: false
+    })
+  };
+}
+
+function buildBehaviorSignalsFromTabContext(activeTab, historyEntries = [], timestamp = Date.now()) {
+  const tab = activeTab && typeof activeTab === 'object' ? activeTab : {};
+  const tabDetails = tab.details && typeof tab.details === 'object' ? tab.details : {};
+  const tabCurrentChat = tabDetails.currentChat && typeof tabDetails.currentChat === 'object' ? tabDetails.currentChat : {};
+  const relationSignals = [];
+  const contactSignals = [];
+  const activeSiteSignals = [];
+  const observedSiteSignals = [];
+  const tabTimestamp = Math.max(0, Number(tab.updatedAt) || timestamp);
+
+  const activeHost = toHostname(tab.url || '');
+  if (activeHost) {
+    activeSiteSignals.push({
+      key: toMemoryKey(activeHost, 160),
+      label: activeHost,
+      count: 1,
+      lastSeenAt: tabTimestamp
+    });
+  }
+
+  if (String(tab.site || '').toLowerCase() === 'whatsapp') {
+    const contactLabel = toSafeText(
+      tabCurrentChat.title || tabCurrentChat.phone || tabCurrentChat.key || tabCurrentChat.channelId || '',
+      220
+    );
+    const contactKey = toMemoryKey(
+      tabCurrentChat.channelId || tabCurrentChat.phone || tabCurrentChat.key || contactLabel,
+      160
+    );
+
+    if (contactLabel && contactKey) {
+      contactSignals.push({
+        key: contactKey,
+        label: contactLabel,
+        count: 1,
+        lastSeenAt: tabTimestamp
+      });
+
+      if (!/\b(group|grupo)\b/i.test(contactLabel)) {
+        relationSignals.push({
+          key: toMemoryKey(contactLabel, 160),
+          label: contactLabel,
+          role: 'contacto whatsapp',
+          count: 1,
+          lastSeenAt: tabTimestamp
+        });
+      }
+    }
+  }
+
+  const history = Array.isArray(historyEntries) ? historyEntries.slice(0, 80) : [];
+  for (const item of history) {
+    const host = toHostname(item?.url || '');
+    if (!host) {
+      continue;
+    }
+
+    const visitCount = Math.max(0, Number(item?.visitCount) || 0);
+    const typedCount = Math.max(0, Number(item?.typedCount) || 0);
+    const weight = Math.max(1, Math.min(220, visitCount + typedCount + 1));
+    observedSiteSignals.push({
+      key: toMemoryKey(host, 160),
+      label: host,
+      count: weight,
+      lastSeenAt: Math.max(0, Number(item?.lastVisitTime) || timestamp)
+    });
+  }
+
+  return {
+    relations: mergeBehaviorEntries([], relationSignals, 24, {
+      countMode: 'sum',
+      labelLimit: 220,
+      roleLimit: 80
+    }),
+    contacts: mergeBehaviorEntries([], contactSignals, 24, {
+      countMode: 'sum',
+      labelLimit: 220,
+      allowRole: false
+    }),
+    sitesActive: mergeBehaviorEntries([], activeSiteSignals, 16, {
+      countMode: 'sum',
+      labelLimit: 180,
+      allowRole: false
+    }),
+    sitesObserved: mergeBehaviorEntries([], observedSiteSignals, 120, {
+      countMode: 'max',
+      labelLimit: 180,
+      allowRole: false
+    })
+  };
 }
 
 function normalizeWhatsappMessages(rawMessages, limit = WHATSAPP_MESSAGE_DOC_LIMIT) {
@@ -732,6 +1337,107 @@ export function createContextMemoryService() {
 
     schedulePersist();
     return id;
+  }
+
+  async function readUserBehaviorProfile(maxItems = USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT) {
+    const defaults = buildUserBehaviorProfileDefaults(maxItems);
+    const payload = await readChromeLocal({
+      [USER_BEHAVIOR_PROFILE_STORAGE_KEY]: defaults
+    });
+    const stored =
+      payload && payload[USER_BEHAVIOR_PROFILE_STORAGE_KEY] && typeof payload[USER_BEHAVIOR_PROFILE_STORAGE_KEY] === 'object'
+        ? payload[USER_BEHAVIOR_PROFILE_STORAGE_KEY]
+        : defaults;
+    return normalizeUserBehaviorProfile(stored, defaults.maxItems);
+  }
+
+  async function writeUserBehaviorProfile(profile) {
+    const normalized = normalizeUserBehaviorProfile(profile, profile?.maxItems || USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT);
+    await writeChromeLocal({
+      [USER_BEHAVIOR_PROFILE_STORAGE_KEY]: normalized
+    });
+    return normalized;
+  }
+
+  async function updateUserBehaviorProfileMemory({
+    userText = '',
+    extractedFacts = [],
+    profileContext = {},
+    maxItems = USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT
+  } = {}) {
+    const limits = resolveUserBehaviorCategoryLimits(maxItems);
+    const current = await readUserBehaviorProfile(limits.total);
+    const timestamp = Date.now();
+    const textSignals = buildRelationSignalsFromText(userText, timestamp);
+    const preferenceSignals = buildPreferenceSignalsFromText(userText, timestamp);
+    const factSignals = buildBehaviorSignalsFromFacts(extractedFacts, timestamp);
+    const tabSignals = buildBehaviorSignalsFromTabContext(
+      profileContext?.activeTab || null,
+      profileContext?.historyEntries || [],
+      timestamp
+    );
+
+    let nextSites = mergeBehaviorEntries(current.sites, tabSignals.sitesObserved, limits.sites, {
+      countMode: 'max',
+      labelLimit: 180,
+      allowRole: false
+    });
+    nextSites = mergeBehaviorEntries(nextSites, tabSignals.sitesActive, limits.sites, {
+      countMode: 'sum',
+      labelLimit: 180,
+      allowRole: false
+    });
+
+    const next = normalizeUserBehaviorProfile(
+      {
+        ...current,
+        maxItems: limits.total,
+        updatedAt: timestamp,
+        relations: mergeBehaviorEntries(
+          mergeBehaviorEntries(current.relations, textSignals, limits.relations, {
+            countMode: 'sum',
+            labelLimit: 220,
+            roleLimit: 80
+          }),
+          [...factSignals.relations, ...tabSignals.relations],
+          limits.relations,
+          {
+            countMode: 'sum',
+            labelLimit: 220,
+            roleLimit: 80
+          }
+        ),
+        contacts: mergeBehaviorEntries(current.contacts, tabSignals.contacts, limits.contacts, {
+          countMode: 'sum',
+          labelLimit: 220,
+          allowRole: false
+        }),
+        sites: nextSites,
+        preferences: mergeBehaviorEntries(
+          mergeBehaviorEntries(current.preferences, preferenceSignals, limits.preferences, {
+            countMode: 'sum',
+            labelLimit: 260,
+            allowRole: false
+          }),
+          factSignals.preferences,
+          limits.preferences,
+          {
+            countMode: 'sum',
+            labelLimit: 260,
+            allowRole: false
+          }
+        )
+      },
+      limits.total
+    );
+
+    await writeUserBehaviorProfile(next);
+    const profileDoc = buildUserBehaviorProfileDoc(next);
+    if (profileDoc) {
+      await upsertDocument(profileDoc);
+    }
+
+    return next;
   }
 
   function buildNavigationDoc(tabContext) {
@@ -1395,16 +2101,19 @@ function buildFactDoc(fact, originId = '', index = 0) {
 
   async function buildDynamicIdentityHeader(query, identityPatch = {}) {
     const identity = await syncIdentityProfile(identityPatch);
+    const behaviorProfile = await readUserBehaviorProfile();
     const contextHits = await queryLocalContext(query, {
       similarity: MODEL_SIMILARITY_THRESHOLD,
       limit: DEFAULT_TOP_K
     });
 
     const contextSummary = buildContextPromptLines(contextHits);
+    const behaviorSummary = buildUserBehaviorHeaderSummary(behaviorProfile, USER_BEHAVIOR_HEADER_ITEMS_LIMIT);
     const header = [
       'Actua como un asistente personal.',
       `Datos del usuario actual: Nombre: ${identity.user_name || 'N/A'}, Maquina: ${identity.os || 'N/A'}, Ubicacion: ${identity.current_timezone || 'N/A'}.`,
       `Especificaciones locales: ${identity.machine_specs || 'N/A'}.`,
+      behaviorSummary,
       `Contexto de navegacion reciente: ${contextSummary}`
     ].join('\n');
 
@@ -1587,7 +2296,13 @@ function buildFactDoc(fact, originId = '', index = 0) {
     return upsertDocument(doc);
   }
 
-  async function rememberChatTurn({ userMessage, assistantMessage, contextUsed = [] }) {
+  async function rememberChatTurn({
+    userMessage,
+    assistantMessage,
+    contextUsed = [],
+    profileContext = {},
+    memoryLimits = {}
+  }) {
     const userText = toSafeText(userMessage || '', 2400);
     const aiText = toSafeText(assistantMessage || '', 3200);
 
@@ -1677,16 +2392,47 @@ function buildFactDoc(fact, originId = '', index = 0) {
       });
     }
 
+    let behaviorProfile = null;
+    try {
+      behaviorProfile = await updateUserBehaviorProfileMemory({
+        userText,
+        extractedFacts,
+        profileContext,
+        maxItems: resolveUserBehaviorLimit(memoryLimits?.maxProfileItems)
+      });
+    } catch (_) {
+      // Keep turn memory resilient if behavior profiling fails.
+    }
+
     return {
       context_used: normalizeArray(contextUsed, 12),
       extracted_facts: extractedFacts,
-      turn_ids: turnIds
+      turn_ids: turnIds,
+      profile_summary: behaviorProfile
+        ? {
+            updatedAt: behaviorProfile.updatedAt,
+            relations: behaviorProfile.relations.length,
+            contacts: behaviorProfile.contacts.length,
+            sites: behaviorProfile.sites.length,
+            preferences: behaviorProfile.preferences.length,
+            maxItems: behaviorProfile.maxItems
+          }
+        : null
     };
   }
 
   async function init() {
     await ensureDb();
     await syncIdentityProfile({});
+    try {
+      const behaviorProfile = await readUserBehaviorProfile();
+      const profileDoc = buildUserBehaviorProfileDoc(behaviorProfile);
+      if (profileDoc) {
+        await upsertDocument(profileDoc);
+      }
+    } catch (_) {
+      // Ignore behavior profile init failures.
+    }
     return true;
   }
 
@@ -1705,6 +2451,10 @@ function buildFactDoc(fact, originId = '', index = 0) {
       vectorSize: VECTOR_SIZE,
       modelSimilarityThreshold: MODEL_SIMILARITY_THRESHOLD,
       defaultTopK: DEFAULT_TOP_K,
+      userBehaviorProfileStorageKey: USER_BEHAVIOR_PROFILE_STORAGE_KEY,
+      userBehaviorProfileVersion: USER_BEHAVIOR_PROFILE_VERSION,
+      userBehaviorProfileMaxItemsDefault: USER_BEHAVIOR_PROFILE_MAX_ITEMS_DEFAULT,
+      userBehaviorProfileMaxItemsLimit: USER_BEHAVIOR_PROFILE_MAX_ITEMS_LIMIT,
       workerPath: WORKER_PATH,
       identityStorageKey: IDENTITY_STORAGE_KEY,
       idbName: IDB_NAME,

@@ -190,6 +190,17 @@ export function createSystemVariablesController(options = {}) {
       max: 300,
       step: 1,
       description: 'Cantidad de mensajes que alimentan el prompt de sugerencias de WhatsApp.'
+    },
+    {
+      id: 'memory.userProfileMaxItems',
+      scope: 'memory',
+      key: 'MEMORY_USER_PROFILE_MAX_ITEMS',
+      type: 'number',
+      defaultValue: Number(cfg.memoryUserProfileMaxItems) || 480,
+      min: 120,
+      max: Number(cfg.memoryUserProfileMaxItemsStorageLimit) || 3000,
+      step: 10,
+      description: 'Maximo de items agregados en perfil conductual local (relaciones, contactos, sitios, preferencias).'
     }
   ])
 

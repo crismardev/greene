@@ -27,6 +27,8 @@ export function createSettingsScreenController({
     settingsVoiceTtsVoiceSelect,
     settingsVoiceTtsSpeedInput,
     settingsVoiceTtsSpeedValue,
+    settingsVoicePauseMsInput,
+    settingsVoicePauseMsValue,
     settingsLanguageSelect,
     settingsSystemPrompt,
     settingsUserStatus,
@@ -39,6 +41,9 @@ export function createSettingsScreenController({
   const DEFAULT_VOICE_TTS_SPEED = 1;
   const MIN_VOICE_TTS_SPEED = 0.25;
   const MAX_VOICE_TTS_SPEED = 2;
+  const DEFAULT_VOICE_PAUSE_MS = 650;
+  const MIN_VOICE_PAUSE_MS = 300;
+  const MAX_VOICE_PAUSE_MS = 5000;
 
   function getPanelSettings() {
     return state.panelSettings;
@@ -92,6 +97,15 @@ export function createSettingsScreenController({
     return Number(clamped.toFixed(2));
   }
 
+  function normalizeVoicePauseMs(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return DEFAULT_VOICE_PAUSE_MS;
+    }
+    const clamped = Math.min(MAX_VOICE_PAUSE_MS, Math.max(MIN_VOICE_PAUSE_MS, numeric));
+    return Math.round(clamped);
+  }
+
   function updateVoiceModeMeta() {
     const panelSettings = getPanelSettings();
     const selectedLanguage = normalizeAssistantLanguage(
@@ -99,16 +113,20 @@ export function createSettingsScreenController({
     );
     const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || '');
     const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
+    const pauseMs = normalizeVoicePauseMs(settingsVoicePauseMsInput?.value ?? panelSettings.voicePauseMs);
 
     if (settingsVoiceTtsSpeedValue) {
       settingsVoiceTtsSpeedValue.textContent = `${ttsSpeed.toFixed(2)}x`;
+    }
+    if (settingsVoicePauseMsValue) {
+      settingsVoicePauseMsValue.textContent = `${pauseMs} ms`;
     }
 
     if (!settingsVoiceModeMeta) {
       return;
     }
 
-    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x`;
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
   }
 
   function applyPanelSettingsToUi() {
@@ -140,6 +158,9 @@ export function createSettingsScreenController({
 
     if (settingsVoiceTtsSpeedInput) {
       settingsVoiceTtsSpeedInput.value = String(normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed));
+    }
+    if (settingsVoicePauseMsInput) {
+      settingsVoicePauseMsInput.value = String(normalizeVoicePauseMs(panelSettings.voicePauseMs));
     }
 
     if (settingsSystemPrompt) {
@@ -198,6 +219,9 @@ export function createSettingsScreenController({
     merged.voiceTtsVoice = normalizeVoiceTtsVoice(merged.voiceTtsVoice || defaults?.panelSettingsDefaults?.voiceTtsVoice || '');
     merged.voiceTtsSpeed = normalizeVoiceTtsSpeed(
       merged.voiceTtsSpeed ?? defaults?.panelSettingsDefaults?.voiceTtsSpeed ?? DEFAULT_VOICE_TTS_SPEED
+    );
+    merged.voicePauseMs = normalizeVoicePauseMs(
+      merged.voicePauseMs ?? defaults?.panelSettingsDefaults?.voicePauseMs ?? DEFAULT_VOICE_PAUSE_MS
     );
     merged.onboardingDone = merged.onboardingDone === true || String(merged.onboardingDone).toLowerCase() === 'true';
     merged.systemPrompt = sanitizePromptByLanguage(merged.systemPrompt, language);
@@ -296,6 +320,9 @@ export function createSettingsScreenController({
     const nextVoiceTtsSpeed = normalizeVoiceTtsSpeed(
       settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed ?? DEFAULT_VOICE_TTS_SPEED
     );
+    const nextVoicePauseMs = normalizeVoicePauseMs(
+      settingsVoicePauseMsInput?.value ?? panelSettings.voicePauseMs ?? DEFAULT_VOICE_PAUSE_MS
+    );
     const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
 
     if (!nextPrompt) {
@@ -309,6 +336,7 @@ export function createSettingsScreenController({
       language: nextLanguage,
       voiceTtsVoice: nextVoiceTtsVoice,
       voiceTtsSpeed: nextVoiceTtsSpeed,
+      voicePauseMs: nextVoicePauseMs,
       onboardingDone: true,
       systemPrompt: nextPrompt
     };

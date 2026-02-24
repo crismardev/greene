@@ -9,7 +9,7 @@ Esta disenada para operar con privilegios elevados y fue generada con AI con el 
 >
 > Copyright (c) 2026 Cristhian.
 >
-> Se permite la inspección del código fuente para auditoría de seguridad. Queda estrictamente prohibida la ejecución, copia, modificación o distribución de este software para cualquier propósito sin una clave de licencia válida adquirida en [Tu Sitio Web]. Este software no es "Open Source" bajo la definición de la OSI, es Source-Available de pago.
+> Se permite la inspección del código fuente para auditoría de seguridad. Queda estrictamente prohibida la ejecución, copia, modificación o distribución de este software para cualquier propósito sin una clave de licencia válida adquirida con el desarrollador. Este software no es "Open Source" bajo la definición de la OSI, es Source-Available de pago.
 
 ## Que es
 
