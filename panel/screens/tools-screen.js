@@ -4,6 +4,7 @@ const TOOLS_PAGES = Object.freeze({
 });
 
 const DEFAULT_TOOL_ICON_URL = '../assets/icon-32.png';
+const ENABLE_REMOTE_TOOL_FAVICONS = true;
 
 function normalizeToken(value) {
   return String(value || '').trim();
@@ -73,18 +74,97 @@ function buildDomainToken(rawUrl) {
   return resolveRootDomainToken(hostname);
 }
 
-function resolveToolIconUrl(tool, fallbackIconUrl) {
-  const customIcon = normalizeToken(tool?.iconUrl);
+function parseToolUrl(rawUrl) {
+  const source = normalizeToken(rawUrl);
+  if (!source) {
+    return null;
+  }
+
+  try {
+    return new URL(source);
+  } catch (_) {
+    try {
+      return new URL(`https://${source}`);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function sanitizeCustomIconUrl(rawUrl) {
+  const source = normalizeToken(rawUrl);
+  if (!source) {
+    return '';
+  }
+
+  if (source.startsWith('http://')) {
+    return `https://${source.slice('http://'.length)}`;
+  }
+
+  try {
+    const parsed = new URL(source);
+    if (parsed.protocol === 'http:') {
+      parsed.protocol = 'https:';
+    }
+
+    if (parsed.hostname.endsWith('gstatic.com') && parsed.pathname.includes('/faviconV2')) {
+      const target = parsed.searchParams.get('url');
+      if (target && target.startsWith('http://')) {
+        parsed.searchParams.set('url', `https://${target.slice('http://'.length)}`);
+      }
+    }
+
+    return parsed.href;
+  } catch (_) {
+    return source;
+  }
+}
+
+function appendUniqueToolIconCandidate(list, value) {
+  const token = normalizeToken(value);
+  if (!token || list.includes(token)) {
+    return;
+  }
+  list.push(token);
+}
+
+function buildToolIconCandidates(tool, fallbackIconUrl) {
+  const candidates = [];
+  const customIcon = sanitizeCustomIconUrl(tool?.iconUrl);
   if (customIcon) {
-    return customIcon;
+    appendUniqueToolIconCandidate(candidates, customIcon);
   }
 
-  const domainToken = buildDomainToken(tool?.url);
-  if (domainToken) {
-    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domainToken)}&sz=64`;
+  if (ENABLE_REMOTE_TOOL_FAVICONS) {
+    const parsedUrl = parseToolUrl(tool?.url);
+    const domainToken = buildDomainToken(tool?.url);
+    const safeDomain = domainToken && !domainToken.includes(':') ? domainToken : '';
+    const safeUrl = safeDomain ? `https://${safeDomain}` : '';
+
+    if (parsedUrl && parsedUrl.hostname) {
+      appendUniqueToolIconCandidate(candidates, `${parsedUrl.origin}/favicon.ico`);
+      appendUniqueToolIconCandidate(candidates, `${parsedUrl.origin}/favicon.png`);
+    }
+
+    if (safeDomain) {
+      appendUniqueToolIconCandidate(candidates, `${safeUrl}/favicon.ico`);
+      appendUniqueToolIconCandidate(
+        candidates,
+        `https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=${encodeURIComponent(
+          safeUrl
+        )}&size=64`
+      );
+      appendUniqueToolIconCandidate(candidates, `https://www.google.com/s2/favicons?domain=${encodeURIComponent(safeDomain)}&sz=64`);
+    }
   }
 
-  return fallbackIconUrl;
+  appendUniqueToolIconCandidate(candidates, fallbackIconUrl);
+  return candidates;
+}
+
+function resolveToolIconUrl(tool, fallbackIconUrl) {
+  const candidates = buildToolIconCandidates(tool, fallbackIconUrl);
+  return candidates[0] || fallbackIconUrl;
 }
 
 function normalizeToolsCatalog(rawTools) {
@@ -277,9 +357,24 @@ export function createToolsScreenController({
       icon.alt = '';
       icon.decoding = 'async';
       icon.loading = 'lazy';
-      icon.src = resolveToolIconUrl(tool, DEFAULT_TOOL_ICON_URL);
+      icon.referrerPolicy = 'no-referrer';
+      const iconCandidates = buildToolIconCandidates(tool, DEFAULT_TOOL_ICON_URL);
+      let iconCandidateIndex = 0;
+      const applyIconCandidate = (index) => {
+        const safeIndex = Math.max(0, Number(index) || 0);
+        const nextSrc = iconCandidates[safeIndex] || DEFAULT_TOOL_ICON_URL;
+        iconCandidateIndex = safeIndex;
+        if (icon.src !== nextSrc) {
+          icon.src = nextSrc;
+        }
+      };
+      applyIconCandidate(0);
       icon.addEventListener('error', () => {
-        icon.src = DEFAULT_TOOL_ICON_URL;
+        const nextIndex = iconCandidateIndex + 1;
+        if (nextIndex >= iconCandidates.length) {
+          return;
+        }
+        applyIconCandidate(nextIndex);
       });
       iconWrap.appendChild(icon);
 

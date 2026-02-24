@@ -213,6 +213,8 @@ export function initPanelApp() {
   const MAX_CHAT_CONTEXT_MESSAGES = 20;
   const MAX_CHAT_HISTORY_MESSAGES = 160;
   const MAX_CHAT_HISTORY_STORAGE_LIMIT = 600;
+  const CHAT_STARTUP_RENDER_MAX_MESSAGES = 28;
+  const CHAT_HISTORY_READ_PADDING = 24;
   const MAX_LOCAL_TOOL_CALLS = 3;
   const MAX_TOOL_ERROR_LOG_ITEMS = 12;
   const TOOL_ERROR_LOG_MAX_AGE_MS = 1000 * 60 * 60 * 24;
@@ -231,10 +233,17 @@ export function initPanelApp() {
   const WHATSAPP_ALIAS_STORAGE_VERSION = 1;
   const WHATSAPP_ALIAS_MAX_ITEMS = 240;
   const WHATSAPP_ALIAS_DB_INDEX_SYNC_COOLDOWN_MS = 1000 * 45;
+  const WHATSAPP_HISTORY_SYNC_MIN_INTERVAL_MS = 1000 * 8;
+  const WHATSAPP_LIVE_CONTEXT_RETRY_COOLDOWN_MS = 1000 * 12;
+  const WHATSAPP_LIVE_CONTEXT_NO_RECEIVER_COOLDOWN_MS = 1000 * 25;
+  const WHATSAPP_SUGGESTION_AUTO_DEBOUNCE_MS = 420;
+  const WHATSAPP_SUGGESTION_MODEL_COOLDOWN_MS = 1000 * 45;
+  const ENABLE_AUTO_WHATSAPP_SUGGESTION_WITH_OLLAMA = false;
   const MEMORY_USER_PROFILE_MAX_ITEMS = 480;
   const MEMORY_USER_PROFILE_MAX_ITEMS_STORAGE_LIMIT = 3000;
   const MAX_WHATSAPP_PROMPT_ENTRIES = 320;
   const MAX_WHATSAPP_PROMPT_CHARS = 1800;
+  const ENABLE_AUTO_TAB_SUMMARY_WITH_MODEL = false;
   const VOICE_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
   const VOICE_TRANSCRIPTION_LANGUAGE = 'es';
   const VOICE_CHAT_RESPONSE_MODEL = 'gpt-4o-mini';
@@ -255,6 +264,8 @@ export function initPanelApp() {
   const VOICE_VAD_MODEL = 'v5';
   const VOICE_VAD_ASSET_BASE_PATH = new URL('../node_modules/@ricky0123/vad-web/dist/', import.meta.url).href;
   const VOICE_VAD_WASM_BASE_PATH = new URL('../node_modules/onnxruntime-web/dist/', import.meta.url).href;
+  const VOICE_ORT_SCRIPT_PATH = '../node_modules/onnxruntime-web/dist/ort.min.js';
+  const VOICE_VAD_SCRIPT_PATH = '../node_modules/@ricky0123/vad-web/dist/bundle.min.js';
   const VOICE_VAD_POSITIVE_THRESHOLD = 0.28;
   const VOICE_VAD_NEGATIVE_THRESHOLD = 0.22;
   const VOICE_VAD_MIN_SPEECH_MS = 220;
@@ -282,10 +293,12 @@ export function initPanelApp() {
     'http://localhost:11434/api/tags',
     'http://127.0.0.1:11434/api/tags'
   ]);
+  const ENABLE_OLLAMA_REFRESH_ON_BOOT = false;
+  const ENABLE_OLLAMA_WARMUP_ON_BOOT = false;
 
   const CHAT_DB = Object.freeze({
     NAME: 'greene-chat-db',
-    VERSION: 5,
+    VERSION: 6,
     CHAT_STORE: 'chat_state',
     CHAT_KEY: 'home_history',
     SETTINGS_STORE: 'panel_settings',
@@ -299,6 +312,10 @@ export function initPanelApp() {
   const INITIAL_CONTEXT_SYNC_HISTORY_LIMIT = 320;
   const INITIAL_CONTEXT_SYNC_HISTORY_DAYS = 45;
   const INITIAL_CONTEXT_SYNC_CHAT_LIMIT = 140;
+  const INITIAL_CONTEXT_BOOTSTRAP_DELAY_MS = 12000;
+  const INITIAL_CONTEXT_BOOTSTRAP_IDLE_TIMEOUT_MS = 8000;
+  const RUNTIME_SCRIPT_LOAD_TIMEOUT_MS = 6000;
+  const ENABLE_REALTIME_CONTEXT_INGESTION = false;
   const systemVariablesController = createSystemVariablesController({
     defaultChatSystemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
     defaultWhatsappSuggestionBasePrompt: DEFAULT_WHATSAPP_REPLY_PROMPT_BASE,
@@ -700,6 +717,9 @@ export function initPanelApp() {
   let pendingChatRenderAllowAutoScroll = true;
   let chatBottomAlignToken = 0;
   let chatStreamBottomReservePx = 0;
+  let chatHistoryRenderLimit = CHAT_STARTUP_RENDER_MAX_MESSAGES;
+  let chatHistoryHydrationPromise = null;
+  let chatHistoryHydrated = false;
   let modelWarmupPromise = null;
   let localToolErrorLog = [];
   let nativeHostDiagnostics = {
@@ -727,7 +747,10 @@ export function initPanelApp() {
     loading: false
   };
   let whatsappSuggestionToken = 0;
+  let whatsappSuggestionRefreshTimer = 0;
+  let queuedWhatsappSuggestionTab = null;
   let whatsappSuggestionDismissedSignalKey = '';
+  let whatsappSuggestionModelCooldownUntil = 0;
   let whatsappSuggestionExecutionInFlight = false;
   let whatsappSuggestionUiStatus = {
     message: '',
@@ -776,8 +799,11 @@ export function initPanelApp() {
   let dynamicRelationRenderIds = new Set();
   let dynamicUiToastHideTimer = 0;
   let dynamicUiToastKey = '';
+  let realtimeContextIngestionEnabled = ENABLE_REALTIME_CONTEXT_INGESTION;
   let contextIngestionPromise = Promise.resolve();
   let whatsappHistorySyncPromise = Promise.resolve();
+  let whatsappHistorySyncNextAllowedByTab = new Map();
+  let whatsappLiveContextBlockedUntilByTab = new Map();
   let whatsappHistoryVectorFingerprintByKey = new Map();
   let whatsappAliasBook = {
     version: WHATSAPP_ALIAS_STORAGE_VERSION,
@@ -794,6 +820,11 @@ export function initPanelApp() {
   });
   let whatsappAliasDbIndexSyncedAt = 0;
   let initialContextSyncPromise = null;
+  const runtimeScriptPromiseByPath = new Map();
+  let voiceRuntimeDependenciesPromise = null;
+  let initialContextBootstrapTimerId = 0;
+  let initialContextBootstrapIdleId = 0;
+  let initialContextBootstrapStarted = false;
   function createInitialVoiceCaptureState() {
     return {
       mode: 'idle',
@@ -3883,6 +3914,168 @@ export function initPanelApp() {
     });
   }
 
+  function clearInitialContextBootstrapSchedule() {
+    if (initialContextBootstrapTimerId) {
+      window.clearTimeout(initialContextBootstrapTimerId);
+      initialContextBootstrapTimerId = 0;
+    }
+
+    if (initialContextBootstrapIdleId && typeof window.cancelIdleCallback === 'function') {
+      window.cancelIdleCallback(initialContextBootstrapIdleId);
+      initialContextBootstrapIdleId = 0;
+    }
+  }
+
+  function scheduleInitialContextBootstrap(options = {}) {
+    if (initialContextBootstrapStarted || initialContextSyncPromise) {
+      return;
+    }
+
+    const delayMs = Math.max(250, Number(options.delayMs) || INITIAL_CONTEXT_BOOTSTRAP_DELAY_MS);
+    const idleTimeoutMs = Math.max(1000, Number(options.idleTimeoutMs) || INITIAL_CONTEXT_BOOTSTRAP_IDLE_TIMEOUT_MS);
+
+    const startBootstrap = () => {
+      if (initialContextBootstrapStarted) {
+        return;
+      }
+      initialContextBootstrapStarted = true;
+      clearInitialContextBootstrapSchedule();
+      void runInitialContextBootstrap().catch((error) => {
+        logWarn('initial_context_sync:schedule_failed', {
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+      });
+    };
+
+    clearInitialContextBootstrapSchedule();
+    initialContextBootstrapTimerId = window.setTimeout(startBootstrap, delayMs);
+    if (typeof window.requestIdleCallback === 'function') {
+      initialContextBootstrapIdleId = window.requestIdleCallback(startBootstrap, {
+        timeout: idleTimeoutMs
+      });
+    }
+  }
+
+  function ensureRuntimeScriptLoaded(scriptPath, readyCheck) {
+    const safePath = String(scriptPath || '').trim();
+    if (!safePath) {
+      return Promise.resolve(false);
+    }
+
+    if (typeof readyCheck === 'function' && readyCheck()) {
+      return Promise.resolve(true);
+    }
+
+    const inFlight = runtimeScriptPromiseByPath.get(safePath);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const scriptUrl = new URL(safePath, import.meta.url).href;
+    const loaderPromise = new Promise((resolve, reject) => {
+      const allScripts = Array.from(document.getElementsByTagName('script'));
+      let scriptNode = allScripts.find((item) => item?.src === scriptUrl) || null;
+
+      const verifyReady = () => {
+        if (typeof readyCheck === 'function' && !readyCheck()) {
+          throw new Error(`Dependencia runtime cargada sin exponer API esperada: ${safePath}`);
+        }
+        return true;
+      };
+
+      const finalize = () => {
+        try {
+          verifyReady();
+          resolve(true);
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error || 'No se pudo validar dependencia runtime.')));
+        }
+      };
+
+      if (!scriptNode) {
+        scriptNode = document.createElement('script');
+        scriptNode.src = scriptUrl;
+        scriptNode.async = true;
+        scriptNode.dataset.greeneLazyRuntime = safePath;
+        const mount = document.head || document.body || document.documentElement;
+        if (!mount) {
+          reject(new Error(`No se pudo montar dependencia runtime: ${safePath}`));
+          return;
+        }
+        mount.appendChild(scriptNode);
+      } else if (typeof readyCheck !== 'function') {
+        resolve(true);
+        return;
+      } else if (readyCheck()) {
+        resolve(true);
+        return;
+      } else if (scriptNode.dataset.greeneLazyRuntimeLoaded === 'true') {
+        reject(new Error(`Dependencia runtime no disponible tras carga previa: ${safePath}`));
+        return;
+      }
+
+      let timeoutId = 0;
+      const handleLoad = () => {
+        scriptNode.dataset.greeneLazyRuntimeLoaded = 'true';
+        cleanup();
+        finalize();
+      };
+      const handleError = () => {
+        cleanup();
+        reject(new Error(`No se pudo cargar dependencia runtime: ${safePath}`));
+      };
+      const cleanup = () => {
+        if (timeoutId) {
+          window.clearTimeout(timeoutId);
+          timeoutId = 0;
+        }
+        scriptNode.removeEventListener('load', handleLoad);
+        scriptNode.removeEventListener('error', handleError);
+      };
+
+      scriptNode.addEventListener('load', handleLoad, { once: true });
+      scriptNode.addEventListener('error', handleError, { once: true });
+      timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timeout cargando dependencia runtime: ${safePath}`));
+      }, RUNTIME_SCRIPT_LOAD_TIMEOUT_MS);
+    });
+
+    const guardedPromise = loaderPromise.catch((error) => {
+      runtimeScriptPromiseByPath.delete(safePath);
+      throw error;
+    });
+    runtimeScriptPromiseByPath.set(safePath, guardedPromise);
+    return guardedPromise;
+  }
+
+  async function ensureVoiceRuntimeDependenciesLoaded() {
+    if (getVoiceVadLibrary()) {
+      return true;
+    }
+
+    if (voiceRuntimeDependenciesPromise) {
+      return voiceRuntimeDependenciesPromise;
+    }
+
+    voiceRuntimeDependenciesPromise = (async () => {
+      await ensureRuntimeScriptLoaded(VOICE_ORT_SCRIPT_PATH, () => typeof window?.ort !== 'undefined');
+      await ensureRuntimeScriptLoaded(VOICE_VAD_SCRIPT_PATH, () => Boolean(getVoiceVadLibrary()));
+      return Boolean(getVoiceVadLibrary());
+    })()
+      .catch((error) => {
+        logWarn('voice:runtime_dependencies_failed', {
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+        return false;
+      })
+      .finally(() => {
+        voiceRuntimeDependenciesPromise = null;
+      });
+
+    return voiceRuntimeDependenciesPromise;
+  }
+
   function requestChatAutofocus(attempts = 8, delayMs = 80) {
     let attempt = 0;
 
@@ -5571,8 +5764,8 @@ export function initPanelApp() {
     return compact;
   }
 
-  async function readChatHistory() {
-    return storageService.readChatHistory();
+  async function readChatHistory(options = {}) {
+    return storageService.readChatHistory(options);
   }
 
   async function saveChatHistory() {
@@ -7064,6 +7257,11 @@ export function initPanelApp() {
   }
 
   async function ensureVoiceVadEngine() {
+    const dependenciesReady = await ensureVoiceRuntimeDependenciesLoaded();
+    if (!dependenciesReady) {
+      return null;
+    }
+
     const vadApi = getVoiceVadLibrary();
     if (!vadApi) {
       return null;
@@ -8129,6 +8327,34 @@ export function initPanelApp() {
     chatBody.scrollTop = chatBody.scrollHeight;
   }
 
+  function resolveChatRenderLimit(totalMessages = 0) {
+    const total = Math.max(0, Number(totalMessages) || 0);
+    if (total <= 0) {
+      return 0;
+    }
+
+    const requested = Math.max(1, Number(chatHistoryRenderLimit) || CHAT_STARTUP_RENDER_MAX_MESSAGES);
+    return Math.min(total, requested);
+  }
+
+  function createChatHistoryCollapsedNode(hiddenCount) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chat-history-collapsed';
+
+    const copy = document.createElement('span');
+    copy.className = 'chat-history-collapsed__label';
+    copy.textContent = `Se ocultaron ${hiddenCount} mensajes anteriores para acelerar la carga inicial.`;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn--ghost chat-history-collapsed__btn';
+    button.dataset.chatHistoryAction = 'expand';
+    button.textContent = 'Cargar historial completo';
+
+    wrapper.append(copy, button);
+    return wrapper;
+  }
+
   function normalizeChatStreamBottomReserve(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric) || numeric <= 0) {
@@ -8160,7 +8386,14 @@ export function initPanelApp() {
       return;
     }
 
-    for (const message of chatHistory) {
+    const renderLimit = resolveChatRenderLimit(chatHistory.length);
+    const hiddenCount = Math.max(0, chatHistory.length - renderLimit);
+    const visibleMessages = hiddenCount > 0 ? chatHistory.slice(-renderLimit) : chatHistory;
+    if (hiddenCount > 0) {
+      chatMessagesEl.appendChild(createChatHistoryCollapsedNode(hiddenCount));
+    }
+
+    for (const message of visibleMessages) {
       chatMessagesEl.appendChild(createChatMessageNode(message));
     }
 
@@ -8176,6 +8409,18 @@ export function initPanelApp() {
     if (allowAutoScroll && nearBottom) {
       scrollChatToBottom();
     }
+  }
+
+  function expandChatHistoryRenderLimit() {
+    const totalMessages = Array.isArray(chatHistory) ? chatHistory.length : 0;
+    if (totalMessages <= 0) {
+      return;
+    }
+
+    chatHistoryRenderLimit = totalMessages;
+    renderChatMessages({
+      allowAutoScroll: false
+    });
   }
 
   function scheduleChatRender(options = {}) {
@@ -8283,11 +8528,18 @@ export function initPanelApp() {
       createdAt: Date.now()
     };
 
+    const keepFullHistoryVisible = chatHistoryRenderLimit >= chatHistory.length;
     chatHistory.push(messageRecord);
 
     const maxHistoryMessages = getSystemVariableNumber('chat.maxHistoryMessages', MAX_CHAT_HISTORY_MESSAGES);
     if (chatHistory.length > maxHistoryMessages) {
       chatHistory = chatHistory.slice(-maxHistoryMessages);
+    }
+    if (keepFullHistoryVisible) {
+      chatHistoryRenderLimit = chatHistory.length;
+    } else {
+      const fallbackLimit = Math.max(1, Number(chatHistoryRenderLimit) || CHAT_STARTUP_RENDER_MAX_MESSAGES);
+      chatHistoryRenderLimit = Math.min(chatHistory.length, Math.max(CHAT_STARTUP_RENDER_MAX_MESSAGES, fallbackLimit));
     }
 
     syncChatBottomReserve({
@@ -8301,6 +8553,7 @@ export function initPanelApp() {
 
   async function resetChatHistory() {
     chatHistory = [];
+    chatHistoryRenderLimit = CHAT_STARTUP_RENDER_MAX_MESSAGES;
     syncChatBottomReserve({
       streaming: false
     });
@@ -12369,6 +12622,34 @@ export function initPanelApp() {
     return tabSummaryByKey.get(key) || '';
   }
 
+  function buildHeuristicTabSummary(tabContext) {
+    const source = tabContext && typeof tabContext === 'object' ? tabContext : {};
+    const title = String(source.title || '').replace(/\s+/g, ' ').trim();
+    const description = String(source.description || '').replace(/\s+/g, ' ').trim();
+    const excerpt = String(source.textExcerpt || '').replace(/\s+/g, ' ').trim();
+    const base = [title, description || excerpt].filter(Boolean).join(' - ').trim();
+    if (!base) {
+      return '';
+    }
+    return base.slice(0, getSystemVariableNumber('context.tabSummaryMaxChars', TAB_SUMMARY_MAX_CHARS));
+  }
+
+  function isLikelyModelOfflineError(errorText = '') {
+    const token = String(errorText || '').trim().toLowerCase();
+    if (!token) {
+      return false;
+    }
+
+    return (
+      token.includes('err_connection_refused') ||
+      token.includes('failed to fetch') ||
+      token.includes('networkerror') ||
+      token.includes('no se pudo conectar con ollama') ||
+      token.includes('ollama error') ||
+      token.includes('ollama rechazo el origen')
+    );
+  }
+
   function trimTabSummaryCache() {
     const keepKeys = new Set(tabContextSnapshot.tabs.map((item) => getTabSummaryKey(item)));
     for (const key of tabSummaryByKey.keys()) {
@@ -12856,6 +13137,11 @@ export function initPanelApp() {
       return;
     }
 
+    if (!ENABLE_AUTO_TAB_SUMMARY_WITH_MODEL) {
+      tabSummaryByKey.set(key, buildHeuristicTabSummary(tabContext));
+      return;
+    }
+
     tabSummaryQueue.push({ key, tabContext });
     processTabSummaryQueue();
   }
@@ -12902,9 +13188,47 @@ export function initPanelApp() {
       return;
     }
 
-    void generateWhatsappSuggestion(activeTab, {
+    scheduleWhatsappSuggestionForTab(activeTab, {
       force: options.force === true
     });
+  }
+
+  function clearWhatsappSuggestionRefreshTimer() {
+    if (!whatsappSuggestionRefreshTimer) {
+      return;
+    }
+    window.clearTimeout(whatsappSuggestionRefreshTimer);
+    whatsappSuggestionRefreshTimer = 0;
+    queuedWhatsappSuggestionTab = null;
+  }
+
+  function scheduleWhatsappSuggestionForTab(tabContext, options = {}) {
+    const context = tabContext && typeof tabContext === 'object' ? tabContext : null;
+    if (!context || !isWhatsappContext(context)) {
+      return;
+    }
+
+    const force = options.force === true;
+    if (force) {
+      clearWhatsappSuggestionRefreshTimer();
+      void generateWhatsappSuggestion(context, { force: true });
+      return;
+    }
+
+    queuedWhatsappSuggestionTab = context;
+    if (whatsappSuggestionRefreshTimer) {
+      return;
+    }
+
+    whatsappSuggestionRefreshTimer = window.setTimeout(() => {
+      whatsappSuggestionRefreshTimer = 0;
+      const queued = queuedWhatsappSuggestionTab;
+      queuedWhatsappSuggestionTab = null;
+      if (!queued) {
+        return;
+      }
+      void generateWhatsappSuggestion(queued, { force: false });
+    }, WHATSAPP_SUGGESTION_AUTO_DEBOUNCE_MS);
   }
 
   function mergeWhatsappContextWithHistory(tabContext, historyPayload) {
@@ -13035,6 +13359,12 @@ export function initPanelApp() {
       return tabContext;
     }
 
+    const now = Date.now();
+    const blockedUntil = whatsappLiveContextBlockedUntilByTab.get(tabId) || 0;
+    if (!safeOptions.force && now < blockedUntil) {
+      return tabContext;
+    }
+
     const readLimit = Math.max(20, Math.min(140, Number(safeOptions.messageLimit) || 80));
     const [chatResponse, messagesResponse] = await Promise.all([
       tabContextService.runSiteActionInTab(tabId, 'whatsapp', 'getCurrentChat', {}),
@@ -13043,9 +13373,23 @@ export function initPanelApp() {
 
     const liveChat = chatResponse?.result && typeof chatResponse.result === 'object' ? chatResponse.result : {};
     const liveMessages = Array.isArray(messagesResponse?.result) ? messagesResponse.result : [];
+    const chatError = String(chatResponse?.error || '').trim();
+    const messagesError = String(messagesResponse?.error || '').trim();
+    const firstError = chatError || messagesError;
+    const noReceiver = isNoReceiverRuntimeError(firstError);
     if (!liveMessages.length && !Object.keys(liveChat).length) {
+      if (firstError) {
+        const cooldownMs = noReceiver
+          ? WHATSAPP_LIVE_CONTEXT_NO_RECEIVER_COOLDOWN_MS
+          : WHATSAPP_LIVE_CONTEXT_RETRY_COOLDOWN_MS;
+        whatsappLiveContextBlockedUntilByTab.set(tabId, Date.now() + cooldownMs);
+      } else {
+        whatsappLiveContextBlockedUntilByTab.set(tabId, Date.now() + WHATSAPP_LIVE_CONTEXT_RETRY_COOLDOWN_MS);
+      }
       return tabContext;
     }
+
+    whatsappLiveContextBlockedUntilByTab.set(tabId, Date.now() + 1200);
 
     const mergedCurrentChat = {
       ...currentChat,
@@ -13528,14 +13872,12 @@ export function initPanelApp() {
     const metaLogKey = `${activeSite}|p:${phoneCount}|e:${emailCount}|s:${suggestions.length}|r:${relations.length}`;
     if (metaLogKey !== dynamicContextMetaLogKey) {
       dynamicContextMetaLogKey = metaLogKey;
-      console.log(`${LOG_PREFIX} dynamic_context:meta`, {
+      logDebug('dynamic_context:meta', {
         site: activeSite,
         phoneCount,
         emailCount,
         suggestionCount: suggestions.length,
-        relationCount: relations.length,
-        phones: Array.isArray(safeSignals.phones) ? safeSignals.phones : [],
-        emails: Array.isArray(safeSignals.emails) ? safeSignals.emails : []
+        relationCount: relations.length
       });
     }
 
@@ -13937,6 +14279,10 @@ export function initPanelApp() {
     }
 
     const force = Boolean(options.force);
+    if (!force && Date.now() < whatsappSuggestionModelCooldownUntil) {
+      return;
+    }
+
     let suggestionContext = tabContext;
 
     try {
@@ -13956,6 +14302,7 @@ export function initPanelApp() {
     const basePrompt = getWhatsappSuggestionBasePrompt();
     const chatPrompt = resolveWhatsappConversationPromptForSuggestion(suggestionContext);
     const promptSignature = buildWhatsappSuggestionPromptSignature(basePrompt, chatPrompt);
+    const profileForSuggestion = resolveModelProfileForInference();
 
     logDebug('whatsapp_suggestion:start', {
       ...contextSummary,
@@ -14021,6 +14368,26 @@ export function initPanelApp() {
       return;
     }
 
+    if (!force && whatsappSuggestionState.loading && whatsappSuggestionState.signalKey === signalKey) {
+      return;
+    }
+
+    if (!profileForSuggestion) {
+      setWhatsappSuggestionUiStatus('No hay modelo disponible para sugerencias.', true);
+      setStatus(whatsappSuggestionStatus, 'No hay modelo disponible para sugerencias.', true);
+      renderAiDynamicContext(suggestionContext);
+      return;
+    }
+
+    if (
+      !force &&
+      profileForSuggestion.provider === AI_PROVIDER_IDS.OLLAMA &&
+      !ENABLE_AUTO_WHATSAPP_SUGGESTION_WITH_OLLAMA
+    ) {
+      hideWhatsappSuggestion();
+      return;
+    }
+
     whatsappSuggestionDismissedSignalKey = '';
     const token = ++whatsappSuggestionToken;
     whatsappSuggestionState = {
@@ -14040,10 +14407,6 @@ export function initPanelApp() {
         basePrompt,
         chatPrompt
       });
-      const profileForSuggestion = resolveModelProfileForInference();
-      if (!profileForSuggestion) {
-        throw new Error('No hay modelo disponible para sugerencias.');
-      }
 
       logDebug('whatsapp_suggestion:model_start', {
         tabId: contextSummary.tabId,
@@ -14128,6 +14491,9 @@ export function initPanelApp() {
         loading: false
       };
       const message = error instanceof Error ? error.message : 'No se pudo generar sugerencia.';
+      if (!force && isLikelyModelOfflineError(message)) {
+        whatsappSuggestionModelCooldownUntil = Date.now() + WHATSAPP_SUGGESTION_MODEL_COOLDOWN_MS;
+      }
       setWhatsappSuggestionUiStatus(message, true);
       setStatus(whatsappSuggestionStatus, message, true);
       renderAiDynamicContext(suggestionContext);
@@ -14189,6 +14555,11 @@ export function initPanelApp() {
   }
 
   function queueContextIngestion(snapshot, options = {}) {
+    const force = options.force === true;
+    if (!force && !realtimeContextIngestionEnabled) {
+      return;
+    }
+
     const tabsLimit = Math.max(
       1,
       Math.min(120, Number(options.tabsLimit) || getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY))
@@ -14227,7 +14598,24 @@ export function initPanelApp() {
 
   function queueWhatsappHistorySync(snapshot, options = {}) {
     const tabs = Array.isArray(snapshot?.tabs) ? snapshot.tabs : [];
-    const whatsappTabs = tabs.filter((tab) => isWhatsappContext(tab));
+    const now = Date.now();
+    const force = options.force === true;
+    const whatsappTabs = tabs.filter((tab) => {
+      if (!isWhatsappContext(tab)) {
+        return false;
+      }
+
+      if (force) {
+        return true;
+      }
+
+      const tabId = Number(tab?.tabId);
+      if (!Number.isFinite(tabId) || tabId < 0) {
+        return false;
+      }
+
+      return now >= (whatsappHistorySyncNextAllowedByTab.get(tabId) || 0);
+    });
     const messageLimit = Math.max(
       80,
       Math.min(
@@ -14246,6 +14634,10 @@ export function initPanelApp() {
       .catch(() => {})
       .then(async () => {
         for (const tab of whatsappTabs) {
+          const tabId = Number(tab?.tabId);
+          if (Number.isFinite(tabId) && tabId >= 0) {
+            whatsappHistorySyncNextAllowedByTab.set(tabId, Date.now() + WHATSAPP_HISTORY_SYNC_MIN_INTERVAL_MS);
+          }
           try {
             await syncWhatsappChatContext(tab, {
               messageLimit
@@ -14346,6 +14738,7 @@ export function initPanelApp() {
     initialContextSyncPromise = (async () => {
       const currentState = await readInitialContextSyncState();
       if (!shouldRunInitialContextSync(currentState)) {
+        realtimeContextIngestionEnabled = currentState.status === 'done';
         logDebug('initial_context_sync:skip', currentState);
         return currentState;
       }
@@ -14383,15 +14776,21 @@ export function initPanelApp() {
             history: mergedHistory
           },
           {
+            force: true,
             tabsLimit: getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY),
             historyLimit: getSystemVariableNumber('bootstrap.initialContextSyncHistoryLimit', INITIAL_CONTEXT_SYNC_HISTORY_LIMIT)
           }
         );
         await contextIngestionPromise;
 
-        const chatSeed = chatHistory.length ? chatHistory : await readChatHistory();
+        const bootstrapChatLimit = getSystemVariableNumber('bootstrap.initialContextSyncChatLimit', INITIAL_CONTEXT_SYNC_CHAT_LIMIT);
+        const chatSeed = chatHistory.length
+          ? chatHistory.slice(-bootstrapChatLimit)
+          : await readChatHistory({
+              limit: bootstrapChatLimit
+            });
         const chatIngestion = await contextMemoryService.ingestChatHistory(chatSeed, {
-          limit: getSystemVariableNumber('bootstrap.initialContextSyncChatLimit', INITIAL_CONTEXT_SYNC_CHAT_LIMIT)
+          limit: bootstrapChatLimit
         });
         const whatsappVectorMessageLimit = Math.max(
           80,
@@ -14462,6 +14861,7 @@ export function initPanelApp() {
           error: '',
           sourceCounts
         });
+        realtimeContextIngestionEnabled = true;
 
         logDebug('initial_context_sync:done', {
           sourceCounts
@@ -14474,6 +14874,7 @@ export function initPanelApp() {
           status: 'failed',
           error: message
         });
+        realtimeContextIngestionEnabled = false;
 
         logWarn('initial_context_sync:failed', {
           error: message
@@ -14506,6 +14907,17 @@ export function initPanelApp() {
     };
 
     trimTabSummaryCache();
+    const knownTabIds = new Set(tabs.map((item) => Number(item?.tabId)).filter((item) => Number.isFinite(item) && item >= 0));
+    for (const tabId of whatsappHistorySyncNextAllowedByTab.keys()) {
+      if (!knownTabIds.has(tabId)) {
+        whatsappHistorySyncNextAllowedByTab.delete(tabId);
+      }
+    }
+    for (const tabId of whatsappLiveContextBlockedUntilByTab.keys()) {
+      if (!knownTabIds.has(tabId)) {
+        whatsappLiveContextBlockedUntilByTab.delete(tabId);
+      }
+    }
 
     const tabsForSummary = tabs.slice(0, getSystemVariableNumber('context.maxTabsForAiSummary', MAX_TABS_FOR_AI_SUMMARY));
     for (const tab of tabsForSummary) {
@@ -14533,11 +14945,12 @@ export function initPanelApp() {
     }
 
     if (!activeTab || !isWhatsappContext(activeTab)) {
+      clearWhatsappSuggestionRefreshTimer();
       hideWhatsappSuggestion();
       return;
     }
 
-    generateWhatsappSuggestion(activeTab, { force: false });
+    scheduleWhatsappSuggestionForTab(activeTab, { force: false });
     renderAiDynamicContext(activeTab);
   }
 
@@ -15622,6 +16035,9 @@ export function initPanelApp() {
     await contextMemoryService.syncIdentityProfile({
       user_name: panelSettings.displayName || ''
     });
+    scheduleInitialContextBootstrap({
+      delayMs: 900
+    });
   }
 
   async function saveUserSettingsScreen() {
@@ -15936,13 +16352,25 @@ export function initPanelApp() {
     }, Math.max(240, Number(options.delayMs) || 780));
   }
 
-  async function hydrateChatHistory() {
-    chatHistory = await readChatHistory();
+  async function hydrateChatHistory(options = {}) {
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const startedAt = Date.now();
     const maxHistoryMessages = getSystemVariableNumber('chat.maxHistoryMessages', MAX_CHAT_HISTORY_MESSAGES);
+    const readLimit = Math.max(
+      CHAT_STARTUP_RENDER_MAX_MESSAGES + CHAT_HISTORY_READ_PADDING,
+      Math.min(
+        MAX_CHAT_HISTORY_STORAGE_LIMIT,
+        Number(safeOptions.readLimit) || maxHistoryMessages + CHAT_HISTORY_READ_PADDING
+      )
+    );
+    chatHistory = await readChatHistory({
+      limit: readLimit
+    });
     if (chatHistory.length > maxHistoryMessages) {
       chatHistory = chatHistory.slice(-maxHistoryMessages);
       await saveChatHistory();
     }
+    chatHistoryRenderLimit = chatHistory.length > CHAT_STARTUP_RENDER_MAX_MESSAGES ? CHAT_STARTUP_RENDER_MAX_MESSAGES : chatHistory.length;
     syncChatBottomReserve({
       streaming: false
     });
@@ -15960,15 +16388,58 @@ export function initPanelApp() {
     } else {
       startRandomEmotionCycle({ immediate: false });
     }
+
+    logDebug('chat_history:hydrated', {
+      messages: chatHistory.length,
+      readLimit,
+      elapsedMs: Date.now() - startedAt
+    });
+  }
+
+  function ensureChatHistoryHydrated(options = {}) {
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const force = safeOptions.force === true;
+
+    if (!force && chatHistoryHydrated) {
+      return Promise.resolve(chatHistory);
+    }
+
+    if (!force && chatHistoryHydrationPromise) {
+      return chatHistoryHydrationPromise;
+    }
+
+    chatHistoryHydrationPromise = hydrateChatHistory(safeOptions)
+      .then(() => {
+        chatHistoryHydrated = true;
+        return chatHistory;
+      })
+      .catch((error) => {
+        chatHistoryHydrated = false;
+        throw error;
+      })
+      .finally(() => {
+        chatHistoryHydrationPromise = null;
+      });
+
+    return chatHistoryHydrationPromise;
+  }
+
+  function shouldRefreshLocalModelsOnBoot() {
+    const activeProfile = getActiveModelProfile();
+    return Boolean(ENABLE_OLLAMA_REFRESH_ON_BOOT && activeProfile && activeProfile.provider === AI_PROVIDER_IDS.OLLAMA);
   }
 
   async function runPostCriticalHydration(initialScreen = '') {
     const safeScreen = String(initialScreen || '').trim();
-    const [brandResult, historyResult, modelsResult] = await Promise.allSettled([
-      hydrateBrandEmotions(),
-      hydrateChatHistory(),
-      refreshLocalModels({ silent: true })
-    ]);
+    const shouldRefreshLocalModels = shouldRefreshLocalModelsOnBoot();
+    const tasks = [hydrateBrandEmotions(), ensureChatHistoryHydrated()];
+    if (shouldRefreshLocalModels) {
+      tasks.push(refreshLocalModels({ silent: true }));
+    }
+    const results = await Promise.allSettled(tasks);
+    const brandResult = results[0];
+    const historyResult = results[1];
+    const modelsResult = shouldRefreshLocalModels ? results[2] : null;
 
     if (brandResult.status === 'rejected') {
       logWarn('init:hydrateBrandEmotions_failed', {
@@ -15982,7 +16453,7 @@ export function initPanelApp() {
       });
     }
 
-    if (modelsResult.status === 'rejected') {
+    if (modelsResult && modelsResult.status === 'rejected') {
       logWarn('init:refreshLocalModels_failed', {
         error: modelsResult.reason instanceof Error ? modelsResult.reason.message : String(modelsResult.reason || '')
       });
@@ -15993,7 +16464,13 @@ export function initPanelApp() {
 
     const activeProfile = getActiveModelProfile();
     const hasReadinessWarning = applyChatModelReadinessStatus();
-    if (!chatHistory.length && !hasReadinessWarning && activeProfile && activeProfile.provider === AI_PROVIDER_IDS.OLLAMA) {
+    if (
+      ENABLE_OLLAMA_WARMUP_ON_BOOT &&
+      !chatHistory.length &&
+      !hasReadinessWarning &&
+      activeProfile &&
+      activeProfile.provider === AI_PROVIDER_IDS.OLLAMA
+    ) {
       setStatus(chatStatus, `Precargando ${activeProfile.model}...`, false, { loading: true });
       warmupPrimaryModel();
     } else if (!chatHistory.length && !hasReadinessWarning && activeProfile) {
@@ -16587,6 +17064,15 @@ export function initPanelApp() {
     });
 
     chatMessagesEl?.addEventListener('click', (event) => {
+      const historyActionButton = event.target.closest('[data-chat-history-action]');
+      if (historyActionButton) {
+        const historyAction = String(historyActionButton.dataset.chatHistoryAction || '').trim();
+        if (historyAction === 'expand') {
+          expandChatHistoryRenderLimit();
+        }
+        return;
+      }
+
       const actionButton = event.target.closest('[data-chat-image-action]');
       if (!actionButton) {
         return;
@@ -16853,7 +17339,9 @@ export function initPanelApp() {
       }
       stopAssistantSpeechPlayback();
       clearWhatsappPromptAutosaveTimer();
+      clearWhatsappSuggestionRefreshTimer();
       clearAllSettingsAutosaveTimers();
+      clearInitialContextBootstrapSchedule();
       tabContextService.stop();
       void contextMemoryService.shutdown();
       brandEmotionController.destroy();
@@ -16945,12 +17433,18 @@ export function initPanelApp() {
       renderImageQueue();
       hideWhatsappSuggestion();
       renderTabsContextJson();
-
-      const contextMemoryInitPromise = contextMemoryService.init().catch((error) => {
-        logWarn('init:context_memory_init_failed', {
-          error: error instanceof Error ? error.message : String(error || '')
+      const provisionalScreen = resolveHomeOrOnboardingScreen();
+      setScreen(provisionalScreen);
+      requestPrimaryScreenAutofocus(provisionalScreen, 8, 70);
+      setAppBootstrapState(true);
+      if (provisionalScreen === 'home') {
+        void ensureChatHistoryHydrated().catch((error) => {
+          logWarn('init:hydrateChatHistory_early_failed', {
+            error: error instanceof Error ? error.message : String(error || '')
+          });
         });
-      });
+      }
+
       const aliasHydrationPromise = hydrateWhatsappAliasBook().catch((error) => {
         logWarn('init:whatsapp_alias_hydrate_failed', {
           error: error instanceof Error ? error.message : String(error || '')
@@ -16986,11 +17480,11 @@ export function initPanelApp() {
       requestPrimaryScreenAutofocus(initialScreen, 12, 90);
 
       scheduleStageStabilization(initialScreen);
-      window.setTimeout(() => {
-        void runInitialContextBootstrap();
-      }, 120);
+      if (initialScreen === 'home') {
+        scheduleInitialContextBootstrap();
+      }
 
-      void Promise.allSettled([contextMemoryInitPromise, aliasHydrationPromise, tabContextStartPromise]).then(() => {
+      void Promise.allSettled([aliasHydrationPromise, tabContextStartPromise]).then(() => {
         logDebug('init:background_core_ready', {
           elapsedMs: Date.now() - initStartedAt
         });

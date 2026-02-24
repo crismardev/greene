@@ -9,13 +9,22 @@
 
   const TARGET_HOSTS = new Set(['nuwwe.com', 'www.nuwwe.com']);
   const TARGET_PATH = '/login';
+  const AUTO_LOGIN_INITIAL_DELAY_MS = 160;
+  const AUTO_LOGIN_OBSERVER_THROTTLE_MS = 220;
+  const AUTO_LOGIN_RETRY_BASE_MS = 420;
+  const AUTO_LOGIN_RETRY_STEP_MS = 220;
+  const AUTO_LOGIN_RETRY_MAX_MS = 2600;
+  const AUTO_LOGIN_MAX_ATTEMPTS = 18;
 
   let settings = { ...DEFAULT_SETTINGS };
   let syncTimer = 0;
+  let retryTimer = 0;
+  let observerThrottleTimer = 0;
   let observer = null;
   let autoLoginPerformed = false;
+  let autoLoginAttempts = 0;
   let credentialsRequestInFlight = false;
-  let syncIntervalId = 0;
+  let cachedCredentials = null;
 
   function isToolEnabled() {
     return Boolean(settings[TOOL_KEY]);
@@ -69,6 +78,42 @@
     }
 
     return Boolean(elements.userInput && elements.passInput && elements.companyInput && elements.loginButton);
+  }
+
+  function clearScheduledAutoLoginTimers() {
+    if (syncTimer) {
+      window.clearTimeout(syncTimer);
+      syncTimer = 0;
+    }
+
+    if (retryTimer) {
+      window.clearTimeout(retryTimer);
+      retryTimer = 0;
+    }
+
+    if (observerThrottleTimer) {
+      window.clearTimeout(observerThrottleTimer);
+      observerThrottleTimer = 0;
+    }
+  }
+
+  function stopObserver() {
+    if (!observer) {
+      return;
+    }
+    observer.disconnect();
+    observer = null;
+  }
+
+  function stopAutoLoginFlow() {
+    clearScheduledAutoLoginTimers();
+    stopObserver();
+  }
+
+  function resetAutoLoginFlow() {
+    clearScheduledAutoLoginTimers();
+    autoLoginPerformed = false;
+    autoLoginAttempts = 0;
   }
 
   function autoLoginNuwwe(user, pass, companyCode) {
@@ -193,13 +238,17 @@
 
     credentialsRequestInFlight = true;
     try {
-      const response = await requestCredentialsFromBackground();
-      const credentials = normalizeCredentials(response?.credentials);
-      if (!response?.ok || !credentials) {
-        return {
-          ok: false,
-          message: String(response?.error || response?.message || 'No hay credenciales disponibles.')
-        };
+      let credentials = normalizeCredentials(cachedCredentials);
+      if (!credentials || force) {
+        const response = await requestCredentialsFromBackground();
+        credentials = normalizeCredentials(response?.credentials);
+        if (!response?.ok || !credentials) {
+          return {
+            ok: false,
+            message: String(response?.error || response?.message || 'No hay credenciales disponibles.')
+          };
+        }
+        cachedCredentials = credentials;
       }
 
       const result = await autoLoginNuwwe(credentials.username, credentials.password, credentials.companyCode);
@@ -212,15 +261,62 @@
     }
   }
 
+  function scheduleRetry() {
+    if (retryTimer || autoLoginPerformed || !isToolEnabled()) {
+      return;
+    }
+
+    const delayMs = Math.min(
+      AUTO_LOGIN_RETRY_MAX_MS,
+      AUTO_LOGIN_RETRY_BASE_MS + Math.max(0, autoLoginAttempts - 1) * AUTO_LOGIN_RETRY_STEP_MS
+    );
+    retryTimer = window.setTimeout(() => {
+      retryTimer = 0;
+      scheduleAutoLogin({ delayMs: 0 });
+    }, delayMs);
+  }
+
+  async function executeScheduledAutoLogin(options = {}) {
+    const force = options.force === true;
+    if (!force && autoLoginAttempts >= AUTO_LOGIN_MAX_ATTEMPTS) {
+      stopAutoLoginFlow();
+      return;
+    }
+
+    if (!force) {
+      autoLoginAttempts += 1;
+    }
+
+    const result = await runNuwweAutoLogin(options);
+    if (result?.ok) {
+      stopAutoLoginFlow();
+      return;
+    }
+
+    if (!force) {
+      scheduleRetry();
+    }
+  }
+
   function scheduleAutoLogin(options = {}) {
+    if (!isTargetPage() || !isToolEnabled()) {
+      return;
+    }
+
+    if (autoLoginPerformed && options.force !== true) {
+      stopAutoLoginFlow();
+      return;
+    }
+
     if (syncTimer) {
       return;
     }
 
+    const delayMs = Math.max(0, Number(options.delayMs) || AUTO_LOGIN_INITIAL_DELAY_MS);
     syncTimer = window.setTimeout(() => {
       syncTimer = 0;
-      void runNuwweAutoLogin(options);
-    }, 180);
+      void executeScheduledAutoLogin(options);
+    }, delayMs);
   }
 
   function installObserver() {
@@ -229,9 +325,18 @@
     }
 
     observer = new MutationObserver(() => {
-      if (!autoLoginPerformed) {
-        scheduleAutoLogin();
+      if (autoLoginPerformed || !isToolEnabled()) {
+        return;
       }
+
+      if (observerThrottleTimer) {
+        return;
+      }
+
+      observerThrottleTimer = window.setTimeout(() => {
+        observerThrottleTimer = 0;
+        scheduleAutoLogin({ delayMs: 60 });
+      }, AUTO_LOGIN_OBSERVER_THROTTLE_MS);
     });
 
     observer.observe(document.documentElement, {
@@ -266,10 +371,15 @@
 
         settings[TOOL_KEY] = Boolean(changes[TOOL_KEY].newValue);
         if (!settings[TOOL_KEY]) {
-          autoLoginPerformed = false;
+          cachedCredentials = null;
+          resetAutoLoginFlow();
+          stopAutoLoginFlow();
           return;
         }
-        scheduleAutoLogin();
+
+        resetAutoLoginFlow();
+        installObserver();
+        scheduleAutoLogin({ delayMs: 40 });
       });
     }
 
@@ -299,18 +409,6 @@
     }
   }
 
-  function startPeriodicSync() {
-    if (syncIntervalId) {
-      return;
-    }
-
-    syncIntervalId = window.setInterval(() => {
-      if (!autoLoginPerformed) {
-        scheduleAutoLogin();
-      }
-    }, 1500);
-  }
-
   function main() {
     if (!isTargetPage()) {
       return;
@@ -318,12 +416,16 @@
 
     installObserver();
     installRuntimeHooks();
-    startPeriodicSync();
 
     loadSettings(() => {
-      scheduleAutoLogin();
-      window.addEventListener('DOMContentLoaded', () => scheduleAutoLogin(), { once: true });
-      window.addEventListener('load', () => scheduleAutoLogin(), { once: true });
+      if (!isToolEnabled()) {
+        stopAutoLoginFlow();
+        return;
+      }
+
+      scheduleAutoLogin({ delayMs: 40 });
+      window.addEventListener('DOMContentLoaded', () => scheduleAutoLogin({ delayMs: 20 }), { once: true });
+      window.addEventListener('load', () => scheduleAutoLogin({ delayMs: 20 }), { once: true });
     });
   }
 

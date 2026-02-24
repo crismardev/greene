@@ -5,6 +5,10 @@ export function createPanelStorageService({
   maxChatHistoryMessages,
   maxWhatsappChatMessages = 640
 }) {
+  const WHATSAPP_UPDATED_AT_INDEX = 'idx_updatedAt';
+  const WHATSAPP_PHONE_INDEX = 'idx_phone';
+  const WHATSAPP_CHAT_KEY_INDEX = 'idx_chatKey';
+
   let settings = { ...defaultSettings };
   let panelSettingsCache = { ...panelSettingsDefaults };
   let chatDbPromise = null;
@@ -442,6 +446,22 @@ export function createPanelStorageService({
     return Boolean(db && db.objectStoreNames && db.objectStoreNames.contains(storeName));
   }
 
+  function ensureStoreIndex(store, indexName, keyPath, options = {}) {
+    if (!store || !indexName || !keyPath) {
+      return;
+    }
+
+    if (store.indexNames && store.indexNames.contains(indexName)) {
+      return;
+    }
+
+    try {
+      store.createIndex(indexName, keyPath, options);
+    } catch {
+      // Ignore index creation failures to keep DB migrations resilient.
+    }
+  }
+
   function getChatDatabase() {
     if (!('indexedDB' in window)) {
       return Promise.resolve(null);
@@ -464,6 +484,13 @@ export function createPanelStorageService({
           }
           if (chatDb.SECRET_STORE && !db.objectStoreNames.contains(chatDb.SECRET_STORE)) {
             db.createObjectStore(chatDb.SECRET_STORE, { keyPath: 'key' });
+          }
+
+          if (chatDb.WHATSAPP_STORE && db.objectStoreNames.contains(chatDb.WHATSAPP_STORE)) {
+            const whatsappStore = request.transaction.objectStore(chatDb.WHATSAPP_STORE);
+            ensureStoreIndex(whatsappStore, WHATSAPP_UPDATED_AT_INDEX, 'updatedAt');
+            ensureStoreIndex(whatsappStore, WHATSAPP_PHONE_INDEX, 'phone');
+            ensureStoreIndex(whatsappStore, WHATSAPP_CHAT_KEY_INDEX, 'chatKey');
           }
         };
 
@@ -518,11 +545,20 @@ export function createPanelStorageService({
     });
   }
 
-  async function readChatHistory() {
+  function resolveChatHistoryReadLimit(options = {}) {
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const configuredLimit = Math.max(1, Number(maxChatHistoryMessages) || 1);
+    const requestedLimit = Math.max(1, Number(safeOptions.limit) || configuredLimit);
+    return Math.min(configuredLimit, requestedLimit);
+  }
+
+  async function readChatHistory(options = {}) {
     const db = await getChatDatabase();
     if (!db || !hasDbStore(db, chatDb.CHAT_STORE)) {
       return [];
     }
+
+    const readLimit = resolveChatHistoryReadLimit(options);
 
     return new Promise((resolve) => {
       let tx;
@@ -538,7 +574,8 @@ export function createPanelStorageService({
 
       req.onsuccess = () => {
         const raw = req.result && Array.isArray(req.result.messages) ? req.result.messages : [];
-        const normalized = raw.map(normalizeMessage).filter(Boolean).slice(-maxChatHistoryMessages);
+        const tail = raw.slice(-readLimit);
+        const normalized = tail.map(normalizeMessage).filter(Boolean).slice(-readLimit);
         resolve(normalized);
       };
 
@@ -902,8 +939,15 @@ export function createPanelStorageService({
       };
 
       let cursorRequest;
+      let usingUpdatedAtIndex = false;
       try {
-        cursorRequest = store.openCursor();
+        if (store.indexNames && store.indexNames.contains(WHATSAPP_UPDATED_AT_INDEX)) {
+          const updatedAtIndex = store.index(WHATSAPP_UPDATED_AT_INDEX);
+          cursorRequest = updatedAtIndex.openCursor(null, 'prev');
+          usingUpdatedAtIndex = true;
+        } else {
+          cursorRequest = store.openCursor();
+        }
       } catch {
         finish([]);
         return;
@@ -922,13 +966,16 @@ export function createPanelStorageService({
         const record = normalizeWhatsappChatRecord(cursor.value, String(cursor.key || ''));
         if (record) {
           rows.push(record);
+          if (rows.length >= chatLimit) {
+            return;
+          }
         }
         cursor.continue();
       };
 
       tx.oncomplete = () => {
-        const result = rows
-          .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0))
+        const rowsForResult = usingUpdatedAtIndex ? rows : rows.sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0));
+        const result = rowsForResult
           .slice(0, chatLimit)
           .map((record) => ({
             found: true,

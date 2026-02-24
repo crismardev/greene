@@ -17,9 +17,17 @@ const COPY_ENTRIES = [
   'node_modules/marked/lib/marked.esm.js',
   'node_modules/@neondatabase/serverless',
   'node_modules/@orama/orama/dist/browser',
-  'node_modules/@xenova/transformers/dist',
-  'node_modules/@ricky0123/vad-web/dist',
-  'node_modules/onnxruntime-web/dist'
+  'node_modules/@xenova/transformers/dist/transformers.min.js',
+  'node_modules/@xenova/transformers/dist/ort-wasm.wasm',
+  'node_modules/@xenova/transformers/dist/ort-wasm-simd.wasm',
+  'node_modules/@xenova/transformers/dist/ort-wasm-threaded.wasm',
+  'node_modules/@xenova/transformers/dist/ort-wasm-simd-threaded.wasm',
+  'node_modules/@ricky0123/vad-web/dist/bundle.min.js',
+  'node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js',
+  'node_modules/@ricky0123/vad-web/dist/silero_vad_v5.onnx',
+  'node_modules/@ricky0123/vad-web/dist/silero_vad_legacy.onnx',
+  'node_modules/onnxruntime-web/dist/ort.min.js',
+  'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'
 ];
 
 async function copyEntry(relativePath) {

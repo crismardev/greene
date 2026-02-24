@@ -1421,6 +1421,17 @@
     );
   }
 
+  function isNoReceiverSiteActionError(errorText = '') {
+    const token = String(errorText || '')
+      .trim()
+      .toLowerCase();
+    if (!token) {
+      return false;
+    }
+
+    return token.includes('could not establish connection') || token.includes('receiving end does not exist');
+  }
+
   async function waitForTabReadyForSiteAction(tabId, site, options = {}) {
     const attempts = Math.max(1, Math.min(40, Number(options.attempts) || 16));
     const delayMs = Math.max(60, Number(options.delayMs) || 160);
@@ -1510,7 +1521,12 @@
       lastResponse = response || { ok: false, error: 'Sin respuesta del content script.' };
       const errorText = toSafeText(lastResponse.error || '', 260);
       const recoverable = isRecoverableSiteActionError(errorText);
+      const noReceiver = isNoReceiverSiteActionError(errorText);
       if (!recoverable || attempt >= maxAttempts) {
+        break;
+      }
+
+      if (safeSite === 'whatsapp' && noReceiver) {
         break;
       }
 
@@ -1519,7 +1535,7 @@
         delayMs: safeSite === 'whatsapp' ? 170 : 120
       });
 
-      logWarn('runSiteActionInTab:retry_pending', {
+      const retryPayload = {
         tabId,
         site: safeSite,
         action: safeAction,
@@ -1529,7 +1545,12 @@
         tabFound: readyState.tabFound,
         tabStatus: readyState.status,
         tabUrl: readyState.url
-      });
+      };
+      if (noReceiver) {
+        logDebug('runSiteActionInTab:retry_pending', retryPayload);
+      } else {
+        logWarn('runSiteActionInTab:retry_pending', retryPayload);
+      }
 
       await waitForMs(180 + attempt * 120);
     }
