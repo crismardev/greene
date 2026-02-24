@@ -14,7 +14,8 @@
     BROWSER_ACTION: 'GREENE_BROWSER_ACTION',
     LOCATION_CONTEXT_UPDATE: 'GREENE_LOCATION_CONTEXT_UPDATE',
     SMTP_SEND: 'GREENE_SMTP_SEND',
-    NATIVE_HOST_PING: 'GREENE_NATIVE_HOST_PING'
+    NATIVE_HOST_PING: 'GREENE_NATIVE_HOST_PING',
+    NUWWE_GET_LOGIN_CREDENTIALS: 'GREENE_NUWWE_GET_LOGIN_CREDENTIALS'
   });
 
   const EXTERNAL_MESSAGE_TYPES = Object.freeze({
@@ -29,6 +30,8 @@
     WHATSAPP_OPEN_CHAT: 'WHATSAPP_OPEN_CHAT',
     WHATSAPP_SEND_MESSAGE: 'WHATSAPP_SEND_MESSAGE',
     WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE: 'WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE',
+    WHATSAPP_ARCHIVE_CHATS: 'WHATSAPP_ARCHIVE_CHATS',
+    WHATSAPP_ARCHIVE_GROUPS: 'WHATSAPP_ARCHIVE_GROUPS',
     HELP: 'HELP'
   });
   const EXTERNAL_MESSAGE_TYPE_SET = new Set(Object.values(EXTERNAL_MESSAGE_TYPES));
@@ -59,6 +62,11 @@
   const DEFAULT_SMTP_NATIVE_HOST_NAME = 'com.greene.smtp_bridge';
   const LOCAL_CONNECTOR_PING_ALARM_NAME = 'greene_local_connector_ping';
   const LOCAL_CONNECTOR_PING_PERIOD_MINUTES = 3;
+  const PIN_UNLOCK_SESSION_STORAGE_KEY = 'greene_pin_unlock_session_v1';
+  const NUWWE_CREDENTIALS_STORAGE_KEY = 'greene_tool_nuwwe_login_secure_v1';
+  const NUWWE_DEFAULT_KDF_ITERATIONS = 210000;
+  const NUWWE_LOGIN_HOSTS = new Set(['nuwwe.com', 'www.nuwwe.com']);
+  const NUWWE_LOGIN_PATH_PREFIX = '/login';
   const whatsappContextLogByTab = new Map();
   let runtimeContextState = {
     updatedAt: 0,
@@ -238,6 +246,247 @@
       return new URL(raw);
     } catch (_) {
       return null;
+    }
+  }
+
+  function decodeBase64ToBytes(value) {
+    const token = String(value || '').trim();
+    if (!token) {
+      return new Uint8Array();
+    }
+
+    try {
+      const binary = atob(token);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      return bytes;
+    } catch (_) {
+      return new Uint8Array();
+    }
+  }
+
+  function normalizeNuwweSecurityConfig(rawConfig) {
+    const source = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+    const saltB64 = String(source.saltB64 || '').trim();
+    const verifierIvB64 = String(source.verifierIvB64 || '').trim();
+    const verifierCipherB64 = String(source.verifierCipherB64 || '').trim();
+    const iterations = Math.max(10000, Number(source.iterations) || NUWWE_DEFAULT_KDF_ITERATIONS);
+
+    if (!saltB64 || !verifierIvB64 || !verifierCipherB64) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      iterations,
+      saltB64,
+      verifierIvB64,
+      verifierCipherB64
+    };
+  }
+
+  function normalizeNuwweEncryptedPayload(rawPayload) {
+    const source = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
+    const ivB64 = String(source.ivB64 || '').trim();
+    const cipherB64 = String(source.cipherB64 || '').trim();
+    if (!ivB64 || !cipherB64) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      ivB64,
+      cipherB64
+    };
+  }
+
+  function normalizeNuwweCredentialStorageRecord(rawValue) {
+    const source = rawValue && typeof rawValue === 'object' ? rawValue : {};
+    const encryptedPayload = normalizeNuwweEncryptedPayload(source.encryptedPayload);
+    const securityConfig = normalizeNuwweSecurityConfig(source.securityConfig);
+
+    if (!encryptedPayload || !securityConfig) {
+      return null;
+    }
+
+    return {
+      version: Math.max(1, Number(source.version) || 1),
+      encryptedPayload,
+      securityConfig
+    };
+  }
+
+  function normalizePinUnlockSessionRecord(rawValue) {
+    const source = rawValue && typeof rawValue === 'object' ? rawValue : {};
+    const pin = String(source.pin || '').trim();
+    const expiresAt = Math.max(0, Number(source.expiresAt) || 0);
+
+    if (!/^\d{4}$/.test(pin) || !expiresAt) {
+      return null;
+    }
+
+    return {
+      pin,
+      expiresAt
+    };
+  }
+
+  function normalizeNuwweCredentials(rawValue) {
+    const source = rawValue && typeof rawValue === 'object' ? rawValue : {};
+    const username = String(source.username || '').trim();
+    const password = String(source.password || '').trim();
+    const companyCode = String(source.companyCode || '').trim();
+    if (!username || !password || !companyCode) {
+      return null;
+    }
+
+    return {
+      username,
+      password,
+      companyCode
+    };
+  }
+
+  function isNuwweLoginUrl(rawUrl) {
+    const parsed = parseSafeUrl(rawUrl);
+    if (!parsed) {
+      return false;
+    }
+
+    const host = String(parsed.hostname || '').toLowerCase();
+    const pathname = String(parsed.pathname || '');
+    return NUWWE_LOGIN_HOSTS.has(host) && pathname.startsWith(NUWWE_LOGIN_PATH_PREFIX);
+  }
+
+  function isNuwweCredentialsSenderAllowed(sender) {
+    const senderUrl =
+      String(sender?.tab?.url || '').trim() ||
+      String(sender?.url || '').trim() ||
+      String(sender?.origin || '').trim();
+    return isNuwweLoginUrl(senderUrl);
+  }
+
+  async function deriveAesGcmKeyForPin(pin, securityConfig) {
+    const safePin = String(pin || '').trim();
+    if (!/^\d{4}$/.test(safePin)) {
+      throw new Error('PIN de sesion invalido.');
+    }
+
+    const config = normalizeNuwweSecurityConfig(securityConfig);
+    if (!config) {
+      throw new Error('Configuracion de seguridad invalida.');
+    }
+
+    const salt = decodeBase64ToBytes(config.saltB64);
+    if (!salt.length) {
+      throw new Error('Salt invalida para credenciales.');
+    }
+
+    const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(safePin), 'PBKDF2', false, ['deriveKey']);
+
+    return crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt,
+        iterations: config.iterations,
+        hash: 'SHA-256'
+      },
+      keyMaterial,
+      {
+        name: 'AES-GCM',
+        length: 256
+      },
+      false,
+      ['decrypt']
+    );
+  }
+
+  async function decryptAesGcmPayload(cryptoKey, payload) {
+    const normalizedPayload = normalizeNuwweEncryptedPayload(payload);
+    if (!normalizedPayload) {
+      throw new Error('Payload cifrado invalido.');
+    }
+
+    const iv = decodeBase64ToBytes(normalizedPayload.ivB64);
+    const cipherBytes = decodeBase64ToBytes(normalizedPayload.cipherB64);
+    if (iv.length !== 12 || !cipherBytes.length) {
+      throw new Error('Payload cifrado invalido.');
+    }
+
+    const plainBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, cipherBytes);
+    return new TextDecoder().decode(plainBuffer);
+  }
+
+  async function decryptNuwweCredentialsRecord(record, pin) {
+    const normalizedRecord = normalizeNuwweCredentialStorageRecord(record);
+    if (!normalizedRecord) {
+      throw new Error('Registro de credenciales invalido.');
+    }
+
+    const key = await deriveAesGcmKeyForPin(pin, normalizedRecord.securityConfig);
+    const plain = await decryptAesGcmPayload(key, normalizedRecord.encryptedPayload);
+    const parsed = JSON.parse(String(plain || '{}'));
+    const credentials = normalizeNuwweCredentials(parsed);
+    if (!credentials) {
+      throw new Error('Credenciales incompletas.');
+    }
+
+    return credentials;
+  }
+
+  async function readNuwweAutoLoginCredentials(sender) {
+    if (!isNuwweCredentialsSenderAllowed(sender)) {
+      return {
+        ok: false,
+        error: 'Origen no autorizado para Nuwwe Auto Login.'
+      };
+    }
+
+    const [localPayload, sessionPayload] = await Promise.all([
+      readChromeLocal({
+        [NUWWE_CREDENTIALS_STORAGE_KEY]: null
+      }),
+      readChromeSession({
+        [PIN_UNLOCK_SESSION_STORAGE_KEY]: null
+      })
+    ]);
+
+    const record = normalizeNuwweCredentialStorageRecord(localPayload?.[NUWWE_CREDENTIALS_STORAGE_KEY]);
+    if (!record) {
+      return {
+        ok: false,
+        error: 'No hay credenciales guardadas para Nuwwe Auto Login.'
+      };
+    }
+
+    const pinSession = normalizePinUnlockSessionRecord(sessionPayload?.[PIN_UNLOCK_SESSION_STORAGE_KEY]);
+    if (!pinSession) {
+      return {
+        ok: false,
+        error: 'Desbloquea tu PIN en el panel para usar Nuwwe Auto Login.'
+      };
+    }
+
+    if (pinSession.expiresAt <= Date.now()) {
+      return {
+        ok: false,
+        error: 'Sesion PIN vencida. Desbloquea PIN nuevamente.'
+      };
+    }
+
+    try {
+      const credentials = await decryptNuwweCredentialsRecord(record, pinSession.pin);
+      return {
+        ok: true,
+        credentials
+      };
+    } catch (_) {
+      return {
+        ok: false,
+        error: 'No se pudieron descifrar credenciales de Nuwwe. Guardalas otra vez en la tool.'
+      };
     }
   }
 
@@ -959,6 +1208,42 @@
     });
   }
 
+  function readChromeLocal(defaults = {}) {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.get !== 'function') {
+        resolve({ ...defaults });
+        return;
+      }
+
+      chrome.storage.local.get(defaults, (items) => {
+        if (chrome.runtime.lastError || !items || typeof items !== 'object') {
+          resolve({ ...defaults });
+          return;
+        }
+
+        resolve(items);
+      });
+    });
+  }
+
+  function readChromeSession(defaults = {}) {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== 'function') {
+        resolve({ ...defaults });
+        return;
+      }
+
+      chrome.storage.session.get(defaults, (items) => {
+        if (chrome.runtime.lastError || !items || typeof items !== 'object') {
+          resolve({ ...defaults });
+          return;
+        }
+
+        resolve(items);
+      });
+    });
+  }
+
   function cleanupTabState(tabId) {
     if (typeof tabId !== 'number' || tabId < 0) {
       return;
@@ -1112,26 +1397,144 @@
     });
   }
 
-  function runSiteActionInTab(tabId, site, action, args = {}) {
+  function waitForMs(ms = 120) {
     return new Promise((resolve) => {
-      chrome.tabs.sendMessage(
-        tabId,
-        {
-          type: MESSAGE_TYPES.SITE_ACTION,
-          action,
-          site,
-          args
-        },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            resolve({ ok: false, error: chrome.runtime.lastError.message || 'No se pudo ejecutar accion.' });
-            return;
-          }
-
-          resolve(response || { ok: false, error: 'Sin respuesta del content script.' });
-        }
-      );
+      setTimeout(resolve, Math.max(1, Number(ms) || 120));
     });
+  }
+
+  function isRecoverableSiteActionError(errorText = '') {
+    const token = String(errorText || '')
+      .trim()
+      .toLowerCase();
+    if (!token) {
+      return false;
+    }
+
+    return (
+      token.includes('could not establish connection') ||
+      token.includes('receiving end does not exist') ||
+      token.includes('message port closed before a response was received') ||
+      token.includes('no frame with id') ||
+      token.includes('sin respuesta del content script') ||
+      token.includes('the tab was closed')
+    );
+  }
+
+  async function waitForTabReadyForSiteAction(tabId, site, options = {}) {
+    const attempts = Math.max(1, Math.min(40, Number(options.attempts) || 16));
+    const delayMs = Math.max(60, Number(options.delayMs) || 160);
+    const expectedSite = String(site || '')
+      .trim()
+      .toLowerCase();
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const tab = await getTabById(tabId);
+      if (!tab) {
+        return {
+          ready: false,
+          tabFound: false,
+          status: 'missing',
+          url: ''
+        };
+      }
+
+      const status = toSafeText(tab.status || '', 40).toLowerCase();
+      const url = toSafeText(tab.url || '', 320);
+      const siteMatches = expectedSite === 'whatsapp' ? isWhatsappWebUrl(url) : true;
+      if (siteMatches && status === 'complete') {
+        return {
+          ready: true,
+          tabFound: true,
+          status,
+          url
+        };
+      }
+
+      if (attempt < attempts) {
+        await waitForMs(delayMs);
+      }
+    }
+
+    const finalTab = await getTabById(tabId);
+    const finalStatus = toSafeText(finalTab?.status || '', 40).toLowerCase();
+    const finalUrl = toSafeText(finalTab?.url || '', 320);
+    const finalSiteMatches = expectedSite === 'whatsapp' ? isWhatsappWebUrl(finalUrl) : true;
+    return {
+      ready: Boolean(finalTab) && finalSiteMatches && finalStatus === 'complete',
+      tabFound: Boolean(finalTab),
+      status: finalStatus,
+      url: finalUrl
+    };
+  }
+
+  async function runSiteActionInTab(tabId, site, action, args = {}) {
+    const safeSite = toSafeText(site || '', 60).toLowerCase();
+    const safeAction = toSafeText(action || '', 80);
+    const maxAttempts = safeSite === 'whatsapp' ? 3 : 2;
+    let lastResponse = { ok: false, error: 'Sin respuesta del content script.' };
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const response = await new Promise((resolve) => {
+        chrome.tabs.sendMessage(
+          tabId,
+          {
+            type: MESSAGE_TYPES.SITE_ACTION,
+            action,
+            site,
+            args
+          },
+          (payload) => {
+            if (chrome.runtime.lastError) {
+              resolve({ ok: false, error: chrome.runtime.lastError.message || 'No se pudo ejecutar accion.' });
+              return;
+            }
+
+            resolve(payload || { ok: false, error: 'Sin respuesta del content script.' });
+          }
+        );
+      });
+
+      if (response?.ok === true) {
+        if (attempt > 1) {
+          logDebug('runSiteActionInTab:recovered_after_retry', {
+            tabId,
+            site: safeSite,
+            action: safeAction,
+            attempt
+          });
+        }
+        return response;
+      }
+
+      lastResponse = response || { ok: false, error: 'Sin respuesta del content script.' };
+      const errorText = toSafeText(lastResponse.error || '', 260);
+      const recoverable = isRecoverableSiteActionError(errorText);
+      if (!recoverable || attempt >= maxAttempts) {
+        break;
+      }
+
+      const readyState = await waitForTabReadyForSiteAction(tabId, safeSite, {
+        attempts: safeSite === 'whatsapp' ? 22 : 10,
+        delayMs: safeSite === 'whatsapp' ? 170 : 120
+      });
+
+      logWarn('runSiteActionInTab:retry_pending', {
+        tabId,
+        site: safeSite,
+        action: safeAction,
+        attempt,
+        error: errorText,
+        tabReady: readyState.ready,
+        tabFound: readyState.tabFound,
+        tabStatus: readyState.status,
+        tabUrl: readyState.url
+      });
+
+      await waitForMs(180 + attempt * 120);
+    }
+
+    return lastResponse;
   }
 
   async function resolveWhatsappTab(tabIdCandidate = -1) {
@@ -1246,6 +1649,14 @@
           {
             type: EXTERNAL_MESSAGE_TYPES.WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE,
             args: ['tabId?', 'query? | name? | chat? | phone?', 'text']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.WHATSAPP_ARCHIVE_CHATS,
+            args: ['tabId?', 'scope=groups|contacts|all?', 'queries? | query? | chat?', 'limit?', 'searchLimit?', 'dryRun?']
+          },
+          {
+            type: EXTERNAL_MESSAGE_TYPES.WHATSAPP_ARCHIVE_GROUPS,
+            args: ['tabId?', 'queries? | query? | chat?', 'limit?', 'searchLimit?', 'dryRun?']
           }
         ]
       }
@@ -1476,6 +1887,18 @@
 
     if (type === EXTERNAL_MESSAGE_TYPES.WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE) {
       return runExternalWhatsappAction(type, 'openChatAndSendMessage', args);
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.WHATSAPP_ARCHIVE_CHATS) {
+      return runExternalWhatsappAction(type, 'archiveChats', args);
+    }
+
+    if (type === EXTERNAL_MESSAGE_TYPES.WHATSAPP_ARCHIVE_GROUPS) {
+      const archiveArgs = {
+        ...args,
+        scope: String(args.scope || '').trim() || 'groups'
+      };
+      return runExternalWhatsappAction(type, 'archiveGroups', archiveArgs);
     }
 
     return buildExternalEnvelope(type, {
@@ -1757,6 +2180,21 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || typeof message !== 'object') {
       return false;
+    }
+
+    if (message.type === MESSAGE_TYPES.NUWWE_GET_LOGIN_CREDENTIALS) {
+      Promise.resolve(readNuwweAutoLoginCredentials(sender))
+        .then((result) => {
+          sendResponse(result && typeof result === 'object' ? result : { ok: false, error: 'Respuesta invalida.' });
+        })
+        .catch((error) => {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : 'No se pudo obtener credenciales de Nuwwe.'
+          });
+        });
+
+      return true;
     }
 
     if (message.type === MESSAGE_TYPES.NATIVE_HOST_PING) {

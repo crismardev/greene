@@ -10,6 +10,7 @@ import { createOllamaService } from './services/ollama-service.js';
 import { createAiProviderService, AI_PROVIDER_IDS } from './services/ai-provider-service.js';
 import { createPinCryptoService } from './services/pin-crypto-service.js';
 import { createSettingsScreenController } from './screens/settings-screen.js';
+import { createToolsScreenController } from './screens/tools-screen.js';
 import { createTabContextService } from './services/tab-context-service.js';
 import { createContextMemoryService } from './services/context-memory-service.js';
 import { createPostgresService } from './services/postgres-service.js';
@@ -51,7 +52,43 @@ export function initPanelApp() {
 
   const { TOOL_KEYS, PREFERENCE_KEYS, DEFAULT_SETTINGS, APPLY_MESSAGE_TYPE } = cfg;
 
-  const TOOL_SEQUENCE = Object.freeze(['image', 'retool']);
+  const TOOL_IDS = Object.freeze({
+    IMAGE: 'image',
+    RETOOL: 'retool',
+    BOLD_EXPORT_CSV: 'bold_export_csv',
+    NUWWE_AUTO_LOGIN: 'nuwwe_auto_login'
+  });
+  const TOOLS_CATALOG = Object.freeze([
+    {
+      id: TOOL_IDS.IMAGE,
+      title: 'Image to WebP',
+      description: 'Convierte imagenes a WebP y las deja listas para descargar.',
+      url: ''
+    },
+    {
+      id: TOOL_IDS.RETOOL,
+      title: 'Retool Layout Cleanup',
+      description: 'Oculta el header de Retool y ajusta el canvas automaticamente.',
+      url: 'https://retool.com/apps/'
+    },
+    {
+      id: TOOL_IDS.BOLD_EXPORT_CSV,
+      title: 'Export moveemtns to csv',
+      description: 'Detecta movimientos unicos de Bold y habilita descarga CSV limpia.',
+      url: 'https://cuenta.bold.co/midinero/deposito/movimientos/unicos'
+    },
+    {
+      id: TOOL_IDS.NUWWE_AUTO_LOGIN,
+      title: 'Nuwwe Auto Login',
+      description: 'Autocompleta credenciales en Nuwwe y envia el formulario automaticamente.',
+      url: 'https://nuwwe.com/login'
+    }
+  ]);
+  const BOLD_MOVEMENTS_HOSTNAME = 'cuenta.bold.co';
+  const BOLD_MOVEMENTS_PATH_PREFIX = '/midinero/deposito/movimientos/unicos';
+  const NUWWE_CREDENTIALS_STORAGE_VERSION = 1;
+  const NUWWE_CREDENTIALS_STORAGE_KEY = 'greene_tool_nuwwe_login_secure_v1';
+  const NUWWE_GET_LOGIN_CREDENTIALS_MESSAGE_TYPE = 'GREENE_NUWWE_GET_LOGIN_CREDENTIALS';
   const SETTINGS_PAGES = Object.freeze({
     HOME: 'home',
     USER: 'user',
@@ -170,6 +207,9 @@ export function initPanelApp() {
   const CHAT_IDLE_BOTTOM_RESERVE_PX = CHAT_STREAM_BOTTOM_RESERVE_PX;
   const WHATSAPP_WEB_BASE_URL = 'https://web.whatsapp.com/';
   const WHATSAPP_WEB_URL_HINT = 'web.whatsapp.com';
+  const NUWWE_LOGIN_URL = 'https://nuwwe.com/login';
+  const NUWWE_HOST_HINT = 'nuwwe.com';
+  const NUWWE_DIRECT_INTENT_TOKENS = Object.freeze(['nuwwe', 'nuwe', 'nue']);
   const MAX_CHAT_CONTEXT_MESSAGES = 20;
   const MAX_CHAT_HISTORY_MESSAGES = 160;
   const MAX_CHAT_HISTORY_STORAGE_LIMIT = 600;
@@ -424,7 +464,12 @@ export function initPanelApp() {
   const brandNameText = document.getElementById('brandNameText');
   const nativeConnectorStatusBtn = document.getElementById('nativeConnectorStatusBtn');
   const nativeConnectorStatusDot = document.getElementById('nativeConnectorStatusDot');
-  const toolsScreen = document.getElementById('toolsScreen');
+  const toolsShell = document.getElementById('toolsShell');
+  const toolsTitle = document.getElementById('toolsTitle');
+  const toolsHomeScreen = document.getElementById('toolsHomeScreen');
+  const toolsDetailScreen = document.getElementById('toolsDetailScreen');
+  const toolsHomeList = document.getElementById('toolsHomeList');
+  const toolsDetailPages = Array.from(document.querySelectorAll('.tools-detail-page'));
   const openToolsBtn = document.getElementById('openToolsBtn');
   const openSettingsBtn = document.getElementById('openSettingsBtn');
   const goHomeBtn = document.getElementById('goHomeBtn');
@@ -434,7 +479,6 @@ export function initPanelApp() {
   const settingsBody = settingsShell?.querySelector('.settings-body');
   const settingsPages = Array.from(document.querySelectorAll('.settings-page'));
   const settingsNavItems = Array.from(document.querySelectorAll('[data-settings-target]'));
-  const toolTabs = Array.from(document.querySelectorAll('.tool-tab'));
 
   const brandEmotion = document.getElementById('brandEmotion');
   const brandEmotionSvg = document.getElementById('brandEmotionSvg');
@@ -486,6 +530,15 @@ export function initPanelApp() {
   const retoolToggle = document.getElementById('retoolToggle');
   const applyRetoolBtn = document.getElementById('applyRetoolBtn');
   const retoolStatus = document.getElementById('retoolStatus');
+  const applyBoldExportBtn = document.getElementById('applyBoldExportBtn');
+  const boldExportStatus = document.getElementById('boldExportStatus');
+  const nuwweAutoLoginToggle = document.getElementById('nuwweAutoLoginToggle');
+  const nuwweUsernameInput = document.getElementById('nuwweUsernameInput');
+  const nuwwePasswordInput = document.getElementById('nuwwePasswordInput');
+  const nuwweCompanyCodeInput = document.getElementById('nuwweCompanyCodeInput');
+  const nuwweSaveCredentialsBtn = document.getElementById('nuwweSaveCredentialsBtn');
+  const nuwweClearCredentialsBtn = document.getElementById('nuwweClearCredentialsBtn');
+  const nuwweAutoLoginStatus = document.getElementById('nuwweAutoLoginStatus');
   const onboardingAssistantNameInput = document.getElementById('onboardingAssistantNameInput');
   const onboardingNameInput = document.getElementById('onboardingNameInput');
   const onboardingContinueBtn = document.getElementById('onboardingContinueBtn');
@@ -658,6 +711,7 @@ export function initPanelApp() {
     capabilities: []
   };
   let nativeHostPingInFlight = false;
+  let toolsScreenController = null;
   let settingsScreenController = null;
   let settingsScreenState = null;
   let tabContextSnapshot = { activeTabId: -1, tabs: [], history: [], runtimeContext: {}, updatedAt: Date.now(), reason: 'init' };
@@ -766,6 +820,7 @@ export function initPanelApp() {
   let activeTtsObjectUrl = '';
   let voiceSessionActive = false;
   let voiceSessionResumeTimer = 0;
+  let activeVoiceTranscriptionAbortController = null;
   let activeChatAbortController = null;
   let voiceReplySyncState = {
     messageId: '',
@@ -1959,6 +2014,10 @@ export function initPanelApp() {
 
   function isSettingsScreenActive() {
     return String(app?.dataset?.screen || '').trim() === 'settings';
+  }
+
+  function isToolsScreenActive() {
+    return String(app?.dataset?.screen || '').trim() === 'tools';
   }
 
   function shouldPreserveIntegrationsScroll() {
@@ -3476,8 +3535,41 @@ export function initPanelApp() {
 
   function focusPinFirstDigit() {
     const first = pinDigitInputs.find((item) => item && !item.disabled) || null;
-    first?.focus();
-    first?.select?.();
+    if (!first) {
+      return false;
+    }
+
+    try {
+      first.focus({ preventScroll: true });
+    } catch (_) {
+      first.focus();
+    }
+    first.select?.();
+    return document.activeElement === first;
+  }
+
+  function requestPinFirstDigitFocus(attempts = 8, delayMs = 70) {
+    let attempt = 0;
+    const maxAttempts = Math.max(1, Number(attempts) || 8);
+    const safeDelayMs = Math.max(20, Number(delayMs) || 70);
+
+    const run = () => {
+      if (!pinModal || pinModal.hidden) {
+        return;
+      }
+
+      const focused = focusPinFirstDigit();
+      if (focused) {
+        return;
+      }
+
+      attempt += 1;
+      if (attempt < maxAttempts) {
+        window.setTimeout(run, safeDelayMs);
+      }
+    };
+
+    run();
   }
 
   function wirePinDigitGroup(inputs) {
@@ -3738,7 +3830,17 @@ export function initPanelApp() {
     return true;
   }
 
+  function isBlockingModalOpen() {
+    const isPinModalOpen = Boolean(pinModal && pinModal.hidden !== true);
+    const isModelConfigOpen = Boolean(modelConfigModal && modelConfigModal.hidden !== true);
+    return isPinModalOpen || isModelConfigOpen;
+  }
+
   function focusChatInput() {
+    if (isBlockingModalOpen()) {
+      return;
+    }
+
     try {
       chatInput.focus({ preventScroll: true });
     } catch (_) {
@@ -3747,7 +3849,21 @@ export function initPanelApp() {
   }
 
   function shouldAutofocusChatInput() {
-    return app && app.dataset.screen === 'home' && !isGeneratingChat;
+    return app && app.dataset.screen === 'home' && !isGeneratingChat && !isBlockingModalOpen();
+  }
+
+  function focusOnboardingAssistantInput() {
+    const target = onboardingAssistantNameInput;
+    if (!target || !app || app.dataset.screen !== 'onboarding' || isBlockingModalOpen()) {
+      return false;
+    }
+
+    try {
+      target.focus({ preventScroll: true });
+    } catch (_) {
+      target.focus();
+    }
+    return document.activeElement === target;
   }
 
   function setAppBootstrapState(isReady) {
@@ -3795,6 +3911,50 @@ export function initPanelApp() {
     };
 
     run();
+  }
+
+  function requestOnboardingAutofocus(attempts = 8, delayMs = 80) {
+    let attempt = 0;
+    const maxAttempts = Math.max(1, Number(attempts) || 8);
+    const safeDelay = Math.max(20, Number(delayMs) || 80);
+
+    const run = () => {
+      if (!app || app.dataset.screen !== 'onboarding' || isBlockingModalOpen()) {
+        return;
+      }
+
+      if (!document.hasFocus()) {
+        attempt += 1;
+        if (attempt < maxAttempts) {
+          window.setTimeout(run, safeDelay);
+        }
+        return;
+      }
+
+      const focused = focusOnboardingAssistantInput();
+      if (focused) {
+        return;
+      }
+
+      attempt += 1;
+      if (attempt < maxAttempts) {
+        window.setTimeout(run, safeDelay);
+      }
+    };
+
+    run();
+  }
+
+  function requestPrimaryScreenAutofocus(screenName = '', attempts = 8, delayMs = 80) {
+    const screen = String(screenName || app?.dataset?.screen || '').trim();
+    if (screen === 'home') {
+      requestChatAutofocus(attempts, delayMs);
+      return;
+    }
+
+    if (screen === 'onboarding') {
+      requestOnboardingAutofocus(attempts, delayMs);
+    }
   }
 
   function cancelChatBottomAlign() {
@@ -4083,29 +4243,19 @@ export function initPanelApp() {
     }
   }
 
-  function setActiveTool(toolName) {
-    const index = TOOL_SEQUENCE.indexOf(toolName);
-    const safeIndex = index === -1 ? 0 : index;
-    const safeTool = TOOL_SEQUENCE[safeIndex];
+  function openTools(toolId = '') {
+    const requestedToolId = String(toolId || '').trim();
 
-    toolsScreen.dataset.tool = safeTool;
-    toolsScreen.style.setProperty('--tool-index', String(safeIndex));
-    toolsScreen.style.setProperty('--tool-count', String(TOOL_SEQUENCE.length));
-
-    for (const tab of toolTabs) {
-      tab.classList.toggle('is-active', tab.dataset.toolTarget === safeTool);
+    if (toolsScreenController) {
+      if (requestedToolId) {
+        toolsScreenController.openTool(requestedToolId);
+      } else {
+        toolsScreenController.openHome();
+      }
     }
 
-    if (safeTool !== 'image') {
-      setDropUi(false);
-    } else if (dragDepth > 0) {
-      setDropUi(true);
-    }
-  }
-
-  function openTools(toolName = 'image') {
-    setActiveTool(toolName);
     setScreen('tools');
+    setDropUi(dragDepth > 0);
   }
 
   function openSettings(nextPage = SETTINGS_PAGES.HOME) {
@@ -5144,7 +5294,7 @@ export function initPanelApp() {
       pinModal.hidden = false;
     }
 
-    focusPinFirstDigit();
+    requestPinFirstDigitFocus(10, 80);
   }
 
   function closePinModal(options = {}) {
@@ -5205,6 +5355,7 @@ export function initPanelApp() {
       syncModelSelectors();
       renderAiModelsSettings();
       renderPinStatus();
+      await hydrateNuwweCredentialsToolUi();
       resolvePinModalRequest(true);
       closePinModal({ keepRequest: true });
       setStatus(aiModelsStatus, 'PIN desbloqueado. Ya puedes usar modelos externos.');
@@ -5242,6 +5393,7 @@ export function initPanelApp() {
       syncModelSelectors();
       renderAiModelsSettings();
       renderPinStatus();
+      await hydrateNuwweCredentialsToolUi();
       resolvePinModalRequest(true);
       closePinModal({ keepRequest: true });
       setStatus(aiModelsStatus, hadPin ? 'PIN actualizado.' : 'PIN configurado.');
@@ -5297,14 +5449,10 @@ export function initPanelApp() {
   function goToPrimaryScreen() {
     const nextScreen = resolveHomeOrOnboardingScreen();
     setScreen(nextScreen);
-
     if (nextScreen === 'home') {
       requestChatBottomAlign(12, 70);
-      requestChatAutofocus(8, 80);
-      return;
     }
-
-    onboardingAssistantNameInput?.focus();
+    requestPrimaryScreenAutofocus(nextScreen, 8, 80);
   }
 
   async function refreshLocalModels(options = {}) {
@@ -5587,6 +5735,227 @@ export function initPanelApp() {
 
   function buildProfileSecretKey(profileId) {
     return `${SECRET_KEY_PREFIX}${String(profileId || '').trim()}`;
+  }
+
+  function normalizeNuwweCredentials(rawValue) {
+    const source = rawValue && typeof rawValue === 'object' ? rawValue : {};
+    const username = String(source.username || '').trim();
+    const password = String(source.password || '').trim();
+    const companyCode = String(source.companyCode || '').trim();
+
+    if (!username || !password || !companyCode) {
+      return null;
+    }
+
+    return {
+      username,
+      password,
+      companyCode
+    };
+  }
+
+  function sanitizeNuwweSecurityConfigForStorage(rawConfig) {
+    const source = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+    const saltB64 = String(source.saltB64 || '').trim();
+    const verifierIvB64 = String(source.verifierIvB64 || '').trim();
+    const verifierCipherB64 = String(source.verifierCipherB64 || '').trim();
+    const iterations = Math.max(10000, Number(source.iterations) || 210000);
+
+    if (!saltB64 || !verifierIvB64 || !verifierCipherB64) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      iterations,
+      saltB64,
+      verifierIvB64,
+      verifierCipherB64,
+      createdAt: Math.max(0, Number(source.createdAt) || 0)
+    };
+  }
+
+  function normalizeNuwweCredentialStorageRecord(rawValue) {
+    const source = rawValue && typeof rawValue === 'object' ? rawValue : {};
+    const encryptedPayload = source.encryptedPayload && typeof source.encryptedPayload === 'object' ? source.encryptedPayload : null;
+    const securityConfig = sanitizeNuwweSecurityConfigForStorage(source.securityConfig);
+
+    if (!encryptedPayload || !securityConfig) {
+      return null;
+    }
+
+    const ivB64 = String(encryptedPayload.ivB64 || '').trim();
+    const cipherB64 = String(encryptedPayload.cipherB64 || '').trim();
+    if (!ivB64 || !cipherB64) {
+      return null;
+    }
+
+    return {
+      version: Math.max(1, Number(source.version) || NUWWE_CREDENTIALS_STORAGE_VERSION),
+      encryptedPayload: {
+        version: 1,
+        ivB64,
+        cipherB64
+      },
+      securityConfig,
+      updatedAt: Math.max(0, Number(source.updatedAt) || 0)
+    };
+  }
+
+  async function readNuwweCredentialStorageRecord() {
+    const payload = await readChromeLocal({
+      [NUWWE_CREDENTIALS_STORAGE_KEY]: null
+    });
+    return normalizeNuwweCredentialStorageRecord(payload?.[NUWWE_CREDENTIALS_STORAGE_KEY]);
+  }
+
+  async function writeNuwweCredentialStorageRecord(record) {
+    const normalized = normalizeNuwweCredentialStorageRecord(record);
+    if (!normalized) {
+      return false;
+    }
+
+    return writeChromeLocal({
+      [NUWWE_CREDENTIALS_STORAGE_KEY]: normalized
+    });
+  }
+
+  async function clearNuwweCredentialStorageRecord() {
+    return writeChromeLocal({
+      [NUWWE_CREDENTIALS_STORAGE_KEY]: null
+    });
+  }
+
+  async function hydrateNuwweCredentialsToolUi() {
+    const record = await readNuwweCredentialStorageRecord();
+    if (!record) {
+      if (nuwweUsernameInput) {
+        nuwweUsernameInput.value = '';
+      }
+      if (nuwwePasswordInput) {
+        nuwwePasswordInput.value = '';
+      }
+      if (nuwweCompanyCodeInput) {
+        nuwweCompanyCodeInput.value = '';
+      }
+      setStatus(nuwweAutoLoginStatus, 'Sin credenciales guardadas.');
+      return;
+    }
+
+    const updatedLabel = record.updatedAt > 0 ? new Date(record.updatedAt).toLocaleString() : '';
+    const fallbackStatus = updatedLabel
+      ? `Credenciales cifradas guardadas (${updatedLabel}).`
+      : 'Credenciales cifradas guardadas.';
+
+    if (!isPinUnlocked()) {
+      if (nuwwePasswordInput) {
+        nuwwePasswordInput.value = '';
+      }
+      setStatus(nuwweAutoLoginStatus, `${fallbackStatus} Desbloquea PIN para editarlas.`);
+      return;
+    }
+
+    try {
+      const plain = await pinCryptoService.decryptSecret(unlockedPin, record.securityConfig, record.encryptedPayload);
+      const parsed = JSON.parse(String(plain || '{}'));
+      const credentials = normalizeNuwweCredentials(parsed);
+      if (!credentials) {
+        setStatus(nuwweAutoLoginStatus, fallbackStatus);
+        return;
+      }
+
+      if (nuwweUsernameInput) {
+        nuwweUsernameInput.value = credentials.username;
+      }
+      if (nuwwePasswordInput) {
+        nuwwePasswordInput.value = '';
+      }
+      if (nuwweCompanyCodeInput) {
+        nuwweCompanyCodeInput.value = credentials.companyCode;
+      }
+      setStatus(nuwweAutoLoginStatus, fallbackStatus);
+    } catch (_) {
+      setStatus(nuwweAutoLoginStatus, `${fallbackStatus} No se pudieron descifrar (guarda de nuevo).`);
+    }
+  }
+
+  async function saveNuwweCredentialsFromToolScreen() {
+    const credentials = normalizeNuwweCredentials({
+      username: nuwweUsernameInput?.value || '',
+      password: nuwwePasswordInput?.value || '',
+      companyCode: nuwweCompanyCodeInput?.value || ''
+    });
+
+    if (!credentials) {
+      setStatus(nuwweAutoLoginStatus, 'Completa usuario, password y codigo de empresa.', true);
+      if (!String(nuwweUsernameInput?.value || '').trim()) {
+        nuwweUsernameInput?.focus();
+      } else if (!String(nuwwePasswordInput?.value || '').trim()) {
+        nuwwePasswordInput?.focus();
+      } else {
+        nuwweCompanyCodeInput?.focus();
+      }
+      return;
+    }
+
+    const pinReady = await ensurePinAccess({
+      allowSetup: true,
+      statusTarget: nuwweAutoLoginStatus
+    });
+    if (!pinReady) {
+      return;
+    }
+
+    const securityConfig = getSecurityConfig();
+    if (!pinCryptoService.isConfigured(securityConfig)) {
+      setStatus(nuwweAutoLoginStatus, 'Configura PIN para cifrar credenciales.', true);
+      return;
+    }
+
+    setStatus(nuwweAutoLoginStatus, 'Guardando credenciales cifradas...', false, { loading: true });
+    try {
+      const plain = JSON.stringify(credentials);
+      const encryptedPayload = await pinCryptoService.encryptSecret(unlockedPin, securityConfig, plain);
+      const saved = await writeNuwweCredentialStorageRecord({
+        version: NUWWE_CREDENTIALS_STORAGE_VERSION,
+        encryptedPayload,
+        securityConfig: sanitizeNuwweSecurityConfigForStorage(securityConfig),
+        updatedAt: Date.now()
+      });
+
+      if (!saved) {
+        setStatus(nuwweAutoLoginStatus, 'No se pudo guardar credenciales en storage local.', true);
+        return;
+      }
+
+      if (nuwwePasswordInput) {
+        nuwwePasswordInput.value = '';
+      }
+      await hydrateNuwweCredentialsToolUi();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo cifrar credenciales.';
+      setStatus(nuwweAutoLoginStatus, message, true);
+    }
+  }
+
+  async function clearNuwweCredentialsFromToolScreen() {
+    setStatus(nuwweAutoLoginStatus, 'Eliminando credenciales...', false, { loading: true });
+    const deleted = await clearNuwweCredentialStorageRecord();
+    if (!deleted) {
+      setStatus(nuwweAutoLoginStatus, 'No se pudieron eliminar credenciales.', true);
+      return;
+    }
+
+    if (nuwweUsernameInput) {
+      nuwweUsernameInput.value = '';
+    }
+    if (nuwwePasswordInput) {
+      nuwwePasswordInput.value = '';
+    }
+    if (nuwweCompanyCodeInput) {
+      nuwweCompanyCodeInput.value = '';
+    }
+    setStatus(nuwweAutoLoginStatus, 'Credenciales eliminadas.');
   }
 
   async function persistModelProfiles(nextProfiles) {
@@ -6426,6 +6795,20 @@ export function initPanelApp() {
     return /abort|interrumpid|canceled|cancelled/.test(message);
   }
 
+  function abortActiveVoiceTranscription(reason = 'voice_cancelled') {
+    if (!activeVoiceTranscriptionAbortController) {
+      return false;
+    }
+
+    try {
+      activeVoiceTranscriptionAbortController.abort(String(reason || 'voice_cancelled').trim() || 'voice_cancelled');
+    } catch (_) {
+      // Ignore abort issues.
+    }
+    activeVoiceTranscriptionAbortController = null;
+    return true;
+  }
+
   async function interruptActiveChatTurn(options = {}) {
     const reason = String(options.reason || 'interrupted').trim() || 'interrupted';
     if (activeChatAbortController) {
@@ -6598,17 +6981,26 @@ export function initPanelApp() {
     };
   }
 
-  async function transcribeVoiceBlob(blob) {
+  async function transcribeVoiceBlob(blob, options = {}) {
     if (!(blob instanceof Blob) || blob.size <= 0) {
       throw new Error('No se detecto audio para transcribir.');
     }
 
     const { apiKey } = await getSpeechAuthContext();
+    const rawSignal = options && typeof options === 'object' ? options.signal : null;
+    const signal =
+      rawSignal &&
+      typeof rawSignal === 'object' &&
+      typeof rawSignal.aborted === 'boolean' &&
+      typeof rawSignal.addEventListener === 'function'
+        ? rawSignal
+        : null;
     const result = await aiProviderService.transcribeOpenAiAudio({
       apiKey,
       audioBlob: blob,
       model: VOICE_TRANSCRIPTION_MODEL,
-      language: normalizeVoiceInputLanguage()
+      language: normalizeVoiceInputLanguage(),
+      signal
     });
     return String(result || '').trim();
   }
@@ -7259,6 +7651,7 @@ export function initPanelApp() {
     const transcribe = options.transcribe !== false;
     const preserveStatus = options.preserveStatus === true;
     const keepSession = options.keepSession === true || voiceSessionActive;
+    const shouldResumeVoiceSession = () => keepSession && voiceSessionActive;
     const stopReason = String(options?.reason || '').trim().toLowerCase();
     const vadAudioSegment = options?.vadAudioSegment instanceof Float32Array ? options.vadAudioSegment : null;
     if (voiceCaptureState.mode !== 'recording') {
@@ -7327,7 +7720,7 @@ export function initPanelApp() {
       if (!preserveStatus) {
         setStatus(chatStatus, keepSession ? 'Escucha por voz pausada.' : 'Grabacion cancelada.');
       }
-      if (keepSession) {
+      if (shouldResumeVoiceSession()) {
         scheduleVoiceSessionRestart({
           reason: 'manual_resume'
         });
@@ -7356,7 +7749,7 @@ export function initPanelApp() {
       voiceCaptureState.startedAt = 0;
       renderChatSendButtonState();
       setStatus(chatStatus, 'No se detecto audio valido.', true);
-      if (keepSession) {
+      if (shouldResumeVoiceSession()) {
         scheduleVoiceSessionRestart({
           reason: 'empty_audio',
           delayMs: VOICE_SESSION_RESTART_AFTER_ERROR_MS
@@ -7375,10 +7768,16 @@ export function initPanelApp() {
     });
 
     setStatus(chatStatus, 'Transcribiendo audio...', false, { loading: true });
+    const transcriptionAbortController = new AbortController();
+    activeVoiceTranscriptionAbortController = transcriptionAbortController;
     try {
-      let transcript = await transcribeVoiceBlob(primaryBlob);
+      let transcript = await transcribeVoiceBlob(primaryBlob, {
+        signal: transcriptionAbortController.signal
+      });
       if (!transcript && fallbackBlob instanceof Blob && fallbackBlob.size > 0) {
-        transcript = await transcribeVoiceBlob(fallbackBlob);
+        transcript = await transcribeVoiceBlob(fallbackBlob, {
+          signal: transcriptionAbortController.signal
+        });
       }
       voiceCaptureState.mode = 'idle';
       voiceCaptureState.silenceSince = 0;
@@ -7387,12 +7786,17 @@ export function initPanelApp() {
 
       if (!transcript) {
         setStatus(chatStatus, 'No se pudo transcribir el audio.', true);
-        if (keepSession) {
+        if (shouldResumeVoiceSession()) {
           scheduleVoiceSessionRestart({
             reason: 'empty_transcript',
             delayMs: VOICE_SESSION_RESTART_AFTER_ERROR_MS
           });
         }
+        return false;
+      }
+
+      if (keepSession && !voiceSessionActive) {
+        setStatus(chatStatus, 'Procesamiento de voz cancelado.');
         return false;
       }
 
@@ -7404,26 +7808,34 @@ export function initPanelApp() {
         allowInterrupt: true,
         awaitVoicePlayback: keepSession
       });
-      if (keepSession) {
+      if (shouldResumeVoiceSession()) {
         scheduleVoiceSessionRestart({
           reason: 'next_turn'
         });
       }
       return true;
     } catch (error) {
+      const aborted = isAbortLikeError(error);
       const canRetryWithFallback =
+        !aborted &&
         fallbackBlob instanceof Blob &&
         fallbackBlob.size > 0 &&
         isCorruptedOrUnsupportedAudioError(error);
       if (canRetryWithFallback) {
         try {
-          const retryTranscript = await transcribeVoiceBlob(fallbackBlob);
+          const retryTranscript = await transcribeVoiceBlob(fallbackBlob, {
+            signal: transcriptionAbortController.signal
+          });
           voiceCaptureState.mode = 'idle';
           voiceCaptureState.silenceSince = 0;
           voiceCaptureState.startedAt = 0;
           renderChatSendButtonState();
           if (!retryTranscript) {
             throw new Error('No se pudo transcribir el audio.');
+          }
+          if (keepSession && !voiceSessionActive) {
+            setStatus(chatStatus, 'Procesamiento de voz cancelado.');
+            return false;
           }
           chatInput.value = retryTranscript;
           updateChatInputSize();
@@ -7433,7 +7845,7 @@ export function initPanelApp() {
             allowInterrupt: true,
             awaitVoicePlayback: keepSession
           });
-          if (keepSession) {
+          if (shouldResumeVoiceSession()) {
             scheduleVoiceSessionRestart({
               reason: 'next_turn'
             });
@@ -7448,29 +7860,34 @@ export function initPanelApp() {
       voiceCaptureState.silenceSince = 0;
       voiceCaptureState.startedAt = 0;
       renderChatSendButtonState();
+      if (isAbortLikeError(error)) {
+        setStatus(chatStatus, 'Procesamiento de voz cancelado.');
+        return false;
+      }
       const message = error instanceof Error ? error.message : 'No se pudo transcribir el audio.';
       setStatus(chatStatus, message, true);
-      if (keepSession) {
+      if (shouldResumeVoiceSession()) {
         scheduleVoiceSessionRestart({
           reason: 'transcribe_error',
           delayMs: VOICE_SESSION_RESTART_AFTER_ERROR_MS
         });
       }
       return false;
+    } finally {
+      if (activeVoiceTranscriptionAbortController === transcriptionAbortController) {
+        activeVoiceTranscriptionAbortController = null;
+      }
     }
   }
 
   async function handleVoiceSendButtonClick() {
     if (voiceCaptureState.mode === 'transcribing') {
-      if (voiceSessionActive) {
-        setVoiceSessionActive(false, {
-          reason: 'tap_stop_transcribing'
-        });
-        releaseVoiceSessionResources({
-          preserveMode: true
-        });
-        setStatus(chatStatus, 'Escucha por voz desactivada.');
-      }
+      setVoiceSessionActive(false, {
+        reason: 'tap_cancel_transcribing'
+      });
+      abortActiveVoiceTranscription('tap_cancel_transcribing');
+      releaseVoiceSessionResources();
+      setStatus(chatStatus, 'Procesamiento de voz cancelado.');
       return;
     }
 
@@ -7487,23 +7904,19 @@ export function initPanelApp() {
 
     if (voiceSessionActive) {
       if (isGeneratingChat || isAssistantSpeechPlaybackActive()) {
-        const interrupted = await interruptActiveChatTurn({
-          reason: 'voice_session_barge_in'
+        setVoiceSessionActive(false, {
+          reason: 'tap_cancel_processing'
         });
-        if (!interrupted) {
-          setStatus(chatStatus, 'No se pudo interrumpir la respuesta activa para escuchar nueva voz.', true);
+        abortActiveVoiceTranscription('tap_cancel_processing');
+        releaseVoiceSessionResources();
+        const interrupted = await interruptActiveChatTurn({
+          reason: 'voice_session_cancel_processing'
+        });
+        if (!interrupted && isGeneratingChat) {
+          setStatus(chatStatus, 'No se pudo cancelar la respuesta activa.', true);
           return;
         }
-
-        const started = await startVoiceCapture({
-          source: 'voice_barge_in'
-        });
-        if (!started) {
-          setVoiceSessionActive(false, {
-            reason: 'voice_barge_in_failed'
-          });
-          releaseVoiceSessionResources();
-        }
+        setStatus(chatStatus, 'Escucha por voz desactivada.');
         return;
       }
 
@@ -8860,6 +9273,180 @@ export function initPanelApp() {
     return base;
   }
 
+  function isWhatsappContentScriptReconnectError(errorText = '') {
+    const token = String(errorText || '')
+      .trim()
+      .toLowerCase();
+    if (!token) {
+      return false;
+    }
+
+    return (
+      token.includes('could not establish connection') ||
+      token.includes('receiving end does not exist') ||
+      token.includes('message port closed') ||
+      token.includes('sin respuesta del content script') ||
+      token.includes('no frame with id')
+    );
+  }
+
+  function matchesWhatsappToolPhone(leftPhone, rightPhone) {
+    const left = normalizeWhatsappPhoneForUrl(leftPhone || '');
+    const right = normalizeWhatsappPhoneForUrl(rightPhone || '');
+    if (!left || !right) {
+      return false;
+    }
+    return left === right || left.endsWith(right) || right.endsWith(left);
+  }
+
+  async function waitForWhatsappChatReadyForAction(tabId, args = {}, options = {}) {
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const attempts = Math.max(1, Math.min(42, Number(safeOptions.attempts) || 24));
+    const delayMs = Math.max(80, Number(safeOptions.delayMs) || 180);
+    const expectedPhone = normalizeWhatsappPhoneForUrl(
+      safeOptions.expectedPhone || getWhatsappToolTargetPhone(safeArgs) || safeArgs.phone || ''
+    );
+    const tabIdNumber = Number(tabId);
+    let lastPing = null;
+
+    logDebug('whatsapp_tool:ready_wait_start', {
+      tabId: Number.isFinite(tabIdNumber) ? tabIdNumber : -1,
+      expectedPhone: toSafeLogText(expectedPhone, 40),
+      attempts,
+      delayMs,
+      reason: toSafeLogText(safeOptions.reason || '', 120)
+    });
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const ping = await tabContextService.runSiteActionInTab(
+        Number.isFinite(tabIdNumber) ? tabIdNumber : -1,
+        'whatsapp',
+        'getCurrentChat',
+        {}
+      );
+      lastPing = ping;
+
+      const current = ping?.result && typeof ping.result === 'object' ? ping.result : {};
+      const currentPhone = normalizeWhatsappPhoneForUrl(current.phone || '');
+      const currentTitle = String(current.title || '').trim();
+      const phoneMatches = expectedPhone ? matchesWhatsappToolPhone(expectedPhone, currentPhone) : false;
+      const ready = ping?.ok === true && (expectedPhone ? phoneMatches : Boolean(currentPhone || currentTitle));
+      if (ready) {
+        logDebug('whatsapp_tool:ready_wait_done', {
+          tabId: Number.isFinite(tabIdNumber) ? tabIdNumber : -1,
+          expectedPhone: toSafeLogText(expectedPhone, 40),
+          currentPhone: toSafeLogText(currentPhone, 40),
+          currentTitle: toSafeLogText(currentTitle, 120),
+          attempt
+        });
+        return {
+          ready: true,
+          attempt,
+          expectedPhone,
+          currentPhone,
+          currentTitle,
+          ping
+        };
+      }
+
+      if (attempt < attempts) {
+        if (attempt % 4 === 0) {
+          await tabContextService.requestSnapshot();
+        }
+        await waitForMs(delayMs);
+      }
+    }
+
+    const finalCurrent = lastPing?.result && typeof lastPing.result === 'object' ? lastPing.result : {};
+    const finalCurrentPhone = normalizeWhatsappPhoneForUrl(finalCurrent.phone || '');
+    const finalCurrentTitle = String(finalCurrent.title || '').trim();
+    logWarn('whatsapp_tool:ready_wait_timeout', {
+      tabId: Number.isFinite(tabIdNumber) ? tabIdNumber : -1,
+      expectedPhone: toSafeLogText(expectedPhone, 40),
+      currentPhone: toSafeLogText(finalCurrentPhone, 40),
+      currentTitle: toSafeLogText(finalCurrentTitle, 120),
+      lastError: toSafeLogText(lastPing?.error || '', 220),
+      attempts
+    });
+    return {
+      ready: false,
+      attempt: attempts,
+      expectedPhone,
+      currentPhone: finalCurrentPhone,
+      currentTitle: finalCurrentTitle,
+      ping: lastPing
+    };
+  }
+
+  async function runWhatsappSiteActionWithRetries(tabId, action, args = {}, options = {}) {
+    const safeAction = String(action || '').trim();
+    const safeArgs = args && typeof args === 'object' ? args : {};
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const tabIdNumber = Number(tabId);
+    const maxAttempts = Math.max(1, Math.min(5, Number(safeOptions.maxAttempts) || (safeOptions.openedViaUrl ? 4 : 3)));
+    const retryDelayMs = Math.max(100, Number(safeOptions.retryDelayMs) || 220);
+    let lastResponse = { ok: false, error: 'Sin respuesta del content script.' };
+
+    if (safeOptions.openedViaUrl) {
+      await waitForWhatsappChatReadyForAction(tabIdNumber, safeArgs, {
+        expectedPhone: safeOptions.expectedPhone || '',
+        attempts: Math.max(6, Number(safeOptions.warmupAttempts) || 14),
+        delayMs: Math.max(90, Number(safeOptions.warmupDelayMs) || 180),
+        reason: `warmup:${safeAction}`
+      });
+    }
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const response = await tabContextService.runSiteActionInTab(
+        Number.isFinite(tabIdNumber) ? tabIdNumber : -1,
+        'whatsapp',
+        safeAction,
+        safeArgs
+      );
+
+      if (response?.ok === true) {
+        if (attempt > 1) {
+          logDebug('whatsapp_tool:site_action_recovered', {
+            action: safeAction,
+            tabId: Number.isFinite(tabIdNumber) ? tabIdNumber : -1,
+            attempt
+          });
+        }
+        return response;
+      }
+
+      lastResponse = response || { ok: false, error: 'Sin respuesta del content script.' };
+      const errorText = String(lastResponse?.error || '').trim();
+      const recoverable = isWhatsappContentScriptReconnectError(errorText);
+      if (!recoverable || attempt >= maxAttempts) {
+        break;
+      }
+
+      const readyState = await waitForWhatsappChatReadyForAction(tabIdNumber, safeArgs, {
+        expectedPhone: safeOptions.expectedPhone || '',
+        attempts: Math.max(4, Number(safeOptions.retryReadyAttempts) || 10),
+        delayMs: Math.max(90, Number(safeOptions.retryReadyDelayMs) || 170),
+        reason: `retry:${safeAction}:${attempt}`
+      });
+
+      logWarn('whatsapp_tool:site_action_retry', {
+        action: safeAction,
+        tabId: Number.isFinite(tabIdNumber) ? tabIdNumber : -1,
+        attempt,
+        error: toSafeLogText(errorText, 220),
+        ready: readyState.ready,
+        expectedPhone: toSafeLogText(readyState.expectedPhone || '', 40),
+        currentPhone: toSafeLogText(readyState.currentPhone || '', 40),
+        currentTitle: toSafeLogText(readyState.currentTitle || '', 120)
+      });
+
+      await waitForMs(retryDelayMs + attempt * 110);
+    }
+
+    return lastResponse;
+  }
+
   async function ensureWhatsappTabForTool(args = {}, options = {}) {
     const safeArgs = args && typeof args === 'object' ? args : {};
     const safeOptions = options && typeof options === 'object' ? options : {};
@@ -9565,17 +10152,134 @@ export function initPanelApp() {
       .trim();
   }
 
+  function extractHostnameToken(rawUrl = '') {
+    const source = String(rawUrl || '').trim();
+    if (!source) {
+      return '';
+    }
+
+    try {
+      return String(new URL(source).hostname || '')
+        .toLowerCase()
+        .replace(/^www\./, '')
+        .trim();
+    } catch (_) {
+      const withoutScheme = source.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+      const firstChunk = withoutScheme.split('/')[0] || '';
+      return String(firstChunk || '')
+        .toLowerCase()
+        .replace(/^www\./, '')
+        .trim();
+    }
+  }
+
+  function isNuwweHostname(hostname = '') {
+    const token = String(hostname || '')
+      .toLowerCase()
+      .replace(/^www\./, '')
+      .trim();
+    return token === NUWWE_HOST_HINT || token.endsWith(`.${NUWWE_HOST_HINT}`);
+  }
+
+  function findPreferredNuwweTabInSnapshot() {
+    const tabs = Array.isArray(tabContextSnapshot?.tabs) ? tabContextSnapshot.tabs : [];
+    const activeTabId = Number(tabContextSnapshot?.activeTabId);
+    const candidates = tabs.filter((tab) => {
+      const hostname = extractHostnameToken(tab?.url || '');
+      return Boolean(hostname) && isNuwweHostname(hostname);
+    });
+
+    if (!candidates.length) {
+      return null;
+    }
+
+    const loginTab = candidates.find((tab) => /\/login(?:[/?#]|$)/i.test(String(tab?.url || '')));
+    if (loginTab) {
+      return loginTab;
+    }
+
+    const activeTab = candidates.find((tab) => Number(tab?.tabId) === activeTabId);
+    if (activeTab) {
+      return activeTab;
+    }
+
+    return candidates[0] || null;
+  }
+
+  function isLikelyOpenNuwweIntent(userQuery = '') {
+    const source = String(userQuery || '').trim();
+    if (!source) {
+      return false;
+    }
+
+    const normalized = normalizeVoiceIntentText(source);
+    if (!normalized) {
+      return false;
+    }
+
+    if (/\b(no|cancela|cancelar|deten|detener)\b/.test(normalized)) {
+      return false;
+    }
+
+    const tokens = normalized.split(' ').filter(Boolean);
+    if (!tokens.length) {
+      return false;
+    }
+
+    const hasNuwweToken = tokens.some((token) => NUWWE_DIRECT_INTENT_TOKENS.includes(token));
+    if (!hasNuwweToken) {
+      return false;
+    }
+
+    const asksToOpen =
+      /\b(abre|abrir|open|abreme|abrime|abrelo|inicia|iniciar|lanza|lanzar|pon|poner|entra|entrar)\b/.test(normalized) ||
+      /\b(ve a|ir a)\b/.test(normalized);
+    if ((/[?]/.test(source) || /^(como|how|que|what|cuando|where|donde)\b/.test(normalized)) && !asksToOpen) {
+      return false;
+    }
+
+    return asksToOpen || tokens.length <= 3;
+  }
+
+  function buildDirectNuwweToolCall() {
+    const existingTab = findPreferredNuwweTabInSnapshot();
+    const existingTabId = Number(existingTab?.tabId);
+
+    if (Number.isFinite(existingTabId) && existingTabId >= 0) {
+      return {
+        tool: 'browser.navigateTab',
+        args: {
+          tabId: existingTabId,
+          url: NUWWE_LOGIN_URL,
+          active: true
+        }
+      };
+    }
+
+    return {
+      tool: 'browser.openNewTab',
+      args: {
+        url: NUWWE_LOGIN_URL,
+        active: true
+      }
+    };
+  }
+
   function buildVoiceActionDirective(userQuery = '') {
     const normalizedQuery = normalizeVoiceIntentText(userQuery);
     const spotifyHint = /\bspotify\b/.test(normalizedQuery)
       ? 'Si el usuario menciona spotify, usa browser.openNewTab con url https://open.spotify.com/.'
+      : '';
+    const nuwweHint = NUWWE_DIRECT_INTENT_TOKENS.some((token) => normalizedQuery.includes(token))
+      ? 'Si el usuario pide Nuwwe (nuwwe/nuwe/nue), abre https://nuwwe.com/login y reutiliza tab existente si la hay.'
       : '';
     return [
       'Modo voice activo: si el usuario pide una accion del navegador, debes ejecutar la accion en tu primer mensaje.',
       'No respondas con conversacion tipo "ya lo abri" sin ejecutar realmente una tool.',
       'Para solicitudes operativas (abrir/cerrar/enfocar/enviar), responde primero con bloque ```tool``` sin texto adicional.',
       'Cuando respondas en voice sin usar tools, se ultra directo: maximo 2 frases cortas, sin introducciones, sin relleno.',
-      spotifyHint
+      spotifyHint,
+      nuwweHint
     ]
       .filter(Boolean)
       .join('\n');
@@ -9607,6 +10311,10 @@ export function initPanelApp() {
           }
         }
       ];
+    }
+
+    if (isLikelyOpenNuwweIntent(userQuery)) {
+      return [buildDirectNuwweToolCall()];
     }
 
     return [];
@@ -9919,6 +10627,18 @@ export function initPanelApp() {
       }
     }
 
+    if (isLikelyOpenNuwweIntent(userQuery)) {
+      const nuwweCall = buildDirectNuwweToolCall();
+      const existingTab = findPreferredNuwweTabInSnapshot();
+      logDebug('detectDirectToolCalls:nuwwe_login', {
+        source,
+        tool: nuwweCall.tool,
+        existingTabId: Number(existingTab?.tabId) || -1,
+        targetUrl: String(nuwweCall?.args?.url || '').trim()
+      });
+      return [nuwweCall];
+    }
+
     if (!isLikelyDirectWhatsappMessageIntent(userQuery)) {
       return [];
     }
@@ -10002,6 +10722,7 @@ export function initPanelApp() {
       'Para preguntas de tiempo (hoy, ayer, semana pasada, viernes por la tarde, visita mas antigua), usa primero tools de historial.',
       'Si el usuario pide cerrar/focar una tab y hay duda de coincidencia, usa browser.listTabs y luego ejecuta browser.closeTab/browser.focusTab con criterios precisos.',
       'Si el usuario pide acciones en WhatsApp, usa whatsapp.* y prioriza dryRun cuando la accion sea masiva.',
+      'Si el usuario pide abrir Nuwwe (nuwwe/nuwe/nue), abre https://nuwwe.com/login y reutiliza una tab existente de nuwwe cuando sea posible.',
       'Si el usuario pide "enviar/mandar mensaje a <persona>", interpreta "mensaje" como WhatsApp por defecto.',
       'Si el usuario usa alias de contacto en WhatsApp, usa query/name/chat normalmente; el sistema puede resolver alias guardados a phone.',
       'Tambien puedes resolver contactos por nombres almacenados en el indice local de chats WhatsApp (IndexedDB) para obtener su phone.',
@@ -10908,9 +11629,6 @@ export function initPanelApp() {
         if (executedWhatsappAction === 'openChatAndSendMessage' && ensuredWhatsapp.openedViaUrl && ensuredWhatsapp.phone) {
           executedWhatsappAction = 'sendMessage';
         }
-        if (executedWhatsappAction === 'sendMessage' && ensuredWhatsapp.openedViaUrl) {
-          await waitForMs(260);
-        }
 
         logDebug('executeLocalToolCalls:invoke', {
           tool,
@@ -10923,11 +11641,15 @@ export function initPanelApp() {
           openedUrl: ensuredWhatsapp.openedUrl || ''
         });
 
-        const response = await tabContextService.runSiteActionInTab(
+        const response = await runWhatsappSiteActionWithRetries(
           Number(targetTab.tabId) || -1,
-          'whatsapp',
           executedWhatsappAction,
-          siteArgs
+          siteArgs,
+          {
+            openedViaUrl: ensuredWhatsapp.openedViaUrl === true,
+            expectedPhone: phoneTarget || ensuredWhatsapp.phone || '',
+            maxAttempts: ensuredWhatsapp.openedViaUrl === true ? 4 : 3
+          }
         );
 
         const responseResult = response?.result && typeof response.result === 'object' ? response.result : {};
@@ -12290,25 +13012,94 @@ export function initPanelApp() {
     return result;
   }
 
+  async function hydrateWhatsappContextFromLiveTab(tabContext, options = {}) {
+    if (!tabContext || !isWhatsappContext(tabContext)) {
+      return tabContext;
+    }
+
+    const tabId = Number(tabContext.tabId);
+    if (!Number.isFinite(tabId) || tabId < 0) {
+      return tabContext;
+    }
+
+    const details = tabContext.details && typeof tabContext.details === 'object' ? tabContext.details : {};
+    const currentChat = details.currentChat && typeof details.currentChat === 'object' ? details.currentChat : {};
+    const knownMessages = Array.isArray(details.messages) ? details.messages : [];
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const minMessages = Math.max(1, Number(safeOptions.minMessages) || 1);
+    const hasChatIdentity = Boolean(
+      String(currentChat.key || currentChat.channelId || currentChat.phone || currentChat.title || '').trim()
+    );
+    const shouldHydrate = safeOptions.force === true || knownMessages.length < minMessages || !hasChatIdentity;
+    if (!shouldHydrate) {
+      return tabContext;
+    }
+
+    const readLimit = Math.max(20, Math.min(140, Number(safeOptions.messageLimit) || 80));
+    const [chatResponse, messagesResponse] = await Promise.all([
+      tabContextService.runSiteActionInTab(tabId, 'whatsapp', 'getCurrentChat', {}),
+      tabContextService.runSiteActionInTab(tabId, 'whatsapp', 'readMessages', { limit: readLimit })
+    ]);
+
+    const liveChat = chatResponse?.result && typeof chatResponse.result === 'object' ? chatResponse.result : {};
+    const liveMessages = Array.isArray(messagesResponse?.result) ? messagesResponse.result : [];
+    if (!liveMessages.length && !Object.keys(liveChat).length) {
+      return tabContext;
+    }
+
+    const mergedCurrentChat = {
+      ...currentChat,
+      title: String(liveChat.title || currentChat.title || '').trim(),
+      phone: String(liveChat.phone || currentChat.phone || '').trim(),
+      channelId: String(liveChat.channelId || currentChat.channelId || '').trim(),
+      key: String(liveChat.key || currentChat.key || currentChat.phone || currentChat.title || '').trim()
+    };
+    if (!mergedCurrentChat.key) {
+      mergedCurrentChat.key = String(mergedCurrentChat.phone || mergedCurrentChat.title || mergedCurrentChat.channelId || '').trim();
+    }
+
+    logDebug('whatsapp_history:live_context_hydrated', {
+      tabId,
+      readMessages: liveMessages.length,
+      hadMessages: knownMessages.length,
+      chatKey: toSafeLogText(mergedCurrentChat.key || mergedCurrentChat.channelId || '', 160),
+      chatTitle: toSafeLogText(mergedCurrentChat.title || '', 120),
+      chatPhone: toSafeLogText(mergedCurrentChat.phone || '', 40)
+    });
+
+    return {
+      ...tabContext,
+      details: {
+        ...details,
+        currentChat: mergedCurrentChat,
+        messages: liveMessages.length ? liveMessages : knownMessages
+      }
+    };
+  }
+
   async function buildWhatsappSuggestionContext(tabContext) {
     if (!tabContext || !isWhatsappContext(tabContext)) {
       return tabContext;
     }
 
-    const syncResult = await syncWhatsappChatContext(tabContext, {
+    const hydratedContext = await hydrateWhatsappContextFromLiveTab(tabContext, {
+      minMessages: 1,
+      messageLimit: getSystemVariableNumber('whatsapp.suggestionHistoryLimit', WHATSAPP_SUGGESTION_HISTORY_LIMIT)
+    });
+    const syncResult = await syncWhatsappChatContext(hydratedContext, {
       messageLimit: getSystemVariableNumber('whatsapp.maxPersistedMessages', MAX_WHATSAPP_PERSISTED_MESSAGES)
     });
-    const historyPayload = await readWhatsappChatHistory(tabContext, {
+    const historyPayload = await readWhatsappChatHistory(hydratedContext, {
       limit: getSystemVariableNumber('whatsapp.suggestionHistoryLimit', WHATSAPP_SUGGESTION_HISTORY_LIMIT)
     });
     void ingestWhatsappHistoryIntoContextMemory(historyPayload, {
       messageLimit: getSystemVariableNumber('whatsapp.maxPersistedMessages', MAX_WHATSAPP_PERSISTED_MESSAGES)
     }).catch(() => {});
-    const mergedContext = mergeWhatsappContextWithHistory(tabContext, historyPayload);
+    const mergedContext = mergeWhatsappContextWithHistory(hydratedContext, historyPayload);
 
     logDebug('whatsapp_history:sync', {
-      tabId: Number(tabContext.tabId) || -1,
-      chatKey: toSafeLogText(getWhatsappChatKey(tabContext), 160),
+      tabId: Number(hydratedContext.tabId) || -1,
+      chatKey: toSafeLogText(getWhatsappChatKey(hydratedContext), 160),
       syncResult: {
         ok: Boolean(syncResult?.ok),
         reason: toSafeLogText(syncResult?.reason || '', 40),
@@ -12535,7 +13326,9 @@ export function initPanelApp() {
       ? 'Generando sugerencia contextual...'
       : whatsappSuggestionUiStatus.isError
         ? 'No se pudo generar la sugerencia para este chat.'
-        : 'Sugerencia lista para ejecutar.';
+        : hasText
+          ? 'Sugerencia lista para ejecutar.'
+          : 'Aun sin sugerencia generada para este chat.';
 
     return {
       id: 'ai-whatsapp-reply',
@@ -13186,7 +13979,18 @@ export function initPanelApp() {
         ...contextSummary,
         signalKey: toSafeLogText(signalKey, 220)
       });
-      hideWhatsappSuggestion();
+      const waitingMessage = 'Aun no hay historial suficiente para sugerir next message en este chat.';
+      whatsappSuggestionState = {
+        tabId: Number(suggestionContext.tabId) || -1,
+        chatKey,
+        signalKey,
+        promptSignature,
+        text: '',
+        loading: false
+      };
+      setWhatsappSuggestionUiStatus(waitingMessage, false);
+      setStatus(whatsappSuggestionStatus, waitingMessage);
+      renderAiDynamicContext(suggestionContext);
       return;
     }
 
@@ -14368,7 +15172,12 @@ export function initPanelApp() {
   }
 
   function canShowImageDropOverlay() {
-    return app && app.dataset.screen === 'tools' && toolsScreen.dataset.tool === 'image';
+    const isToolsVisible = app && app.dataset.screen === 'tools';
+    if (!isToolsVisible || !toolsScreenController) {
+      return false;
+    }
+
+    return toolsScreenController.isToolDetailActive(TOOL_IDS.IMAGE);
   }
 
   function setDropUi(isActive) {
@@ -14475,26 +15284,257 @@ export function initPanelApp() {
     }
   }
 
-  function applyInActiveTab() {
+  function isNoReceiverRuntimeError(errorText = '') {
+    const token = String(errorText || '')
+      .trim()
+      .toLowerCase();
+    if (!token) {
+      return false;
+    }
+
+    return (
+      token.includes('receiving end does not exist') ||
+      token.includes('could not establish connection') ||
+      token.includes('message port closed')
+    );
+  }
+
+  function isBoldMovementsTabUrl(rawUrl = '') {
+    const source = String(rawUrl || '').trim();
+    if (!source) {
+      return false;
+    }
+
+    try {
+      const parsed = new URL(source);
+      return (
+        String(parsed.hostname || '').toLowerCase() === BOLD_MOVEMENTS_HOSTNAME &&
+        String(parsed.pathname || '').startsWith(BOLD_MOVEMENTS_PATH_PREFIX)
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function queryActiveTabInLastFocusedWindow() {
+    return new Promise((resolve, reject) => {
+      if (!chrome.tabs || typeof chrome.tabs.query !== 'function') {
+        reject(new Error('API de tabs no disponible en este contexto.'));
+        return;
+      }
+
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || 'No se pudo consultar la pestana activa.'));
+          return;
+        }
+
+        resolve(tabs && tabs[0] ? tabs[0] : null);
+      });
+    });
+  }
+
+  function sendMessageToTab(tabId, payload) {
+    return new Promise((resolve) => {
+      if (!chrome.tabs || typeof chrome.tabs.sendMessage !== 'function') {
+        resolve({
+          ok: false,
+          response: null,
+          error: 'API de tabs no disponible en este contexto.'
+        });
+        return;
+      }
+
+      chrome.tabs.sendMessage(tabId, payload, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            response: null,
+            error: String(chrome.runtime.lastError.message || 'No se pudo enviar mensaje a la pestana.')
+          });
+          return;
+        }
+
+        resolve({
+          ok: true,
+          response,
+          error: ''
+        });
+      });
+    });
+  }
+
+  function injectBoldCsvScriptsInTab(tabId) {
+    return new Promise((resolve, reject) => {
+      if (!chrome.scripting || typeof chrome.scripting.executeScript !== 'function') {
+        reject(new Error('API de scripting no disponible para inyectar la tool de Bold.'));
+        return;
+      }
+
+      chrome.scripting.executeScript(
+        {
+          target: { tabId },
+          files: ['src/tool-config.js', 'src/content-bold-movements.js']
+        },
+        () => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message || 'No se pudo inyectar la tool de Bold.'));
+            return;
+          }
+          resolve(true);
+        }
+      );
+    });
+  }
+
+  function parseBoldExportResponse(response) {
+    if (!response || typeof response !== 'object') {
+      return {
+        message: 'Solicitud enviada. Si estas en Bold, usa el boton flotante "Descargar CSV".',
+        isError: false
+      };
+    }
+
+    if (response.ok === true) {
+      const count = Number(response.count);
+      if (Number.isFinite(count) && count > 0) {
+        return {
+          message: `CSV descargado con ${count} movimientos.`,
+          isError: false
+        };
+      }
+
+      return {
+        message: String(response.message || 'CSV descargado.').trim() || 'CSV descargado.',
+        isError: false
+      };
+    }
+
+    const message = String(response.message || 'No se encontraron movimientos para exportar.').trim();
+    return {
+      message: message || 'No se encontraron movimientos para exportar.',
+      isError: false
+    };
+  }
+
+  async function applyBoldExportInActiveTab() {
+    setStatus(boldExportStatus, 'Ejecutando exportacion...', false, { loading: true });
+
+    let tab = null;
+    try {
+      tab = await queryActiveTabInLastFocusedWindow();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo consultar la pestana activa.';
+      setStatus(boldExportStatus, message, true);
+      return;
+    }
+
+    if (!tab || typeof tab.id !== 'number') {
+      setStatus(boldExportStatus, 'No se encontro pestana activa.', true);
+      return;
+    }
+
+    if (!isBoldMovementsTabUrl(tab.url || '')) {
+      setStatus(
+        boldExportStatus,
+        'La pestana activa no es compatible (abre la pagina de movimientos unicos en Bold).',
+        true
+      );
+      return;
+    }
+
+    const payload = { type: APPLY_MESSAGE_TYPE };
+    let attempt = await sendMessageToTab(tab.id, payload);
+    if (attempt.ok) {
+      const parsed = parseBoldExportResponse(attempt.response);
+      setStatus(boldExportStatus, parsed.message, parsed.isError === true);
+      return;
+    }
+
+    if (!isNoReceiverRuntimeError(attempt.error)) {
+      setStatus(
+        boldExportStatus,
+        String(attempt.error || 'No se pudo ejecutar la exportacion en la pestana activa.').trim(),
+        true
+      );
+      return;
+    }
+
+    try {
+      await injectBoldCsvScriptsInTab(tab.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo inyectar la tool de Bold.';
+      setStatus(
+        boldExportStatus,
+        `${message} Recarga la pestana de Bold y vuelve a intentar.`,
+        true
+      );
+      return;
+    }
+
+    attempt = await sendMessageToTab(tab.id, payload);
+    if (!attempt.ok) {
+      setStatus(
+        boldExportStatus,
+        'No se pudo conectar con la herramienta de Bold en esta pestana. Recarga y vuelve a intentar.',
+        true
+      );
+      return;
+    }
+
+    const parsed = parseBoldExportResponse(attempt.response);
+    setStatus(boldExportStatus, parsed.message, parsed.isError === true);
+  }
+
+  function applyInActiveTab(options = {}) {
+    const statusElement = options.statusElement || retoolStatus;
+    const tabsApiUnavailableMessage = String(options.tabsApiUnavailableMessage || 'API de tabs no disponible en este contexto.').trim();
+    const activeTabNotFoundMessage = String(options.activeTabNotFoundMessage || 'No se encontro pestana activa.').trim();
+    const incompatibleMessage = String(
+      options.incompatibleMessage || 'La pestana activa no es compatible (abre una app de Retool).'
+    ).trim();
+    const successMessage = String(options.successMessage || 'Tool aplicada en la pestana activa.').trim();
+    const requestPayload =
+      options.requestPayload && typeof options.requestPayload === 'object'
+        ? { ...options.requestPayload }
+        : { type: APPLY_MESSAGE_TYPE };
+    const onResponse = typeof options.onResponse === 'function' ? options.onResponse : null;
+
     if (!chrome.tabs || !chrome.tabs.query) {
-      setStatus(retoolStatus, 'API de tabs no disponible en este contexto.', true);
+      setStatus(statusElement, tabsApiUnavailableMessage, true);
       return;
     }
 
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs && tabs[0];
       if (!tab || typeof tab.id !== 'number') {
-        setStatus(retoolStatus, 'No se encontro pestana activa.', true);
+        setStatus(statusElement, activeTabNotFoundMessage, true);
         return;
       }
 
-      chrome.tabs.sendMessage(tab.id, { type: APPLY_MESSAGE_TYPE }, () => {
+      chrome.tabs.sendMessage(tab.id, requestPayload, (response) => {
         if (chrome.runtime.lastError) {
-          setStatus(retoolStatus, 'La pestana activa no es compatible (abre una app de Retool).', true);
+          setStatus(statusElement, incompatibleMessage, true);
           return;
         }
 
-        setStatus(retoolStatus, 'Tool aplicada en la pestana activa.');
+        if (onResponse) {
+          const handled = onResponse(response);
+          if (typeof handled === 'string' && handled.trim()) {
+            setStatus(statusElement, handled.trim(), false);
+            return;
+          }
+
+          if (handled && typeof handled === 'object') {
+            const message = String(handled.message || '').trim();
+            if (message) {
+              setStatus(statusElement, message, handled.isError === true);
+              return;
+            }
+          }
+        }
+
+        setStatus(statusElement, successMessage);
       });
     });
   }
@@ -14509,6 +15549,14 @@ export function initPanelApp() {
     updateImageQualityLabel(imageQuality.value);
 
     retoolToggle.checked = Boolean(settings[TOOL_KEYS.RETOOL_LAYOUT_CLEANUP]);
+    if (nuwweAutoLoginToggle) {
+      nuwweAutoLoginToggle.checked = Boolean(settings[TOOL_KEYS.NUWWE_AUTO_LOGIN]);
+    }
+    void hydrateNuwweCredentialsToolUi().catch((error) => {
+      logWarn('hydrateSettings:nuwwe_credentials_hydrate_failed', {
+        error: error instanceof Error ? error.message : String(error || '')
+      });
+    });
 
     const storedTheme =
       typeof settings[PREFERENCE_KEYS.UI_THEME_MODE] === 'string'
@@ -14517,10 +15565,13 @@ export function initPanelApp() {
     applyTheme(storedTheme);
   }
 
-  async function hydratePanelSettings() {
+  async function hydratePanelSettings(options = {}) {
     if (!settingsScreenController) {
       return;
     }
+
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const syncIdentity = safeOptions.syncIdentity !== false;
 
     await settingsScreenController.hydratePanelSettings();
     panelSettings = { ...settingsScreenController.getPanelSettings() };
@@ -14541,9 +15592,19 @@ export function initPanelApp() {
     syncLocationContextToBackground(panelSettings.integrations, {
       reason: 'panel_hydrate'
     });
-    await contextMemoryService.syncIdentityProfile({
+
+    const syncIdentityTask = contextMemoryService.syncIdentityProfile({
       user_name: panelSettings.displayName || ''
     });
+    if (syncIdentity) {
+      await syncIdentityTask;
+    } else {
+      void syncIdentityTask.catch((error) => {
+        logWarn('hydratePanelSettings:identity_sync_failed', {
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+      });
+    }
   }
 
   async function handleOnboardingContinue() {
@@ -14901,6 +15962,49 @@ export function initPanelApp() {
     }
   }
 
+  async function runPostCriticalHydration(initialScreen = '') {
+    const safeScreen = String(initialScreen || '').trim();
+    const [brandResult, historyResult, modelsResult] = await Promise.allSettled([
+      hydrateBrandEmotions(),
+      hydrateChatHistory(),
+      refreshLocalModels({ silent: true })
+    ]);
+
+    if (brandResult.status === 'rejected') {
+      logWarn('init:hydrateBrandEmotions_failed', {
+        error: brandResult.reason instanceof Error ? brandResult.reason.message : String(brandResult.reason || '')
+      });
+    }
+
+    if (historyResult.status === 'rejected') {
+      logWarn('init:hydrateChatHistory_failed', {
+        error: historyResult.reason instanceof Error ? historyResult.reason.message : String(historyResult.reason || '')
+      });
+    }
+
+    if (modelsResult.status === 'rejected') {
+      logWarn('init:refreshLocalModels_failed', {
+        error: modelsResult.reason instanceof Error ? modelsResult.reason.message : String(modelsResult.reason || '')
+      });
+    }
+
+    syncModelSelectors();
+    renderAiModelsSettings();
+
+    const activeProfile = getActiveModelProfile();
+    const hasReadinessWarning = applyChatModelReadinessStatus();
+    if (!chatHistory.length && !hasReadinessWarning && activeProfile && activeProfile.provider === AI_PROVIDER_IDS.OLLAMA) {
+      setStatus(chatStatus, `Precargando ${activeProfile.model}...`, false, { loading: true });
+      warmupPrimaryModel();
+    } else if (!chatHistory.length && !hasReadinessWarning && activeProfile) {
+      setStatus(chatStatus, `Modelo principal: ${activeProfile.name} (${activeProfile.model}).`);
+    }
+
+    if (safeScreen === 'home') {
+      requestChatBottomAlign(16, 90);
+    }
+  }
+
   function wireEvents() {
     const handleAppMouseMove = (event) => {
       if (!app) {
@@ -14927,7 +16031,7 @@ export function initPanelApp() {
     });
 
     openToolsBtn?.addEventListener('click', () => {
-      openTools('image');
+      openTools();
     });
 
     openSettingsBtn?.addEventListener('click', () => {
@@ -14944,6 +16048,12 @@ export function initPanelApp() {
     });
 
     goHomeBtn?.addEventListener('click', () => {
+      if (isToolsScreenActive() && toolsScreenController?.getCurrentPage() === 'detail') {
+        toolsScreenController.openHome();
+        setDropUi(false);
+        return;
+      }
+
       blinkBrandEmotion({ force: true, preserveRandom: true });
       goToPrimaryScreen();
     });
@@ -15313,6 +16423,7 @@ export function initPanelApp() {
       syncModelSelectors();
       renderAiModelsSettings();
       renderPinStatus();
+      void hydrateNuwweCredentialsToolUi();
       setStatus(aiModelsStatus, 'PIN bloqueado.');
     });
 
@@ -15412,12 +16523,6 @@ export function initPanelApp() {
     settingsThemeModeSelect?.addEventListener('change', () => {
       void setThemeMode(settingsThemeModeSelect.value, { silent: false });
     });
-
-    for (const tab of toolTabs) {
-      tab.addEventListener('click', () => {
-        setActiveTool(tab.dataset.toolTarget || 'image');
-      });
-    }
 
     if (prefersDarkMedia) {
       const onSystemThemeChange = () => {
@@ -15689,7 +16794,7 @@ export function initPanelApp() {
       event.preventDefault();
       dragDepth = 0;
       setDropUi(false);
-      openTools('image');
+      openTools(TOOL_IDS.IMAGE);
       addImageFiles(event.dataTransfer ? event.dataTransfer.files : []);
     });
 
@@ -15703,8 +16808,30 @@ export function initPanelApp() {
       setStatus(retoolStatus, `Retool Cleanup ${retoolToggle.checked ? 'activada' : 'desactivada'}.`);
     });
 
+    nuwweAutoLoginToggle?.addEventListener('change', async () => {
+      const ok = await saveSettings({ [TOOL_KEYS.NUWWE_AUTO_LOGIN]: nuwweAutoLoginToggle.checked });
+      if (!ok) {
+        setStatus(nuwweAutoLoginStatus, 'No se pudo guardar la configuracion de Nuwwe Auto Login.', true);
+        return;
+      }
+
+      setStatus(nuwweAutoLoginStatus, `Nuwwe Auto Login ${nuwweAutoLoginToggle.checked ? 'activada' : 'desactivada'}.`);
+    });
+
+    nuwweSaveCredentialsBtn?.addEventListener('click', () => {
+      void saveNuwweCredentialsFromToolScreen();
+    });
+
+    nuwweClearCredentialsBtn?.addEventListener('click', () => {
+      void clearNuwweCredentialsFromToolScreen();
+    });
+
     applyRetoolBtn?.addEventListener('click', () => {
       applyInActiveTab();
+    });
+
+    applyBoldExportBtn?.addEventListener('click', () => {
+      void applyBoldExportInActiveTab();
     });
 
     window.addEventListener('beforeunload', () => {
@@ -15736,19 +16863,20 @@ export function initPanelApp() {
     });
 
     window.addEventListener('focus', () => {
-      requestChatAutofocus(8, 70);
+      requestPrimaryScreenAutofocus(app?.dataset?.screen || '', 8, 70);
       scheduleStageStabilization(app?.dataset?.screen || '');
     });
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
-        requestChatAutofocus(8, 70);
+        requestPrimaryScreenAutofocus(app?.dataset?.screen || '', 8, 70);
         scheduleStageStabilization(app?.dataset?.screen || '');
       }
     });
   }
 
   async function init() {
+    const initStartedAt = Date.now();
     setAppBootstrapState(false);
     try {
       settingsScreenState = {
@@ -15787,6 +16915,23 @@ export function initPanelApp() {
         setThemeMode,
         onAfterHydrate: normalizePanelModelSettings
       });
+      toolsScreenController = createToolsScreenController({
+        elements: {
+          toolsShell,
+          toolsTitle,
+          goHomeBtn,
+          toolsHomeScreen,
+          toolsDetailScreen,
+          toolsHomeList,
+          toolsDetailPages
+        },
+        tools: TOOLS_CATALOG,
+        defaultToolId: TOOL_IDS.IMAGE,
+        onChange: () => {
+          setDropUi(dragDepth > 0);
+        }
+      });
+      toolsScreenController.init();
 
       setStageTransitionEnabled(false);
       realignStageToScreen(app?.dataset?.screen || 'onboarding');
@@ -15801,15 +16946,29 @@ export function initPanelApp() {
       hideWhatsappSuggestion();
       renderTabsContextJson();
 
-      await contextMemoryService.init();
-      await hydrateWhatsappAliasBook();
+      const contextMemoryInitPromise = contextMemoryService.init().catch((error) => {
+        logWarn('init:context_memory_init_failed', {
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+      });
+      const aliasHydrationPromise = hydrateWhatsappAliasBook().catch((error) => {
+        logWarn('init:whatsapp_alias_hydrate_failed', {
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+      });
+      const tabContextStartPromise = tabContextService.start().catch((error) => {
+        logWarn('init:tab_context_start_failed', {
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+      });
       void syncWhatsappAliasesFromIndexedDb({ force: true }).catch(() => {});
-      await tabContextService.start();
 
-      await hydrateSettings();
-      await hydratePanelSettings();
-      void runInitialContextBootstrap();
-      setActiveTool('image');
+      await Promise.all([
+        hydrateSettings(),
+        hydratePanelSettings({
+          syncIdentity: false
+        })
+      ]);
       const initialScreen = resolveHomeOrOnboardingScreen();
       setScreen(initialScreen);
       if (typeof requestAnimationFrame === 'function') {
@@ -15821,29 +16980,27 @@ export function initPanelApp() {
       }
       scheduleStageStabilization(initialScreen);
 
-      await hydrateBrandEmotions();
-      await hydrateChatHistory();
-      await refreshLocalModels({ silent: true });
-      syncModelSelectors();
-      renderAiModelsSettings();
-
-      const activeProfile = getActiveModelProfile();
-      const hasReadinessWarning = applyChatModelReadinessStatus();
-      if (!chatHistory.length && !hasReadinessWarning && activeProfile && activeProfile.provider === AI_PROVIDER_IDS.OLLAMA) {
-        setStatus(chatStatus, `Precargando ${activeProfile.model}...`, false, { loading: true });
-        warmupPrimaryModel();
-      } else if (!chatHistory.length && !hasReadinessWarning && activeProfile) {
-        setStatus(chatStatus, `Modelo principal: ${activeProfile.name} (${activeProfile.model}).`);
-      }
-
       if (initialScreen === 'home') {
         requestChatBottomAlign(20, 80);
-        requestChatAutofocus(10, 80);
-      } else {
-        onboardingAssistantNameInput?.focus();
       }
+      requestPrimaryScreenAutofocus(initialScreen, 12, 90);
 
       scheduleStageStabilization(initialScreen);
+      window.setTimeout(() => {
+        void runInitialContextBootstrap();
+      }, 120);
+
+      void Promise.allSettled([contextMemoryInitPromise, aliasHydrationPromise, tabContextStartPromise]).then(() => {
+        logDebug('init:background_core_ready', {
+          elapsedMs: Date.now() - initStartedAt
+        });
+      });
+
+      void runPostCriticalHydration(initialScreen).then(() => {
+        logDebug('init:post_critical_ready', {
+          elapsedMs: Date.now() - initStartedAt
+        });
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo inicializar el panel.';
       setStatus(chatStatus, message, true);

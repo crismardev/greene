@@ -2,7 +2,9 @@
   'use strict';
 
   const TOOL_KEYS = Object.freeze({
-    RETOOL_LAYOUT_CLEANUP: 'tool_retool_layout_cleanup'
+    RETOOL_LAYOUT_CLEANUP: 'tool_retool_layout_cleanup',
+    BOLD_EXPORT_MOVEMENTS_CSV: 'tool_bold_export_movements_csv',
+    NUWWE_AUTO_LOGIN: 'tool_nuwwe_auto_login'
   });
 
   const PREFERENCE_KEYS = Object.freeze({
@@ -29,6 +31,18 @@
       status: 'active'
     },
     {
+      key: TOOL_KEYS.BOLD_EXPORT_MOVEMENTS_CSV,
+      title: 'Export moveemtns to csv',
+      description: 'Detecta movimientos en Bold y prepara un CSV limpio descargable.',
+      status: 'active'
+    },
+    {
+      key: TOOL_KEYS.NUWWE_AUTO_LOGIN,
+      title: 'Nuwwe Auto Login',
+      description: 'Completa usuario/password/codigo empresa y envia login automaticamente.',
+      status: 'active'
+    },
+    {
       key: TOOL_KEYS.RETOOL_LAYOUT_CLEANUP,
       title: 'Retool Layout Cleanup',
       description: 'Oculta el header de Retool y reajusta el canvas.',
@@ -38,6 +52,8 @@
 
   const DEFAULT_SETTINGS = Object.freeze({
     [TOOL_KEYS.RETOOL_LAYOUT_CLEANUP]: true,
+    [TOOL_KEYS.BOLD_EXPORT_MOVEMENTS_CSV]: true,
+    [TOOL_KEYS.NUWWE_AUTO_LOGIN]: true,
     [PREFERENCE_KEYS.AI_PROVIDER]: 'ollama',
     [PREFERENCE_KEYS.AI_MODEL_OLLAMA]: 'gpt-oss:20b',
     [PREFERENCE_KEYS.AI_MODEL_HF]: 'Qwen/Qwen2.5-7B-Instruct',

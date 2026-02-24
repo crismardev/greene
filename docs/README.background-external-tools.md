@@ -58,6 +58,8 @@ Adicionalmente, para Retool sandbox, el mismo catalogo se puede invocar por `chr
 - `WHATSAPP_OPEN_CHAT`
 - `WHATSAPP_SEND_MESSAGE`
 - `WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE`
+- `WHATSAPP_ARCHIVE_CHATS`
+- `WHATSAPP_ARCHIVE_GROUPS`
 - `HELP`
 
 ### OPEN_WHATSAPP
@@ -146,6 +148,17 @@ chrome.runtime.sendMessage('<EXTENSION_ID>', {
 ```
 
 Si agregas `phone/query/name/chat`, el background enruta a `openChatAndSendMessage` y el handler valida que el numero del chat coincida antes de enviar.
+
+### 4) Archivar grupos del inbox de WhatsApp
+
+```js
+chrome.runtime.sendMessage('<EXTENSION_ID>', {
+  type: 'WHATSAPP_ARCHIVE_GROUPS',
+  args: { dryRun: false, limit: 80 }
+}, console.log);
+```
+
+Si quieres probar primero sin cambios reales, usa `dryRun: true`.
 
 ## Seguridad de origen externo
 

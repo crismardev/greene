@@ -854,7 +854,8 @@ export function createAiProviderService({
     audioBlob,
     model = 'gpt-4o-mini-transcribe',
     language = 'es',
-    prompt = ''
+    prompt = '',
+    signal = null
   }) {
     const token = String(apiKey || '').trim();
     if (!token) {
@@ -902,7 +903,8 @@ export function createAiProviderService({
       headers: {
         Authorization: `Bearer ${token}`
       },
-      body: formData
+      body: formData,
+      signal: signal || undefined
     });
 
     const payload = await parseJsonSafe(response);

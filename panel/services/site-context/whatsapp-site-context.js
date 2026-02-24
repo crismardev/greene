@@ -4,11 +4,21 @@ export const DEFAULT_WHATSAPP_REPLY_PROMPT_BASE = Object.freeze(
   [
     'Eres asistente para responder WhatsApp.',
     'Devuelve un unico mensaje corto listo para enviar (maximo 180 caracteres).',
-    'No siempre debes ser proactiva: adapta tono y nivel de iniciativa al historial.',
-    'Solo haz una pregunta cuando realmente desbloquee el chat.',
-    'Si conviene, sugiere una respuesta neutral o no comprometida en vez de prometer.',
+    'Adapta tono e iniciativa al historial real del chat.',
+    'No conviertas todas las respuestas en preguntas; usa afirmaciones naturales cuando sea mejor.',
+    'Evita compromisos fuertes o promesas si no fueron solicitados.',
     'No expliques ni uses encabezados.',
-    'Si el contexto no alcanza, devuelve una pregunta corta para pedir claridad.'
+    'Si el contexto no alcanza, devuelve una frase neutra y breve sin inventar datos.'
+  ].join('\n')
+);
+
+const WHATSAPP_REPLY_HARD_RULES = Object.freeze(
+  [
+    'Reglas obligatorias de salida:',
+    '- Escribe siempre desde la perspectiva de "Yo" (el usuario), nunca como si fueras el contacto.',
+    '- Si el ultimo mensaje es mio, evita sonar insistente o abrir otra pregunta innecesaria.',
+    '- Si el ultimo mensaje es del contacto, responde a ese turno sin cambiar de hablante.',
+    '- No uses preguntas salvo que sean necesarias para destrabar la conversacion.'
   ].join('\n')
 );
 
@@ -149,7 +159,7 @@ export function buildWhatsappSignalKey(tabContext) {
   const tail = messages
     .slice(-6)
     .map((item) =>
-      [item?.id || '', item?.kind || '', item?.text || '', item?.transcript || '', item?.ocrText || '']
+      [item?.id || '', item?.role || '', item?.kind || '', item?.text || '', item?.transcript || '', item?.ocrText || '']
         .filter(Boolean)
         .join(':')
     )
@@ -257,10 +267,42 @@ function describeMyResponseStyle(messages) {
 
   const avgLength = Math.round(mine.reduce((acc, item) => acc + String(item.text || '').length, 0) / mine.length);
   const questionCount = mine.filter((item) => String(item.text || '').includes('?')).length;
+  const commitmentCount = mine.filter((item) =>
+    /\b(voy|te confirmo|confirmo|agendo|agendamos|mañana|hoy te|quedo atento|quedamos)\b/i.test(String(item.text || ''))
+  ).length;
   const directness = avgLength <= 75 ? 'directo y corto' : avgLength <= 140 ? 'equilibrado' : 'detallado';
   const asksQuestions = questionCount >= Math.ceil(mine.length / 2) ? 'hace preguntas frecuente' : 'hace pocas preguntas';
+  const commitmentStyle =
+    commitmentCount >= Math.ceil(mine.length / 2) ? 'tiende a comprometerse' : 'evita compromisos innecesarios';
 
-  return `Estilo detectado de "Yo": ${directness}; ${asksQuestions}; largo promedio ${avgLength} chars.`;
+  return `Estilo detectado de "Yo": ${directness}; ${asksQuestions}; ${commitmentStyle}; largo promedio ${avgLength} chars.`;
+}
+
+function buildLastTurnGuidance(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const last = list.length ? list[list.length - 1] : null;
+  if (!last) {
+    return 'Ultimo turno: sin mensajes visibles.';
+  }
+
+  const lastRole = last.role === 'me' ? 'me' : 'contact';
+  const lastText = toSafeText(last.text || '', 220);
+  const askedQuestion = /\?/.test(lastText);
+
+  if (lastRole === 'me') {
+    return [
+      `Ultimo turno: Yo (${lastText || 'sin texto'}).`,
+      'No respondas como si fueras el contacto.',
+      'Sugiere un seguimiento breve y natural solo si aporta valor.'
+    ].join(' ');
+  }
+
+  return [
+    `Ultimo turno: Contacto (${lastText || 'sin texto'}).`,
+    askedQuestion
+      ? 'El contacto hizo una pregunta; respondela directo y claro.'
+      : 'Responde desde mi voz con tono natural y sin comprometer de mas.'
+  ].join(' ');
 }
 
 function formatMessageForPrompt(item) {
@@ -302,9 +344,10 @@ export function buildWhatsappReplyPrompt(tabContext, options = {}) {
   const messagesList = getWhatsappMessages(tabContext, 28);
   const messages = messagesList.map((item) => formatMessageForPrompt(item)).join('\n');
   const styleHint = describeMyResponseStyle(messagesList);
+  const lastTurnHint = buildLastTurnGuidance(messagesList);
   const basePrompt = String(options.basePrompt || DEFAULT_WHATSAPP_REPLY_PROMPT_BASE).trim() || DEFAULT_WHATSAPP_REPLY_PROMPT_BASE;
   const chatPrompt = toSafeText(options.chatPrompt || '', 1800);
-  const lines = [basePrompt];
+  const lines = [basePrompt, '', WHATSAPP_REPLY_HARD_RULES];
 
   if (chatPrompt) {
     lines.push('', 'Personalizacion especifica para este chat:', chatPrompt);
@@ -315,6 +358,7 @@ export function buildWhatsappReplyPrompt(tabContext, options = {}) {
     `Mi numero: ${myNumber || 'N/A'}`,
     `Chat: ${chatLabel}`,
     styleHint,
+    lastTurnHint,
     'Conversacion reciente:',
     messages || 'Sin mensajes recientes.',
     '',

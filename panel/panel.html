@@ -113,7 +113,7 @@
             <footer class="chat-composer">
               <div class="chat-input-row flex flex-col">
                 <label class="sr-only" for="chatInput">Mensaje</label>
-                <textarea autofocus id="chatInput" rows="1" placeholder="Ask anything"></textarea>
+                <textarea id="chatInput" rows="1" placeholder="Ask anything"></textarea>
                 <input id="chatAttachmentInput" class="sr-only" type="file" multiple />
                 <div id="chatAttachmentsBar" class="chat-attachments" hidden></div>
                 <div class="flex w-full justify-between items-center gap-12">
@@ -180,9 +180,8 @@
           </article>
         </section>
 
-        <section class="screen screen--tools" id="toolsScreen" data-screen-name="tools" data-tool="image" style="--tool-index: 0; --tool-count: 2"
-          aria-label="Tools">
-          <article class="tools-shell">
+        <section class="screen screen--tools" id="toolsScreen" data-screen-name="tools" aria-label="Tools">
+          <article class="tools-shell" id="toolsShell" data-tools-page="home" data-tool="image">
             <header class="tools-head">
               <button id="goHomeBtn" class="icon-btn icon-btn--ghost icon-btn--back" type="button" aria-label="Volver al chat" title="Volver">
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -190,65 +189,104 @@
                     stroke-linejoin="round"></path>
                 </svg>
               </button>
-              <h2>Tools</h2>
+              <h2 id="toolsTitle">Tools</h2>
             </header>
 
             <section class="tools-body">
-              <nav class="tool-tabs" aria-label="Tool selector">
-                <button type="button" class="tool-tab is-active" data-tool-target="image">Image WebP</button>
-                <button type="button" class="tool-tab" data-tool-target="retool">Retool</button>
-              </nav>
+              <section id="toolsHomeScreen" class="tools-page tools-page--home" aria-label="Tools Home">
+                <div id="toolsHomeList" class="tools-home-list" role="list"></div>
+              </section>
 
-              <div class="tool-viewport">
-                <div class="tool-track" id="toolTrack">
-                  <section class="tool-pane" data-tool-pane="image">
-                    <article class="tool-card">
-                      <h3>Image to WebP</h3>
+              <section id="toolsDetailScreen" class="tools-page tools-page--detail" aria-label="Detalle de tool" hidden>
+                <article class="tool-card tools-detail-page" data-tool-page="image" hidden>
+                  <h3>Image to WebP</h3>
 
-                      <div id="imageDropzone" class="image-dropzone" role="button" tabindex="0" aria-label="Agregar imagenes">
-                        <input id="imageInput" class="sr-only" type="file" multiple
-                          accept="image/png,image/jpg,image/jpeg,image/gif,image/bmp" />
-                        <p>Arrastra hasta 10 imagenes aqui o en cualquier parte de la pantalla.</p>
-                        <button id="imagePickBtn" class="btn btn--ghost" type="button">Agregar imagenes</button>
-                      </div>
+                  <div id="imageDropzone" class="image-dropzone" role="button" tabindex="0" aria-label="Agregar imagenes">
+                    <input id="imageInput" class="sr-only" type="file" multiple
+                      accept="image/png,image/jpg,image/jpeg,image/gif,image/bmp" />
+                    <p>Arrastra hasta 10 imagenes aqui o en cualquier parte de la pantalla.</p>
+                    <button id="imagePickBtn" class="btn btn--ghost" type="button">Agregar imagenes</button>
+                  </div>
 
-                      <section class="quality-control" aria-label="Calidad de compresion WebP">
-                        <div class="quality-control__head">
-                          <span class="quality-control__label">Calidad WebP</span>
-                          <strong id="imageQualityValue" class="quality-control__value">0.90</strong>
-                        </div>
-                        <input id="imageQuality" class="quality-slider" type="range" min="0.1" max="1" step="0.05" value="0.9" />
-                      </section>
-
-                      <div class="actions">
-                        <button id="imageClearBtn" class="btn btn--ghost" type="button">Limpiar</button>
-                      </div>
-
-                      <ul id="imageQueueList" class="image-queue" aria-live="polite"></ul>
-
-                      <p id="imageStatus" class="status" role="status"></p>
-                    </article>
+                  <section class="quality-control" aria-label="Calidad de compresion WebP">
+                    <div class="quality-control__head">
+                      <span class="quality-control__label">Calidad WebP</span>
+                      <strong id="imageQualityValue" class="quality-control__value">0.90</strong>
+                    </div>
+                    <input id="imageQuality" class="quality-slider" type="range" min="0.1" max="1" step="0.05" value="0.9" />
                   </section>
 
-                  <section class="tool-pane" data-tool-pane="retool">
-                    <article class="tool-card">
-                      <h3>Retool Layout Cleanup</h3>
-                      <p class="tool-copy">Esta tool se aplica sobre paginas de Retool (`https://*.retool.com/apps/*`).</p>
+                  <div class="actions">
+                    <button id="imageClearBtn" class="btn btn--ghost" type="button">Limpiar</button>
+                  </div>
 
-                      <label class="switch-line">
-                        <span>Tool activa</span>
-                        <span class="switch">
-                          <input id="retoolToggle" type="checkbox" aria-label="Activar Retool Layout Cleanup" />
-                          <span class="slider"></span>
-                        </span>
-                      </label>
+                  <ul id="imageQueueList" class="image-queue" aria-live="polite"></ul>
 
-                      <button id="applyRetoolBtn" class="btn" type="button">Aplicar ahora en pestana activa</button>
-                      <p id="retoolStatus" class="status" role="status"></p>
-                    </article>
-                  </section>
-                </div>
-              </div>
+                  <p id="imageStatus" class="status" role="status"></p>
+                </article>
+
+                <article class="tool-card tools-detail-page" data-tool-page="retool" hidden>
+                  <h3>Retool Layout Cleanup</h3>
+                  <p class="tool-copy">Esta tool se aplica sobre paginas de Retool (`https://*.retool.com/apps/*`).</p>
+
+                  <label class="switch-line">
+                    <span>Tool activa</span>
+                    <span class="switch">
+                      <input id="retoolToggle" type="checkbox" aria-label="Activar Retool Layout Cleanup" />
+                      <span class="slider"></span>
+                    </span>
+                  </label>
+
+                  <button id="applyRetoolBtn" class="btn" type="button">Aplicar ahora en pestana activa</button>
+                  <p id="retoolStatus" class="status" role="status"></p>
+                </article>
+
+                <article class="tool-card tools-detail-page" data-tool-page="bold_export_csv" hidden>
+                  <h3>Export moveemtns to csv</h3>
+                  <p class="tool-copy">Tool para Bold que detecta movimientos reales y prepara un CSV limpio.</p>
+                  <p class="tool-copy">URL: https://cuenta.bold.co/midinero/deposito/movimientos/unicos</p>
+                  <p class="tool-copy">En esa pagina se agrega automaticamente un boton flotante para descargar CSV cuando existan movimientos.</p>
+
+                  <button id="applyBoldExportBtn" class="btn" type="button">Ejecutar exportacion en pestana activa</button>
+                  <p id="boldExportStatus" class="status" role="status"></p>
+                </article>
+
+                <article class="tool-card tools-detail-page" data-tool-page="nuwwe_auto_login" hidden>
+                  <h3>Nuwwe Auto Login</h3>
+                  <p class="tool-copy">URL: https://nuwwe.com/login</p>
+                  <p class="tool-copy">Autocompleta usuario, password y codigo de empresa, acepta politicas e intenta ingresar automaticamente.</p>
+
+                  <label class="switch-line">
+                    <span>Tool activa</span>
+                    <span class="switch">
+                      <input id="nuwweAutoLoginToggle" type="checkbox" aria-label="Activar Nuwwe Auto Login" />
+                      <span class="slider"></span>
+                    </span>
+                  </label>
+
+                  <label class="field">
+                    <span>Usuario</span>
+                    <input id="nuwweUsernameInput" type="text" placeholder="USUARIO_PROBAR" autocomplete="off" />
+                  </label>
+
+                  <label class="field">
+                    <span>Password</span>
+                    <input id="nuwwePasswordInput" type="password" placeholder="Pass12345!" autocomplete="off" />
+                  </label>
+
+                  <label class="field">
+                    <span>Codigo empresa</span>
+                    <input id="nuwweCompanyCodeInput" type="text" placeholder="EMP_999" autocomplete="off" />
+                  </label>
+
+                  <div class="actions actions--tight">
+                    <button id="nuwweSaveCredentialsBtn" class="btn" type="button">Guardar credenciales cifradas</button>
+                    <button id="nuwweClearCredentialsBtn" class="btn btn--ghost" type="button">Eliminar credenciales</button>
+                  </div>
+
+                  <p id="nuwweAutoLoginStatus" class="status" role="status"></p>
+                </article>
+              </section>
             </section>
           </article>
         </section>
@@ -786,7 +824,7 @@
           <input id="pinInput" type="hidden" autocomplete="off" />
           <div class="pin-code-inputs" data-pin-group="pin">
             <input class="pin-digit-input" data-pin-target="pin" data-pin-index="0" type="password" inputmode="numeric" maxlength="1"
-              pattern="[0-9]" aria-label="Digito 1 del PIN" autocomplete="one-time-code" autofocus />
+              pattern="[0-9]" aria-label="Digito 1 del PIN" autocomplete="one-time-code" />
             <input class="pin-digit-input" data-pin-target="pin" data-pin-index="1" type="password" inputmode="numeric" maxlength="1"
               pattern="[0-9]" aria-label="Digito 2 del PIN" autocomplete="one-time-code" />
             <input class="pin-digit-input" data-pin-target="pin" data-pin-index="2" type="password" inputmode="numeric" maxlength="1"

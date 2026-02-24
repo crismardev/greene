@@ -84,6 +84,27 @@
         "src/content.js"
       ],
       "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://cuenta.bold.co/midinero/deposito/movimientos/unicos*"
+      ],
+      "js": [
+        "src/tool-config.js",
+        "src/content-bold-movements.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://nuwwe.com/login*",
+        "https://www.nuwwe.com/login*"
+      ],
+      "js": [
+        "src/tool-config.js",
+        "src/content-nuwwe-login.js"
+      ],
+      "run_at": "document_idle"
     }
   ]
 }

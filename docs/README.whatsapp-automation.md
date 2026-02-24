@@ -45,6 +45,8 @@ Tipos externos mapeados:
 - `WHATSAPP_OPEN_CHAT` -> `openChat`
 - `WHATSAPP_SEND_MESSAGE` -> `sendMessage`
 - `WHATSAPP_OPEN_CHAT_AND_SEND_MESSAGE` -> `openChatAndSendMessage`
+- `WHATSAPP_ARCHIVE_CHATS` -> `archiveChats`
+- `WHATSAPP_ARCHIVE_GROUPS` -> `archiveGroups`
 
 Si no hay tab de WhatsApp abierta, devuelve error y recomienda usar `OPEN_WHATSAPP`.
 

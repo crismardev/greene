@@ -6,6 +6,7 @@
   const LOG_PREFIX = '[greene/whatsapp-handler]';
   const ENABLE_SCRAPE_DEBUG_LOGS = true;
   const CONTEXT_LOG_MIN_INTERVAL_MS = 1800;
+  const CHAT_TARGET_LOG_MIN_INTERVAL_MS = 420;
   const CHAT_SYNC_STORAGE_KEY = 'greene_whatsapp_sync_state_v1';
   const CHAT_SYNC_VERSION = 1;
   const CHAT_SYNC_MAX_CHATS = 120;
@@ -13,6 +14,10 @@
   const USER_MESSAGE_CONTAINER_SELECTOR =
     '#main div.x3psx0u.x12xbjc7.x1c1uobl.xrmvbpv.xh8yej3.xquzyny.xvc5jky.x11t971q';
   const contextLogState = {
+    signature: '',
+    at: 0
+  };
+  const chatTargetLogState = {
     signature: '',
     at: 0
   };
@@ -957,10 +962,75 @@
     return baseText;
   }
 
+  function getRowDataId(row) {
+    if (!row) {
+      return '';
+    }
+
+    return toSafeText(row.getAttribute?.('data-id') || row.querySelector?.('[data-id]')?.getAttribute?.('data-id') || '', 180);
+  }
+
+  function matchesNormalizedPhone(left, right) {
+    const normalizedLeft = normalizePhone(left || '');
+    const normalizedRight = normalizePhone(right || '');
+    if (!normalizedLeft || !normalizedRight) {
+      return false;
+    }
+    return normalizedLeft === normalizedRight || normalizedLeft.endsWith(normalizedRight) || normalizedRight.endsWith(normalizedLeft);
+  }
+
+  function inferMessageRole(row, prePlainMeta = {}, myNumber = '') {
+    if (!row) {
+      return 'contact';
+    }
+
+    if (row.classList.contains('message-out') || row.querySelector('.message-out')) {
+      return 'me';
+    }
+
+    if (row.classList.contains('message-in') || row.querySelector('.message-in')) {
+      return 'contact';
+    }
+
+    const dataId = getRowDataId(row).toLowerCase();
+    if (dataId.startsWith('true_') || dataId.startsWith('true:')) {
+      return 'me';
+    }
+    if (dataId.startsWith('false_') || dataId.startsWith('false:')) {
+      return 'contact';
+    }
+
+    const dataTestId = toSafeText(row.getAttribute?.('data-testid') || '', 120).toLowerCase();
+    if (dataTestId.includes('out') && !dataTestId.includes('in')) {
+      return 'me';
+    }
+    if (dataTestId.includes('in') && !dataTestId.includes('out')) {
+      return 'contact';
+    }
+
+    if (row.querySelector('[data-icon="msg-check"], [data-icon="msg-dblcheck"]')) {
+      return 'me';
+    }
+
+    const author = toSafeText(prePlainMeta?.author || '', 120);
+    const normalizedAuthor = author.toLowerCase();
+    if (normalizedAuthor === 'you' || normalizedAuthor === 'yo' || normalizedAuthor === 'tu') {
+      return 'me';
+    }
+
+    const authorPhone = normalizePhone(author);
+    if (authorPhone && matchesNormalizedPhone(authorPhone, myNumber)) {
+      return 'me';
+    }
+
+    return 'contact';
+  }
+
   function getConversationMessages(options = {}) {
     const limit = Math.max(1, Number(options.limit) || 80);
     const rowSelection = collectMessageRows();
     const rows = Array.isArray(rowSelection.rows) ? rowSelection.rows : [];
+    const myNumber = normalizePhone(getMyNumber());
 
     const parsed = rows
       .map((row, index) => {
@@ -970,7 +1040,7 @@
           row.querySelector('.copyable-text')?.getAttribute('data-pre-plain-text') ||
           '';
         const prePlainMeta = parsePrePlainMetadata(prePlain);
-        const role = row.classList.contains('message-out') || row.querySelector('.message-out') ? 'me' : 'contact';
+        const role = inferMessageRole(row, prePlainMeta, myNumber);
         const baseText = getMessageText(row);
         const contentKind = detectMessageContentKind(row, baseText);
         const enrichment = extractMessageEnrichmentByKind(row, contentKind, baseText);
@@ -1160,32 +1230,128 @@
     return extractPhoneFromChatChannelId(channelId);
   }
 
-  async function waitForCurrentChatPhoneMatch(expectedPhoneDigits, timeoutMs = 2200, intervalMs = 90) {
-    const expectedDigits = normalizeDigitsToken(expectedPhoneDigits);
-    if (!expectedDigits) {
-      return {
-        ok: true,
-        expectedPhoneDigits: '',
-        currentPhone: '',
-        currentPhoneDigits: ''
-      };
+  function doesCurrentTitleMatchExpected(expectedTitleToken, currentTitleToken) {
+    const expected = normalizeLookupToken(expectedTitleToken || '');
+    const current = normalizeLookupToken(currentTitleToken || '');
+    if (!expected || !current) {
+      return false;
     }
 
-    const deadline = Date.now() + Math.max(400, Number(timeoutMs) || 2200);
-    const waitMs = Math.max(50, Number(intervalMs) || 90);
-    let currentPhone = '';
-    let currentDigits = '';
+    return expected === current || expected.includes(current) || current.includes(expected);
+  }
+
+  function collectExpectedChatTitleTokens(options = {}) {
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const safeArgs = safeOptions.args && typeof safeOptions.args === 'object' ? safeOptions.args : {};
+    const tokens = new Set();
+    const add = (value) => {
+      const token = normalizeLookupToken(value || '');
+      if (!token) {
+        return;
+      }
+      tokens.add(token);
+    };
+
+    add(safeOptions.expectedTitle || safeOptions.title || '');
+
+    for (const value of toStringArray(safeOptions.expectedTitles, 20)) {
+      add(value);
+    }
+
+    for (const value of getOpenChatQueries(safeArgs)) {
+      add(value);
+    }
+
+    return Array.from(tokens).slice(0, 20);
+  }
+
+  function getCurrentChatTargetState(options = {}) {
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const expectedPhoneDigits = normalizeDigitsToken(
+      safeOptions.expectedPhoneDigits || safeOptions.expectedPhone || safeOptions.phone || ''
+    );
+    const expectedTitleTokens = collectExpectedChatTitleTokens(safeOptions);
+    const currentPhoneRaw = getCurrentChatPhoneForVerification();
+    const currentPhoneDigits = normalizeDigitsToken(currentPhoneRaw);
+    const currentTitle = getCurrentChatTitle();
+    const currentTitleToken = normalizeLookupToken(currentTitle);
+    const phoneMatch = expectedPhoneDigits ? matchesPhoneDigits(expectedPhoneDigits, currentPhoneDigits) : false;
+    const titleMatch = expectedTitleTokens.some((token) => doesCurrentTitleMatchExpected(token, currentTitleToken));
+    const hasTargetExpectation = Boolean(expectedPhoneDigits || expectedTitleTokens.length);
+
+    return {
+      matched: hasTargetExpectation ? phoneMatch || titleMatch : true,
+      hasTargetExpectation,
+      phoneMatch,
+      titleMatch,
+      expectedPhoneDigits,
+      expectedTitleTokens,
+      currentPhone: normalizePhone(currentPhoneRaw || '') || toSafeText(currentPhoneRaw || '', 48),
+      currentPhoneDigits,
+      currentTitle: toSafeText(currentTitle || '', 180),
+      currentTitleToken
+    };
+  }
+
+  async function waitForCurrentChatTargetMatch(options = {}) {
+    const safeOptions = options && typeof options === 'object' ? options : {};
+    const timeoutMs = Math.max(450, Number(safeOptions.timeoutMs) || 3800);
+    const deadline = Date.now() + timeoutMs;
+    const waitMs = Math.max(50, Number(safeOptions.intervalMs) || 90);
+    const startedAt = Date.now();
+    let attempt = 0;
+
+    const initialState = getCurrentChatTargetState(safeOptions);
+    logDebug('chat_target_wait:start', {
+      timeoutMs,
+      intervalMs: waitMs,
+      expectedPhoneDigits: initialState.expectedPhoneDigits || '',
+      expectedTitleTokens: initialState.expectedTitleTokens || []
+    });
 
     while (Date.now() < deadline) {
-      currentPhone = getCurrentChatPhoneForVerification();
-      currentDigits = normalizeDigitsToken(currentPhone);
-      if (matchesPhoneDigits(expectedDigits, currentDigits)) {
+      attempt += 1;
+      const state = getCurrentChatTargetState(safeOptions);
+      if (state.matched) {
+        if (state.hasTargetExpectation) {
+          logDebug('chat_target_wait:matched', {
+            attempt,
+            elapsedMs: Date.now() - startedAt,
+            expectedPhoneDigits: state.expectedPhoneDigits || '',
+            expectedTitleTokens: state.expectedTitleTokens || [],
+            currentPhoneDigits: state.currentPhoneDigits || '',
+            currentTitle: state.currentTitle || '',
+            phoneMatch: Boolean(state.phoneMatch),
+            titleMatch: Boolean(state.titleMatch)
+          });
+        }
         return {
           ok: true,
-          expectedPhoneDigits: expectedDigits,
-          currentPhone: normalizePhone(currentPhone || '') || currentPhone,
-          currentPhoneDigits: currentDigits
+          attempt,
+          elapsedMs: Date.now() - startedAt,
+          ...state
         };
+      }
+
+      if (state.hasTargetExpectation && (attempt <= 2 || attempt % 9 === 0)) {
+        const signature = [
+          state.expectedPhoneDigits || '',
+          Array.isArray(state.expectedTitleTokens) ? state.expectedTitleTokens.join('|') : '',
+          state.currentPhoneDigits || '',
+          state.currentTitleToken || ''
+        ].join('::');
+        if (shouldEmitLog(chatTargetLogState, signature, CHAT_TARGET_LOG_MIN_INTERVAL_MS)) {
+          logDebug('chat_target_wait:pending', {
+            attempt,
+            elapsedMs: Date.now() - startedAt,
+            expectedPhoneDigits: state.expectedPhoneDigits || '',
+            expectedTitleTokens: state.expectedTitleTokens || [],
+            currentPhoneDigits: state.currentPhoneDigits || '',
+            currentTitle: state.currentTitle || '',
+            phoneMatch: Boolean(state.phoneMatch),
+            titleMatch: Boolean(state.titleMatch)
+          });
+        }
       }
 
       await new Promise((resolve) => {
@@ -1193,13 +1359,38 @@
       });
     }
 
-    currentPhone = getCurrentChatPhoneForVerification();
-    currentDigits = normalizeDigitsToken(currentPhone);
+    const finalState = getCurrentChatTargetState(safeOptions);
+    if (finalState.hasTargetExpectation) {
+      logDebug('chat_target_wait:timeout', {
+        attempt,
+        elapsedMs: Date.now() - startedAt,
+        expectedPhoneDigits: finalState.expectedPhoneDigits || '',
+        expectedTitleTokens: finalState.expectedTitleTokens || [],
+        currentPhoneDigits: finalState.currentPhoneDigits || '',
+        currentTitle: finalState.currentTitle || '',
+        phoneMatch: Boolean(finalState.phoneMatch),
+        titleMatch: Boolean(finalState.titleMatch)
+      });
+    }
     return {
-      ok: matchesPhoneDigits(expectedDigits, currentDigits),
-      expectedPhoneDigits: expectedDigits,
-      currentPhone: normalizePhone(currentPhone || '') || currentPhone,
-      currentPhoneDigits: currentDigits
+      ok: finalState.matched,
+      attempt,
+      elapsedMs: Date.now() - startedAt,
+      ...finalState
+    };
+  }
+
+  async function waitForCurrentChatPhoneMatch(expectedPhoneDigits, timeoutMs = 2200, intervalMs = 90) {
+    const targetState = await waitForCurrentChatTargetMatch({
+      expectedPhoneDigits,
+      timeoutMs,
+      intervalMs
+    });
+    return {
+      ok: Boolean(targetState.ok),
+      expectedPhoneDigits: targetState.expectedPhoneDigits || '',
+      currentPhone: targetState.currentPhone || '',
+      currentPhoneDigits: targetState.currentPhoneDigits || ''
     };
   }
 
@@ -1218,11 +1409,21 @@
   function inferInboxItemKind(item, title = '', phone = '') {
     const safeTitle = normalizeLookupToken(title);
     const safePhone = normalizeDigitsToken(phone);
-    const rowText = normalizeLookupToken(item?.getAttribute?.('aria-label') || item?.textContent || '');
+    const rowText = normalizeLookupToken(
+      `${item?.getAttribute?.('aria-label') || ''} ${item?.textContent || ''}`
+    );
 
     const hasGroupIcon = Boolean(
       item?.querySelector?.(
-        'span[data-icon*="group"], [data-testid*="group"], [aria-label*="group"], [aria-label*="grupo"]'
+        [
+          'span[data-icon*="group"]',
+          '[data-icon*="group"]',
+          '[data-testid*="group"]',
+          '[aria-label*="group"]',
+          '[aria-label*="grupo"]',
+          'img[alt*="group" i]',
+          'img[alt*="grupo" i]'
+        ].join(', ')
       )
     );
     const hasPersonIcon = Boolean(
@@ -1250,34 +1451,130 @@
     return 'unknown';
   }
 
+  function isLikelyInboxMetaToken(value) {
+    const token = normalizeLookupToken(value || '');
+    if (!token) {
+      return true;
+    }
+
+    if (/^[0-9]{1,2}:[0-9]{2}(\s?(am|pm))?$/.test(token)) {
+      return true;
+    }
+
+    if (/^[0-9]+$/.test(token)) {
+      return true;
+    }
+
+    if (
+      /^(hoy|ayer|today|yesterday|mon|tue|wed|thu|fri|sat|sun|lun|mar|mie|jue|vie|sab|dom)$/.test(token)
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function sanitizeInboxTitleToken(value) {
+    const cleaned = String(value || '')
+      .replace(/[\u200e\u200f\u202a-\u202e]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return toSafeText(cleaned, 180);
+  }
+
+  function extractInboxTitle(item) {
+    if (!item) {
+      return '';
+    }
+
+    const seen = new Set();
+    const candidates = [];
+    const add = (value) => {
+      const token = sanitizeInboxTitleToken(value);
+      const normalized = normalizeLookupToken(token);
+      if (!token || !normalized || seen.has(normalized) || isLikelyInboxMetaToken(token)) {
+        return;
+      }
+      seen.add(normalized);
+      candidates.push(token);
+    };
+
+    const titleSelectors = [
+      'span[title]',
+      '[data-testid="cell-frame-title"] span[title]',
+      '[data-testid="cell-frame-title"] span[dir="auto"]',
+      '[data-testid="cell-frame-title"]',
+      '[data-testid="conversation-list-item-title"]',
+      '[data-testid="chat-list-item-title"]'
+    ];
+    for (const selector of titleSelectors) {
+      const nodes = item.querySelectorAll(selector);
+      for (const node of nodes) {
+        add(node?.getAttribute?.('title') || '');
+        add(node?.textContent || '');
+      }
+    }
+
+    const rowAriaLabel = sanitizeInboxTitleToken(item.getAttribute?.('aria-label') || '');
+    if (rowAriaLabel) {
+      add(rowAriaLabel);
+      const splitCandidates = rowAriaLabel
+        .split(/[,|•\n]/g)
+        .map((piece) => sanitizeInboxTitleToken(piece))
+        .filter(Boolean)
+        .slice(0, 4);
+      for (const piece of splitCandidates) {
+        add(piece);
+      }
+    }
+
+    if (!candidates.length) {
+      const genericNodes = item.querySelectorAll('span[dir="auto"], div[dir="auto"], div[dir="ltr"], span[dir="ltr"]');
+      for (const node of genericNodes) {
+        add(node?.textContent || '');
+        if (candidates.length >= 6) {
+          break;
+        }
+      }
+    }
+
+    return candidates[0] || '';
+  }
+
   function getInboxEntries(options = {}) {
     const limit = Math.max(1, Number(options.limit) || 40);
     const includeNode = Boolean(options.includeNode);
-    const items = Array.from(document.querySelectorAll('#pane-side [role="listitem"]'));
+    let items = Array.from(document.querySelectorAll('#pane-side [role="listitem"]'));
+    if (!items.length) {
+      items = Array.from(
+        document.querySelectorAll(
+          '#pane-side div[data-testid="cell-frame-container"], #pane-side div[data-testid="chat-list-item"]'
+        )
+      );
+    }
 
     const parsed = items
       .map((item, index) => {
-        const titleNode = item.querySelector('span[title]');
-        const title = toSafeText(titleNode?.getAttribute('title') || titleNode?.textContent || '', 180);
+        const title = extractInboxTitle(item);
 
         if (!title) {
           return null;
         }
 
-        const previewCandidates = item.querySelectorAll('div[dir="ltr"], span[dir="auto"]');
+        const previewCandidates = item.querySelectorAll('div[dir="ltr"], div[dir="auto"], span[dir="auto"], span[dir="ltr"]');
         let preview = '';
+        const normalizedTitle = normalizeLookupToken(title);
 
         for (const node of previewCandidates) {
           const value = toSafeText(node.textContent || '', 220);
-          if (value && value !== title) {
+          if (value && normalizeLookupToken(value) !== normalizedTitle) {
             preview = value;
             break;
           }
         }
 
-        const phone = extractPhoneCandidate(title);
+        const phone = extractPhoneCandidate(title) || extractPhoneCandidate(item.getAttribute?.('aria-label') || '');
         const kind = inferInboxItemKind(item, title, phone);
-        const normalizedTitle = normalizeLookupToken(title);
         const normalizedPreview = normalizeLookupToken(preview);
         const phoneDigits = normalizeDigitsToken(phone);
         const searchHaystack = [normalizedTitle, normalizedPreview, phoneDigits].filter(Boolean).join(' ');
@@ -1541,25 +1838,53 @@
     }
 
     const safeOptions = options && typeof options === 'object' ? options : {};
-    const expectedPhoneDigits = normalizeDigitsToken(safeOptions.expectedPhone || safeOptions.phone || '');
-    if (expectedPhoneDigits) {
-      const targetCheck = await waitForCurrentChatPhoneMatch(expectedPhoneDigits, Number(safeOptions.verifyTimeoutMs) || 2400, 90);
-      if (!targetCheck.ok) {
-        const currentChatTitle = getCurrentChatTitle();
-        return {
-          ok: false,
-          error: 'El chat activo no coincide con el numero solicitado. Se cancelo el envio.',
-          result: {
-            sent: false,
-            confirmed: false,
-            expectedPhoneDigits,
-            currentPhoneDigits: targetCheck.currentPhoneDigits || '',
-            currentPhone: toSafeText(targetCheck.currentPhone || '', 48),
-            currentChatTitle: toSafeText(currentChatTitle || '', 180),
-            reason: targetCheck.currentPhoneDigits ? 'phone_mismatch' : 'phone_not_detected'
-          }
-        };
+    const expectedPhoneDigits = normalizeDigitsToken(
+      safeOptions.expectedPhoneDigits || safeOptions.expectedPhone || safeOptions.phone || ''
+    );
+    const expectedTitle = toSafeText(safeOptions.expectedTitle || safeOptions.expectedChatTitle || '', 180);
+    const expectedTitles = toStringArray(safeOptions.expectedTitles, 20);
+    const verifyTimeoutMs = Math.max(700, Number(safeOptions.verifyTimeoutMs) || 4800);
+    const targetCheck = await waitForCurrentChatTargetMatch({
+      args: safeOptions.args && typeof safeOptions.args === 'object' ? safeOptions.args : {},
+      expectedPhoneDigits,
+      expectedTitle,
+      expectedTitles,
+      timeoutMs: verifyTimeoutMs,
+      intervalMs: 90
+    });
+    if (!targetCheck.ok) {
+      let reason = 'target_mismatch';
+      if (targetCheck.expectedPhoneDigits) {
+        reason = targetCheck.currentPhoneDigits ? 'phone_mismatch' : 'phone_not_detected';
+      } else if (Array.isArray(targetCheck.expectedTitleTokens) && targetCheck.expectedTitleTokens.length) {
+        reason = 'title_mismatch';
       }
+
+      logDebug('send_message:target_mismatch', {
+        reason,
+        expectedPhoneDigits: targetCheck.expectedPhoneDigits || '',
+        expectedTitleTokens: Array.isArray(targetCheck.expectedTitleTokens) ? targetCheck.expectedTitleTokens : [],
+        currentPhoneDigits: targetCheck.currentPhoneDigits || '',
+        currentTitle: toSafeText(targetCheck.currentTitle || '', 180),
+        phoneMatch: Boolean(targetCheck.phoneMatch),
+        titleMatch: Boolean(targetCheck.titleMatch),
+        verifyTimeoutMs
+      });
+
+      return {
+        ok: false,
+        error: 'El chat activo aun no coincide con el destino solicitado. Se cancelo el envio.',
+        result: {
+          sent: false,
+          confirmed: false,
+          expectedPhoneDigits: targetCheck.expectedPhoneDigits || '',
+          expectedTitleTokens: Array.isArray(targetCheck.expectedTitleTokens) ? targetCheck.expectedTitleTokens : [],
+          currentPhoneDigits: targetCheck.currentPhoneDigits || '',
+          currentPhone: toSafeText(targetCheck.currentPhone || '', 48),
+          currentChatTitle: toSafeText(targetCheck.currentTitle || '', 180),
+          reason
+        }
+      };
     }
 
     const now = Date.now();
@@ -1603,7 +1928,7 @@
       };
     }
 
-    const editor = await waitForComposerEditor(1700, 70);
+    const editor = await waitForComposerEditor(Math.max(800, Number(safeOptions.composerTimeoutMs) || 4200), 70);
     if (!editor) {
       return {
         ok: false,
@@ -1934,8 +2259,8 @@
     return best ? best.entry : null;
   }
 
-  async function waitForChatOpen(entry, timeoutMs = 1900, intervalMs = 90) {
-    const deadline = Date.now() + Math.max(300, Number(timeoutMs) || 1900);
+  async function waitForChatOpen(entry, timeoutMs = 2800, intervalMs = 90) {
+    const deadline = Date.now() + Math.max(300, Number(timeoutMs) || 2800);
     const waitMs = Math.max(40, Number(intervalMs) || 90);
     const safeEntry = entry && typeof entry === 'object' ? entry : {};
     const expectedTitle = String(safeEntry.normalizedTitle || normalizeLookupToken(safeEntry.title || ''));
@@ -1969,7 +2294,19 @@
     const requestedPhoneDigits = getRequestedPhoneDigitsFromArgs(safeArgs);
     const entries = getInboxEntries({ limit: searchLimit, includeNode: true });
     const diagnostics = buildOpenChatDiagnostics(entries, safeArgs);
+    logDebug('open_chat_by_query:start', {
+      searchLimit,
+      inboxCount: diagnostics.inboxCount,
+      requestedChatIndex: diagnostics.requestedChatIndex,
+      queries: diagnostics.queries,
+      requestedPhoneDigits
+    });
     if (!entries.length) {
+      logDebug('open_chat_by_query:inbox_empty', {
+        searchLimit,
+        requestedChatIndex: diagnostics.requestedChatIndex,
+        queries: diagnostics.queries
+      });
       return {
         ok: false,
         error: 'No se pudo leer la lista de chats en WhatsApp.',
@@ -1979,6 +2316,11 @@
 
     const selected = pickInboxEntry(entries, safeArgs);
     if (!selected || !selected.row) {
+      logDebug('open_chat_by_query:no_match', {
+        requestedPhoneDigits,
+        queries: diagnostics.queries,
+        candidates: diagnostics.candidates
+      });
       return {
         ok: false,
         error: 'No se encontro un chat que coincida con la busqueda.',
@@ -1990,14 +2332,20 @@
       };
     }
 
+    const selectedSafe = sanitizeInboxEntry(selected);
     const selectedPhoneDigits = normalizeDigitsToken(selected.phoneDigits || selected.phone || '');
     if (requestedPhoneDigits && selectedPhoneDigits && !matchesPhoneDigits(requestedPhoneDigits, selectedPhoneDigits)) {
+      logDebug('open_chat_by_query:phone_mismatch', {
+        requestedPhoneDigits,
+        selectedPhoneDigits,
+        selected: selectedSafe
+      });
       return {
         ok: false,
         error: 'El chat seleccionado no coincide con el numero solicitado.',
         result: {
           ...diagnostics,
-          selected: sanitizeInboxEntry(selected),
+          selected: selectedSafe,
           requestedPhoneDigits,
           selectedPhoneDigits
         }
@@ -2007,23 +2355,32 @@
     selected.row.scrollIntoView({ block: 'center', inline: 'nearest' });
     const clicked = dispatchLeftClick(selected.row);
     if (!clicked) {
+      logDebug('open_chat_by_query:click_failed', {
+        selected: selectedSafe
+      });
       return {
         ok: false,
         error: 'No se pudo abrir el chat seleccionado.',
         result: {
           ...diagnostics,
-          selected: sanitizeInboxEntry(selected)
+          selected: selectedSafe
         }
       };
     }
 
-    const confirmed = await waitForChatOpen(selected, Number(safeArgs.timeoutMs) || 2100, 90);
+    const confirmed = await waitForChatOpen(selected, Number(safeArgs.timeoutMs) || 3600, 90);
+    logDebug('open_chat_by_query:opened', {
+      confirmed,
+      selected: selectedSafe,
+      requestedPhoneDigits,
+      queries: diagnostics.queries
+    });
     return {
       ok: true,
       result: {
         opened: true,
         confirmed,
-        selected: sanitizeInboxEntry(selected),
+        selected: selectedSafe,
         query: getOpenChatQueries(safeArgs),
         diagnostics
       }
@@ -2040,7 +2397,11 @@
       'button[aria-label="Menú"]',
       'button[aria-label="Más opciones"]',
       'button[aria-label="More options"]',
+      'button[aria-label*="opciones" i]',
+      'button[aria-label*="options" i]',
       '[data-testid="chatlist-item-menu"]',
+      '[data-testid="chatlist-item-more"]',
+      '[data-testid*="menu"]',
       'span[data-icon="down-context"]'
     ];
 
@@ -2338,6 +2699,8 @@
         error: 'No se encontraron chats que coincidan con el filtro para archivar.',
         result: {
           scope,
+          inboxCount: entries.length,
+          filteredCount: filtered.length,
           candidates: entries.slice(0, 16).map((item) => sanitizeInboxEntry(item))
         }
       };
@@ -2400,6 +2763,21 @@
     const safeArgs = args && typeof args === 'object' ? args : {};
     const text = String(safeArgs.text || safeArgs.message || '').trim().slice(0, 1800);
     const requestedPhoneDigits = getRequestedPhoneDigitsFromArgs(safeArgs);
+    const lookupQueries = getOpenChatQueries(safeArgs);
+    const requestedChatIndex = Math.round(Number(safeArgs.chatIndex));
+    const hasChatIndexLookup = Number.isFinite(requestedChatIndex) && requestedChatIndex >= 1;
+    const hasTargetLookup = Boolean(requestedPhoneDigits || lookupQueries.length || hasChatIndexLookup);
+    const verifyTimeoutMs = Math.max(700, Number(safeArgs.verifyTimeoutMs) || 5200);
+    const composerTimeoutMs = Math.max(800, Number(safeArgs.composerTimeoutMs) || 4200);
+    logDebug('open_chat_and_send:start', {
+      hasTargetLookup,
+      requestedPhoneDigits,
+      lookupQueries,
+      requestedChatIndex: hasChatIndexLookup ? requestedChatIndex : -1,
+      textChars: text.length,
+      verifyTimeoutMs,
+      composerTimeoutMs
+    });
     if (!text) {
       return {
         ok: false,
@@ -2407,30 +2785,103 @@
       };
     }
 
-    const opened = await openChatByQuery(safeArgs);
-    if (!opened || opened.ok !== true) {
-      return opened || { ok: false, error: 'No se pudo abrir el chat para enviar mensaje.' };
+    let opened = null;
+    let usedCurrentChat = false;
+    let expectedTitle = '';
+    const expectedTitles = [...lookupQueries];
+
+    if ((requestedPhoneDigits || lookupQueries.length) && !hasChatIndexLookup) {
+      const currentTargetCheck = await waitForCurrentChatTargetMatch({
+        args: safeArgs,
+        expectedPhoneDigits: requestedPhoneDigits,
+        expectedTitles,
+        timeoutMs: Math.min(1600, verifyTimeoutMs),
+        intervalMs: 90
+      });
+      if (currentTargetCheck.ok) {
+        usedCurrentChat = true;
+        expectedTitle = toSafeText(currentTargetCheck.currentTitle || '', 180);
+        logDebug('open_chat_and_send:reuse_current_chat', {
+          expectedTitle,
+          currentPhoneDigits: currentTargetCheck.currentPhoneDigits || '',
+          currentTitle: currentTargetCheck.currentTitle || '',
+          expectedPhoneDigits: requestedPhoneDigits || ''
+        });
+      }
     }
 
-    if (opened.result?.confirmed === false) {
-      return {
-        ok: false,
-        error: 'No se pudo confirmar la apertura del chat objetivo.',
-        result: {
-          openChat: opened.result
+    if (!usedCurrentChat && hasTargetLookup) {
+      opened = await openChatByQuery(safeArgs);
+      if (!opened || opened.ok !== true) {
+        logDebug('open_chat_and_send:open_failed', {
+          error: toSafeText(opened?.error || 'No se pudo abrir chat.', 220),
+          result: opened?.result && typeof opened.result === 'object' ? opened.result : {}
+        });
+        return opened || { ok: false, error: 'No se pudo abrir el chat para enviar mensaje.' };
+      }
+
+      const selected = opened.result?.selected && typeof opened.result.selected === 'object' ? opened.result.selected : {};
+      expectedTitle = toSafeText(selected.title || expectedTitle, 180);
+      if (expectedTitle) {
+        expectedTitles.push(expectedTitle);
+      }
+
+      if (opened.result?.confirmed === false) {
+        const postOpenCheck = await waitForCurrentChatTargetMatch({
+          args: safeArgs,
+          expectedPhoneDigits: requestedPhoneDigits,
+          expectedTitle,
+          expectedTitles,
+          timeoutMs: verifyTimeoutMs,
+          intervalMs: 90
+        });
+        if (!postOpenCheck.ok) {
+          logDebug('open_chat_and_send:post_open_mismatch', {
+            expectedPhoneDigits: requestedPhoneDigits || '',
+            expectedTitle,
+            expectedTitleTokens: Array.isArray(postOpenCheck.expectedTitleTokens) ? postOpenCheck.expectedTitleTokens : [],
+            currentPhoneDigits: postOpenCheck.currentPhoneDigits || '',
+            currentTitle: toSafeText(postOpenCheck.currentTitle || '', 180)
+          });
+          return {
+            ok: false,
+            error: 'No se pudo confirmar la apertura del chat objetivo.',
+            result: {
+              openChat: opened.result,
+              expectedPhoneDigits: requestedPhoneDigits,
+              expectedTitleTokens: Array.isArray(postOpenCheck.expectedTitleTokens) ? postOpenCheck.expectedTitleTokens : [],
+              currentPhoneDigits: postOpenCheck.currentPhoneDigits || '',
+              currentChatTitle: toSafeText(postOpenCheck.currentTitle || '', 180),
+              reason: postOpenCheck.currentPhoneDigits ? 'target_mismatch' : 'target_not_ready'
+            }
+          };
         }
-      };
+      }
+    } else if (!hasTargetLookup) {
+      usedCurrentChat = true;
     }
 
     const sent = await sendMessageToCurrentChat(text, {
-      expectedPhone: requestedPhoneDigits,
-      verifyTimeoutMs: Number(safeArgs.verifyTimeoutMs) || 2400
+      args: safeArgs,
+      expectedPhoneDigits: requestedPhoneDigits,
+      expectedTitle,
+      expectedTitles,
+      verifyTimeoutMs,
+      composerTimeoutMs
+    });
+    logDebug('open_chat_and_send:done', {
+      ok: Boolean(sent?.ok),
+      sent: sent?.result && typeof sent.result === 'object' ? Boolean(sent.result.sent) : false,
+      usedCurrentChat,
+      expectedPhoneDigits: requestedPhoneDigits || '',
+      expectedTitle: expectedTitle || ''
     });
     return {
       ...sent,
       result: {
         ...(sent?.result && typeof sent.result === 'object' ? sent.result : {}),
-        openChat: opened.result
+        usedCurrentChat,
+        openChat: opened?.result || null
       }
     };
   }
@@ -2623,8 +3074,10 @@
 
     if (action === 'sendMessage') {
       return sendMessageToCurrentChat(args.text || args.message || '', {
+        args,
         expectedPhone: getRequestedPhoneDigitsFromArgs(args),
-        verifyTimeoutMs: Number(args.verifyTimeoutMs) || 2400
+        verifyTimeoutMs: Number(args.verifyTimeoutMs) || 4800,
+        composerTimeoutMs: Number(args.composerTimeoutMs) || 4200
       });
     }
 
