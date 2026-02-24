@@ -94,12 +94,11 @@ export function createSettingsScreenController({
 
   function updateVoiceModeMeta() {
     const panelSettings = getPanelSettings();
-    const selectedLanguage = normalizeAssistantLanguage(panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE);
-    const browserPreferredLanguage = normalizeAssistantLanguage(
-      defaults?.panelSettingsDefaults?.language || DEFAULT_ASSISTANT_LANGUAGE
+    const selectedLanguage = normalizeAssistantLanguage(
+      settingsLanguageSelect?.value || panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE
     );
-    const ttsVoice = normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || '');
-    const ttsSpeed = normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed);
+    const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || '');
+    const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
 
     if (settingsVoiceTtsSpeedValue) {
       settingsVoiceTtsSpeedValue.textContent = `${ttsSpeed.toFixed(2)}x`;
@@ -109,7 +108,7 @@ export function createSettingsScreenController({
       return;
     }
 
-    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} (browser: ${browserPreferredLanguage.toUpperCase()}) · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x`;
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x`;
   }
 
   function applyPanelSettingsToUi() {

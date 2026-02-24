@@ -1253,7 +1253,7 @@ a {
 #chatSendBtn[data-send-mode='voice'][data-voice-session='true'] {
   background: #0b5cff;
   color: #fff;
-  min-width: 86px;
+  min-width: 76px;
   width: auto;
   padding: 0 8px;
   border-radius: 100px;

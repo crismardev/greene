@@ -191,6 +191,7 @@ export function initPanelApp() {
   const MAX_WHATSAPP_PROMPT_CHARS = 1800;
   const VOICE_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
   const VOICE_TRANSCRIPTION_LANGUAGE = 'es';
+  const VOICE_CHAT_RESPONSE_MODEL = 'gpt-4o-mini';
   const VOICE_TTS_MODEL = 'gpt-4o-mini-tts';
   const VOICE_TTS_VOICE = 'alloy';
   const OPENAI_TTS_VOICE_OPTIONS = Object.freeze(['alloy', 'ash', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer']);
@@ -4402,6 +4403,29 @@ export function initPanelApp() {
     return getModelProfileById(fallbackId);
   }
 
+  function resolveVoiceOptimizedChatProfile() {
+    const speechProfile = getOpenAiSpeechProfile();
+    if (!speechProfile) {
+      return null;
+    }
+
+    return aiProviderService.normalizeProfile({
+      ...speechProfile,
+      model: VOICE_CHAT_RESPONSE_MODEL
+    });
+  }
+
+  function resolveChatProfileForSource(source = 'text') {
+    if (String(source || '').trim().toLowerCase() === 'voice') {
+      const voiceProfile = resolveVoiceOptimizedChatProfile();
+      if (voiceProfile) {
+        return voiceProfile;
+      }
+    }
+
+    return resolveModelProfileForInference();
+  }
+
   function syncModelSelectors() {
     const profiles = getModelProfiles();
     const resolvedPrimary = resolvePrimaryProfileId();
@@ -6009,7 +6033,7 @@ export function initPanelApp() {
   }
 
   function normalizeVoiceInputLanguage() {
-    const normalized = normalizeAssistantLanguage(panelSettings.language || BROWSER_DEFAULT_ASSISTANT_LANGUAGE);
+    const normalized = normalizeAssistantLanguage(settingsLanguageSelect?.value || panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE);
     if (normalized === 'en' || normalized === 'pt' || normalized === 'fr') {
       return normalized;
     }
@@ -6037,11 +6061,11 @@ export function initPanelApp() {
   }
 
   function getConfiguredVoiceTtsVoice() {
-    return normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
+    return normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
   }
 
   function getConfiguredVoiceTtsSpeed() {
-    return normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed);
+    return normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
   }
 
   function isVoiceActiveListeningEnabled() {
@@ -6050,7 +6074,7 @@ export function initPanelApp() {
 
   function updateVoiceModeMetaLabel() {
     const inputLanguage = normalizeAssistantLanguage(
-      settingsLanguageSelect?.value || panelSettings.language || BROWSER_DEFAULT_ASSISTANT_LANGUAGE
+      settingsLanguageSelect?.value || panelSettings.language || DEFAULT_ASSISTANT_LANGUAGE
     );
     const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
     const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
@@ -6063,7 +6087,7 @@ export function initPanelApp() {
       return;
     }
 
-    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} (browser: ${BROWSER_DEFAULT_ASSISTANT_LANGUAGE.toUpperCase()}) · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x`;
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x`;
   }
 
   function getOpenAiSpeechProfile() {
@@ -6372,6 +6396,10 @@ export function initPanelApp() {
     }
 
     return !isGeneratingChat;
+  }
+
+  function isAssistantSpeechPlaybackActive() {
+    return activeTtsAudio instanceof Audio && activeTtsAudio.paused === false && activeTtsAudio.ended === false;
   }
 
   function stopAssistantSpeechPlayback() {
@@ -6876,6 +6904,10 @@ export function initPanelApp() {
       }
     }
 
+    if (isAssistantSpeechPlaybackActive()) {
+      stopAssistantSpeechPlayback();
+    }
+
     if (!hasOpenAiSpeechCredentialConfigured()) {
       setStatus(chatStatus, 'Voice no disponible: configura API key de OpenAI en AI Models.', true);
       return false;
@@ -7376,6 +7408,27 @@ export function initPanelApp() {
     }
 
     if (voiceSessionActive) {
+      if (isGeneratingChat || isAssistantSpeechPlaybackActive()) {
+        const interrupted = await interruptActiveChatTurn({
+          reason: 'voice_session_barge_in'
+        });
+        if (!interrupted) {
+          setStatus(chatStatus, 'No se pudo interrumpir la respuesta activa para escuchar nueva voz.', true);
+          return;
+        }
+
+        const started = await startVoiceCapture({
+          source: 'voice_barge_in'
+        });
+        if (!started) {
+          setVoiceSessionActive(false, {
+            reason: 'voice_barge_in_failed'
+          });
+          releaseVoiceSessionResources();
+        }
+        return;
+      }
+
       setVoiceSessionActive(false, {
         reason: 'tap_stop_idle'
       });
@@ -8685,6 +8738,62 @@ export function initPanelApp() {
     return ['Custom integrations registradas:', ...lines].join('\n');
   }
 
+  function normalizeVoiceIntentText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^\w\s./:-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function buildVoiceActionDirective(userQuery = '') {
+    const normalizedQuery = normalizeVoiceIntentText(userQuery);
+    const spotifyHint = /\bspotify\b/.test(normalizedQuery)
+      ? 'Si el usuario menciona spotify, usa browser.openNewTab con url https://open.spotify.com/.'
+      : '';
+    return [
+      'Modo voice activo: si el usuario pide una accion del navegador, debes ejecutar la accion en tu primer mensaje.',
+      'No respondas con conversacion tipo "ya lo abri" sin ejecutar realmente una tool.',
+      'Para solicitudes operativas (abrir/cerrar/enfocar/enviar), responde primero con bloque ```tool``` sin texto adicional.',
+      spotifyHint
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  function detectVoiceDirectToolCalls(userQuery = '') {
+    const text = normalizeVoiceIntentText(userQuery);
+    if (!text) {
+      return [];
+    }
+
+    if (/\b(no|cancela|cancelar|deten)\b/.test(text)) {
+      return [];
+    }
+
+    const tokenCount = text.split(' ').filter(Boolean).length;
+    const shortCommand = tokenCount <= 3;
+    const asksToOpen =
+      /\b(abre|abrir|open|abreme|abrime|abrelo|inicia|iniciar|lanza|lanzar|pon|poner)\b/.test(text) ||
+      /\b(ve a|ir a)\b/.test(text);
+
+    if ((asksToOpen || shortCommand) && /\bspotify\b/.test(text)) {
+      return [
+        {
+          tool: 'browser.openNewTab',
+          args: {
+            url: 'https://open.spotify.com/',
+            active: true
+          }
+        }
+      ];
+    }
+
+    return [];
+  }
+
   function buildLocalToolSystemPrompt() {
     const hasCrmErpDbConnection = Boolean(getCrmErpDatabaseConnectionUrl());
     const integrations = getIntegrationsConfig();
@@ -9796,16 +9905,19 @@ export function initPanelApp() {
     return lines.join('\n');
   }
 
-  async function buildChatConversation(userQuery) {
+  async function buildChatConversation(userQuery, options = {}) {
     const systemPrompt =
       selectedChatTool === 'chat'
         ? getActiveChatSystemPrompt()
         : selectedChatTool === 'write_email'
           ? getWriteEmailSystemPrompt()
           : CHAT_TOOLS[selectedChatTool].systemPrompt;
+    const source = options?.source === 'voice' ? 'voice' : 'text';
     let dynamicSystemPrompt = systemPrompt;
     let contextUsed = [];
     const localToolPrompt = selectedChatTool === 'chat' ? buildLocalToolSystemPrompt() : '';
+    const voiceActionDirective =
+      selectedChatTool === 'chat' && source === 'voice' ? buildVoiceActionDirective(userQuery) : '';
     const relationContextPrompt = selectedChatTool === 'chat' ? buildActiveRelationsContextPrompt() : '';
     const forceHistoryTools = selectedChatTool === 'chat' && shouldForceHistoryToolForQuery(userQuery);
     const historyToolDirective = forceHistoryTools
@@ -9820,12 +9932,12 @@ export function initPanelApp() {
       const contextHits = Array.isArray(identityPayload?.contextHits) ? identityPayload.contextHits : [];
       contextUsed = contextHits.map((item) => String(item?.id || '').trim()).filter(Boolean);
 
-      dynamicSystemPrompt = [contextHeader, relationContextPrompt, localToolPrompt, historyToolDirective, systemPrompt]
+      dynamicSystemPrompt = [contextHeader, relationContextPrompt, localToolPrompt, voiceActionDirective, historyToolDirective, systemPrompt]
         .filter(Boolean)
         .join('\n\n')
         .trim();
     } catch (_) {
-      dynamicSystemPrompt = [relationContextPrompt, localToolPrompt, historyToolDirective, systemPrompt]
+      dynamicSystemPrompt = [relationContextPrompt, localToolPrompt, voiceActionDirective, historyToolDirective, systemPrompt]
         .filter(Boolean)
         .join('\n\n')
         .trim();
@@ -9855,7 +9967,8 @@ export function initPanelApp() {
 
     const temperature = Number(settings[PREFERENCE_KEYS.AI_TEMPERATURE] ?? DEFAULT_SETTINGS[PREFERENCE_KEYS.AI_TEMPERATURE]);
     const safeTemp = Number.isFinite(temperature) ? temperature : DEFAULT_SETTINGS[PREFERENCE_KEYS.AI_TEMPERATURE];
-    const conversation = await buildChatConversation(userQuery);
+    const source = options?.source === 'voice' ? 'voice' : 'text';
+    const conversation = await buildChatConversation(userQuery, { source });
     const additionalMessages = Array.isArray(options.additionalMessages)
       ? options.additionalMessages
           .map((item) => {
@@ -9871,7 +9984,7 @@ export function initPanelApp() {
       : [];
     const messages = [...(Array.isArray(conversation?.messages) ? conversation.messages : []), ...additionalMessages];
     const contextUsed = Array.isArray(conversation?.contextUsed) ? conversation.contextUsed : [];
-    const activeProfile = getActiveModelProfile();
+    const activeProfile = resolveChatProfileForSource(source);
 
     if (!activeProfile) {
       throw new Error('No hay modelo configurado.');
@@ -9945,7 +10058,7 @@ export function initPanelApp() {
     let assistantMessage = null;
 
     try {
-      const activeProfile = getActiveModelProfile();
+      const activeProfile = resolveChatProfileForSource(source);
       const activeModel = activeProfile ? `${activeProfile.name} · ${activeProfile.model}` : getActiveModel();
       const attachmentsPromptBlock = buildAttachmentsPromptBlock(attachmentsForTurn);
       const contentForModel = [content, attachmentsPromptBlock].filter(Boolean).join('\n\n').trim() || content;
@@ -10070,6 +10183,7 @@ export function initPanelApp() {
           });
         },
         {
+          source,
           signal: generationAbortController.signal
         }
       );
@@ -10086,13 +10200,20 @@ export function initPanelApp() {
               onWarn: logWarn
             })
           : [];
+      const fallbackVoiceToolCalls =
+        selectedChatTool === 'chat' && source === 'voice' && detectedToolCalls.length === 0
+          ? detectVoiceDirectToolCalls(contentForModel || content)
+          : [];
+      const toolCallsToExecute = detectedToolCalls.length ? detectedToolCalls : fallbackVoiceToolCalls;
       let finalAssistantOutput = shouldSyncVoiceText ? streamedAssistantText.trim() || output : output;
 
       logDebug('sendChatMessage:model_output', {
         tool: selectedChatTool,
         outputPreview: output.slice(0, 600),
         outputLength: output.length,
-        detectedToolCalls
+        detectedToolCalls,
+        fallbackVoiceToolCalls,
+        toolCallsToExecute
       });
 
       assistantMessage.context_used = contextUsed;
@@ -10100,15 +10221,21 @@ export function initPanelApp() {
         userMessage.context_used = contextUsed;
       }
 
-      if (detectedToolCalls.length) {
-        setStatus(chatStatus, 'Ejecutando acciones locales del navegador...', false, { loading: true });
+      if (toolCallsToExecute.length) {
+        const usedVoiceDirectFallback = detectedToolCalls.length === 0 && fallbackVoiceToolCalls.length > 0;
+        setStatus(
+          chatStatus,
+          usedVoiceDirectFallback ? 'Ejecutando accion directa por voz...' : 'Ejecutando acciones locales del navegador...',
+          false,
+          { loading: true }
+        );
         assistantMessage.pending = true;
-        assistantMessage.content = 'Ejecutando tools locales...';
+        assistantMessage.content = usedVoiceDirectFallback ? 'Ejecutando accion directa de voz...' : 'Ejecutando tools locales...';
         scheduleChatRender({
           allowAutoScroll: false
         });
 
-        const toolResults = await executeLocalToolCalls(detectedToolCalls);
+        const toolResults = await executeLocalToolCalls(toolCallsToExecute);
         const followupPrompt = buildToolResultsFollowupPrompt(toolResults);
 
         logDebug('sendChatMessage:tool_results', {
@@ -10149,6 +10276,7 @@ export function initPanelApp() {
               { role: 'user', content: followupPrompt }
             ],
             refreshTabSnapshot: false,
+            source,
             signal: generationAbortController.signal
           }
         );
