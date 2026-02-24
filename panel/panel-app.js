@@ -14231,7 +14231,7 @@ export function initPanelApp() {
             text: toSafeLogText(item?.text || '', 160),
             transcript: toSafeLogText(item?.transcript || item?.enriched?.transcript || '', 120),
             ocrText: toSafeLogText(item?.ocrText || item?.enriched?.ocrText || '', 120)
-          })
+          }))
         : []
     };
   }
