@@ -10,6 +10,12 @@
 
   const TARGET_BASE_HOST = 'nuwwe.com';
   const TARGET_PATH = '/login';
+  const HOME_PATH_PREFIX = '/home';
+  const SESSION_MODAL_TITLE_TOKEN = 'desea continuar';
+  const SESSION_MODAL_CONFIRM_CLASS_TOKEN = 'initSettingAlertConfirmCustom';
+  const POST_SUBMIT_WATCH_TIMEOUT_MS = 26000;
+  const POST_SUBMIT_WATCH_POLL_MS = 320;
+  const POST_SUBMIT_MUTATION_THROTTLE_MS = 140;
   const AUTO_LOGIN_INITIAL_DELAY_MS = 160;
   const AUTO_LOGIN_OBSERVER_THROTTLE_MS = 220;
   const AUTO_LOGIN_RETRY_BASE_MS = 420;
@@ -26,6 +32,12 @@
   let autoLoginAttempts = 0;
   let credentialsRequestInFlight = false;
   let cachedCredentials = null;
+  let postSubmitWatchActive = false;
+  let postSubmitWatchTimer = 0;
+  let postSubmitTimeoutTimer = 0;
+  let postSubmitMutationThrottleTimer = 0;
+  let postSubmitObserver = null;
+  let postSubmitModalClickCount = 0;
 
   function logDebug(message, payload) {
     if (payload === undefined) {
@@ -133,6 +145,213 @@
     };
   }
 
+  function normalizeLooseText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function isLoginPath(pathname = location.pathname) {
+    return String(pathname || '').startsWith(TARGET_PATH);
+  }
+
+  function isHomePath(pathname = location.pathname) {
+    return String(pathname || '').startsWith(HOME_PATH_PREFIX);
+  }
+
+  function findContinueSessionModal() {
+    if (!isLoginPath()) {
+      return null;
+    }
+
+    const titleNodes = Array.from(document.querySelectorAll('.swal-title'));
+    const titleNode = titleNodes.find((node) =>
+      normalizeLooseText(node && node.textContent ? node.textContent : '').includes(SESSION_MODAL_TITLE_TOKEN)
+    );
+    if (!titleNode) {
+      return null;
+    }
+
+    const modalRoot = titleNode.closest('.swal-modal') || document.querySelector('.swal-modal') || document;
+    const queryRoot = modalRoot && typeof modalRoot.querySelectorAll === 'function' ? modalRoot : document;
+    const buttonCandidates = Array.from(queryRoot.querySelectorAll('button'));
+    const classMatchedButton = buttonCandidates.find((button) =>
+      String(button.className || '').includes(SESSION_MODAL_CONFIRM_CLASS_TOKEN)
+    );
+    const fallbackButton = queryRoot.querySelector('.swal-footer div:nth-child(2) > button');
+    const confirmButton = classMatchedButton || fallbackButton;
+    if (!confirmButton) {
+      return null;
+    }
+
+    return {
+      titleText: String(titleNode.textContent || '').trim(),
+      confirmButton
+    };
+  }
+
+  function maybeHandleContinueSessionModal(source = 'unknown') {
+    if (!postSubmitWatchActive || !isLoginPath()) {
+      return false;
+    }
+
+    const modal = findContinueSessionModal();
+    if (!modal || !modal.confirmButton) {
+      return false;
+    }
+
+    const confirmButton = modal.confirmButton;
+    if (!confirmButton.isConnected || confirmButton.disabled) {
+      return false;
+    }
+
+    if (confirmButton.dataset.greeneNuwweConfirmClicked === '1') {
+      return false;
+    }
+
+    confirmButton.dataset.greeneNuwweConfirmClicked = '1';
+    postSubmitModalClickCount += 1;
+    logWarn('post_submit:continue_modal_detected_click', {
+      source,
+      titleText: modal.titleText,
+      clickCount: postSubmitModalClickCount,
+      buttonClass: String(confirmButton.className || '')
+    });
+    confirmButton.click();
+    return true;
+  }
+
+  function clearPostSubmitWatchTimers() {
+    if (postSubmitWatchTimer) {
+      window.clearTimeout(postSubmitWatchTimer);
+      postSubmitWatchTimer = 0;
+    }
+
+    if (postSubmitTimeoutTimer) {
+      window.clearTimeout(postSubmitTimeoutTimer);
+      postSubmitTimeoutTimer = 0;
+    }
+
+    if (postSubmitMutationThrottleTimer) {
+      window.clearTimeout(postSubmitMutationThrottleTimer);
+      postSubmitMutationThrottleTimer = 0;
+    }
+  }
+
+  function stopPostSubmitWatch(reason = 'manual', payload = {}) {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const hasPendingWatch =
+      postSubmitWatchActive ||
+      Boolean(postSubmitObserver) ||
+      Boolean(postSubmitWatchTimer) ||
+      Boolean(postSubmitTimeoutTimer) ||
+      Boolean(postSubmitMutationThrottleTimer);
+    if (!hasPendingWatch) {
+      return;
+    }
+
+    postSubmitWatchActive = false;
+    clearPostSubmitWatchTimers();
+
+    if (postSubmitObserver) {
+      postSubmitObserver.disconnect();
+      postSubmitObserver = null;
+    }
+
+    const eventPayload = {
+      reason,
+      modalClicks: postSubmitModalClickCount,
+      pathname: String(location.pathname || ''),
+      ...safePayload
+    };
+    if (reason === 'timeout') {
+      logWarn('post_submit:watch_stop', eventPayload);
+      return;
+    }
+
+    logDebug('post_submit:watch_stop', eventPayload);
+  }
+
+  function schedulePostSubmitWatchTick() {
+    if (!postSubmitWatchActive || postSubmitWatchTimer) {
+      return;
+    }
+
+    postSubmitWatchTimer = window.setTimeout(() => {
+      postSubmitWatchTimer = 0;
+      runPostSubmitWatchTick('poll');
+    }, POST_SUBMIT_WATCH_POLL_MS);
+  }
+
+  function runPostSubmitWatchTick(source = 'poll') {
+    if (!postSubmitWatchActive) {
+      return;
+    }
+
+    const pathname = String(location.pathname || '');
+    if (isHomePath(pathname)) {
+      stopPostSubmitWatch('home_detected', { source, pathname });
+      return;
+    }
+
+    if (!isLoginPath(pathname)) {
+      stopPostSubmitWatch('path_changed', { source, pathname });
+      return;
+    }
+
+    maybeHandleContinueSessionModal(source);
+    schedulePostSubmitWatchTick();
+  }
+
+  function startPostSubmitWatch() {
+    stopPostSubmitWatch('restart');
+    if (!isLoginPath()) {
+      logDebug('post_submit:watch_skip_not_login', {
+        pathname: String(location.pathname || '')
+      });
+      return;
+    }
+
+    postSubmitWatchActive = true;
+    postSubmitModalClickCount = 0;
+
+    if (document.documentElement) {
+      postSubmitObserver = new MutationObserver(() => {
+        if (!postSubmitWatchActive || postSubmitMutationThrottleTimer) {
+          return;
+        }
+
+        postSubmitMutationThrottleTimer = window.setTimeout(() => {
+          postSubmitMutationThrottleTimer = 0;
+          runPostSubmitWatchTick('mutation');
+        }, POST_SUBMIT_MUTATION_THROTTLE_MS);
+      });
+
+      postSubmitObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class', 'style']
+      });
+    }
+
+    postSubmitTimeoutTimer = window.setTimeout(() => {
+      stopPostSubmitWatch('timeout', {
+        pathname: String(location.pathname || ''),
+        modalClicks: postSubmitModalClickCount
+      });
+    }, POST_SUBMIT_WATCH_TIMEOUT_MS);
+
+    logDebug('post_submit:watch_start', {
+      timeoutMs: POST_SUBMIT_WATCH_TIMEOUT_MS,
+      pathname: String(location.pathname || ''),
+      hasObserver: Boolean(postSubmitObserver)
+    });
+
+    runPostSubmitWatchTick('start');
+  }
+
   function getLoginFormElements() {
     return {
       userInput: document.getElementById('username'),
@@ -191,6 +410,7 @@
 
   function resetAutoLoginFlow() {
     clearScheduledAutoLoginTimers();
+    stopPostSubmitWatch('reset_flow');
     autoLoginPerformed = false;
     autoLoginAttempts = 0;
     logDebug('auto_login:reset_flow');
@@ -243,9 +463,10 @@
             attempts
           });
           form.loginButton.click();
+          startPostSubmitWatch();
           resolve({
             ok: true,
-            message: 'Credenciales insertadas. Ingresando...'
+            message: 'Credenciales insertadas. Esperando validacion de sesion...'
           });
           return;
         }
