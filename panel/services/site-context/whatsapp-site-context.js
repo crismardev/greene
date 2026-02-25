@@ -15,8 +15,10 @@ export const DEFAULT_WHATSAPP_REPLY_PROMPT_BASE = Object.freeze(
 const WHATSAPP_REPLY_HARD_RULES = Object.freeze(
   [
     'Reglas obligatorias de salida:',
+    '- Tu salida es SIEMPRE un mensaje que YO envio ahora.',
     '- Escribe siempre desde la perspectiva de "Yo" (el usuario), nunca como si fueras el contacto.',
     '- Si el ultimo mensaje es mio, evita sonar insistente o abrir otra pregunta innecesaria.',
+    '- Si el ultimo mensaje es mio y contiene una pregunta, no la contestes como si fueras el contacto.',
     '- Si el ultimo mensaje es del contacto, responde a ese turno sin cambiar de hablante.',
     '- No uses preguntas salvo que sean necesarias para destrabar la conversacion.'
   ].join('\n')
@@ -39,6 +41,7 @@ function normalizeWhatsappMessageEntry(item, index = 0) {
   }
 
   const role = source.role === 'me' ? 'me' : 'contact';
+  const author = toSafeText(source.author || '', 120);
   const kind = toSafeText(source.kind || '', 24).toLowerCase() || 'text';
   const transcript = toSafeText(source.transcript || enriched.transcript || '', 420);
   const ocrText = toSafeText(source.ocrText || enriched.ocrText || '', 420);
@@ -56,6 +59,7 @@ function normalizeWhatsappMessageEntry(item, index = 0) {
   return {
     id,
     role,
+    author,
     kind,
     text,
     timestamp: toSafeText(source.timestamp || '', 60),
@@ -287,18 +291,23 @@ function buildLastTurnGuidance(messages) {
 
   const lastRole = last.role === 'me' ? 'me' : 'contact';
   const lastText = toSafeText(last.text || '', 220);
+  const lastAuthor = toSafeText(last.author || '', 120);
+  const authorSuffix = lastAuthor ? ` · autor detectado: ${lastAuthor}` : '';
   const askedQuestion = /\?/.test(lastText);
 
   if (lastRole === 'me') {
     return [
-      `Ultimo turno: Yo (${lastText || 'sin texto'}).`,
+      `Ultimo turno: Yo (${lastText || 'sin texto'})${authorSuffix}.`,
       'No respondas como si fueras el contacto.',
+      askedQuestion ? 'No contestes esa pregunta como el contacto; sugiere seguimiento breve o espera respuesta.' : '',
       'Sugiere un seguimiento breve y natural solo si aporta valor.'
-    ].join(' ');
+    ]
+      .filter(Boolean)
+      .join(' ');
   }
 
   return [
-    `Ultimo turno: Contacto (${lastText || 'sin texto'}).`,
+    `Ultimo turno: Contacto (${lastText || 'sin texto'})${authorSuffix}.`,
     askedQuestion
       ? 'El contacto hizo una pregunta; respondela directo y claro.'
       : 'Responde desde mi voz con tono natural y sin comprometer de mas.'
@@ -308,6 +317,7 @@ function buildLastTurnGuidance(messages) {
 function formatMessageForPrompt(item) {
   const message = item && typeof item === 'object' ? item : {};
   const role = message.role === 'me' ? 'Yo' : 'Contacto';
+  const author = toSafeText(message.author || '', 120);
   const timestamp = toSafeText(message.timestamp || '', 40);
   const kind = toSafeText(message.kind || '', 24);
   const text = toSafeText(message.text || '', 320);
@@ -329,7 +339,8 @@ function formatMessageForPrompt(item) {
     extras.push(`caption:${mediaCaption}`);
   }
 
-  const prefix = `${timestamp ? `[${timestamp}] ` : ''}${role}: ${text}`;
+  const roleLabel = author ? `${role}(${author})` : role;
+  const prefix = `${timestamp ? `[${timestamp}] ` : ''}${roleLabel}: ${text}`;
   if (!extras.length) {
     return prefix;
   }
@@ -342,6 +353,8 @@ export function buildWhatsappReplyPrompt(tabContext, options = {}) {
   const myNumber = toSafeText(details.myNumber || '', 64);
   const chatLabel = buildWhatsappMetaLabel(tabContext);
   const messagesList = getWhatsappMessages(tabContext, 28);
+  const lastMessage = messagesList.length ? messagesList[messagesList.length - 1] : null;
+  const lastSender = lastMessage ? (lastMessage.role === 'me' ? 'yo' : 'contacto') : 'desconocido';
   const messages = messagesList.map((item) => formatMessageForPrompt(item)).join('\n');
   const styleHint = describeMyResponseStyle(messagesList);
   const lastTurnHint = buildLastTurnGuidance(messagesList);
@@ -357,6 +370,8 @@ export function buildWhatsappReplyPrompt(tabContext, options = {}) {
     '',
     `Mi numero: ${myNumber || 'N/A'}`,
     `Chat: ${chatLabel}`,
+    `Emisor del ultimo mensaje detectado: ${lastSender}.`,
+    'La respuesta sugerida debe ser exactamente el texto que YO enviaria ahora.',
     styleHint,
     lastTurnHint,
     'Conversacion reciente:',

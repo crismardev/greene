@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Greene",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "description": "Panel lateral de herramientas de Greene con AI y utilidades de imagen.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8a8Upc2MUWruGmNveQ8c2kk60tdu/1Oes2dCQDBPhOJa3g0sSZTR3P6HGOgCPlZG3sQazPn+YKzOHCpNchGVtsHFAAAoT/ZWh7Q+ylrbW+OiYdRapFk4O9Kjd7WESIYVvymu6GM9aysgjpiWMvqqiuk4SQFVmLAcNWhG3WTr2a/xHUU4NKoIOyVYt1NTI2w5K0qAMos182u+pvl+myFoJ2p1/MAGvCE0eeVJxpfCJkMO1vOwsDDqMKBhd/9obI8TkelXpXTLqTnXjXg9R3cT0hpdYAf/XUnW+GbtOQA0sRKMHUnkk07bRvP1D89yJNezBcLddijFqpiDiozwJhJzDwIDAQAB",
   "permissions": [

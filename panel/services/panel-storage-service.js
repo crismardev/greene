@@ -120,6 +120,7 @@ export function createPanelStorageService({
     }
 
     const role = normalizeWhatsappRole(record.role);
+    const author = toSafeText(record.author || '', 120);
     const kind = normalizeWhatsappKind(record.kind);
     const transcript = toSafeText(record.transcript || enriched.transcript || '', 560);
     const ocrText = toSafeText(record.ocrText || enriched.ocrText || '', 620);
@@ -156,6 +157,7 @@ export function createPanelStorageService({
     return {
       id,
       role,
+      author,
       kind,
       text,
       timestamp,
@@ -195,6 +197,7 @@ export function createPanelStorageService({
     return {
       id: known.id,
       role: next.role || known.role,
+      author: pickBetterValue(next.author, known.author, 120),
       kind: next.kind && next.kind !== 'text' ? next.kind : known.kind || next.kind,
       text: pickBetterValue(next.text, known.text, 1200),
       timestamp: pickBetterValue(next.timestamp, known.timestamp, 80),

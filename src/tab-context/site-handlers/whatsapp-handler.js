@@ -979,10 +979,24 @@
     return normalizedLeft === normalizedRight || normalizedLeft.endsWith(normalizedRight) || normalizedRight.endsWith(normalizedLeft);
   }
 
-  function inferMessageRole(row, prePlainMeta = {}, myNumber = '') {
+  function authorMatchesChatTitle(author, chatTitle) {
+    const authorToken = normalizeLookupToken(author || '');
+    const titleToken = normalizeLookupToken(chatTitle || '');
+    if (!authorToken || !titleToken) {
+      return false;
+    }
+
+    return authorToken === titleToken || authorToken.includes(titleToken) || titleToken.includes(authorToken);
+  }
+
+  function inferMessageRole(row, prePlainMeta = {}, myNumber = '', context = {}) {
     if (!row) {
       return 'contact';
     }
+
+    const safeContext = context && typeof context === 'object' ? context : {};
+    const isDirectChat = safeContext.isDirectChat === true;
+    const currentChatTitle = toSafeText(safeContext.currentChatTitle || '', 180);
 
     if (row.classList.contains('message-out') || row.querySelector('.message-out')) {
       return 'me';
@@ -1023,6 +1037,12 @@
       return 'me';
     }
 
+    // In direct chats, pre-plain author usually maps to the current contact name for incoming
+    // and to my profile name for outgoing; use this as a final role disambiguation.
+    if (isDirectChat && author) {
+      return authorMatchesChatTitle(author, currentChatTitle) ? 'contact' : 'me';
+    }
+
     return 'contact';
   }
 
@@ -1031,6 +1051,8 @@
     const rowSelection = collectMessageRows();
     const rows = Array.isArray(rowSelection.rows) ? rowSelection.rows : [];
     const myNumber = normalizePhone(getMyNumber());
+    const currentChatTitle = getCurrentChatTitle();
+    const isDirectChat = Boolean(getCurrentChatPhone());
 
     const parsed = rows
       .map((row, index) => {
@@ -1040,7 +1062,10 @@
           row.querySelector('.copyable-text')?.getAttribute('data-pre-plain-text') ||
           '';
         const prePlainMeta = parsePrePlainMetadata(prePlain);
-        const role = inferMessageRole(row, prePlainMeta, myNumber);
+        const role = inferMessageRole(row, prePlainMeta, myNumber, {
+          isDirectChat,
+          currentChatTitle
+        });
         const baseText = getMessageText(row);
         const contentKind = detectMessageContentKind(row, baseText);
         const enrichment = extractMessageEnrichmentByKind(row, contentKind, baseText);
@@ -1068,6 +1093,7 @@
           id,
           role,
           text: toSafeText(text, 800),
+          author: toSafeText(prePlainMeta.author || '', 120),
           timestamp,
           kind: contentKind,
           enriched: {
@@ -1135,6 +1161,50 @@
   let lastSentFingerprint = '';
   let lastSentAt = 0;
   const SEND_DEDUPE_WINDOW_MS = 6000;
+  const DEFAULT_COMPOSER_TIMEOUT_MS = 6800;
+
+  function collapseRepeatedWholeMessage(text) {
+    const source = toSafeText(text || '', 2200);
+    if (!source || source.length < 24) {
+      return source;
+    }
+
+    const match = source.match(/^([\s\S]{12,}?)\1{1,}$/);
+    if (!match || !match[1]) {
+      return source;
+    }
+
+    const candidate = toSafeText(match[1], 2200).trim();
+    if (!candidate || candidate.length < 12) {
+      return source;
+    }
+
+    // Prevent collapsing tiny/repetitive non-message tokens.
+    const hasLetters = /[a-zA-ZáéíóúÁÉÍÓÚñÑ]/.test(candidate);
+    const hasNaturalSeparators = /[\s.,;:!?¿¡]/.test(candidate);
+    if (!hasLetters || !hasNaturalSeparators) {
+      return source;
+    }
+
+    return candidate;
+  }
+
+  function normalizeOutgoingMessage(text) {
+    const source = String(text || '').trim();
+    if (!source) {
+      return {
+        text: '',
+        duplicateCollapsed: false
+      };
+    }
+
+    const normalized = toSafeText(source, 2200);
+    const collapsed = collapseRepeatedWholeMessage(normalized);
+    return {
+      text: collapsed,
+      duplicateCollapsed: collapsed !== normalized
+    };
+  }
 
   function buildOutgoingFingerprint(text) {
     const normalizedText = toSafeText(text || '', 1200).toLowerCase();
@@ -1637,20 +1707,78 @@
     return icon ? icon.closest('button') : null;
   }
 
-  function getComposerEditor() {
-    const selectors = [
-      'footer div[contenteditable="true"][role="textbox"]',
-      'footer div[contenteditable="true"][data-tab]'
-    ];
+  function isComposerEditorCandidate(editor) {
+    if (!editor || !(editor instanceof Element)) {
+      return false;
+    }
+    if (!editor.isContentEditable || editor.closest('header')) {
+      return false;
+    }
 
-    for (const selector of selectors) {
-      const editor = document.querySelector(selector);
-      if (editor) {
-        return editor;
+    const aria = String(editor.getAttribute('aria-label') || '').toLowerCase();
+    const placeholder = String(editor.getAttribute('data-placeholder') || editor.getAttribute('placeholder') || '').toLowerCase();
+    const dataTestId = String(editor.getAttribute('data-testid') || '').toLowerCase();
+    const tokens = `${aria} ${placeholder} ${dataTestId}`;
+    if (
+      /\b(search|buscar|busca|find)\b/i.test(tokens) ||
+      dataTestId.includes('search') ||
+      dataTestId.includes('chatlist-search') ||
+      editor.closest('[role="search"], [data-testid*="search" i], [data-testid*="chatlist" i]')
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function queryComposerInScope(scope, selectors) {
+    const safeScope = scope && typeof scope.querySelectorAll === 'function' ? scope : null;
+    const safeSelectors = Array.isArray(selectors) ? selectors : [];
+    if (!safeScope || !safeSelectors.length) {
+      return null;
+    }
+
+    const seen = new Set();
+    for (const selector of safeSelectors) {
+      const nodes = safeScope.querySelectorAll(selector);
+      for (const editor of nodes) {
+        if (!editor || seen.has(editor)) {
+          continue;
+        }
+        seen.add(editor);
+        if (isComposerEditorCandidate(editor)) {
+          return editor;
+        }
       }
     }
 
     return null;
+  }
+
+  function getComposerEditor() {
+    const selectors = [
+      'div[contenteditable="true"][role="textbox"]',
+      'div[contenteditable="true"][data-tab]',
+      'div[contenteditable="true"][data-lexical-editor="true"]',
+      'div[contenteditable="true"][aria-label*="message" i]',
+      'div[contenteditable="true"][aria-label*="mensaje" i]',
+      'div[contenteditable="true"][data-placeholder*="message" i]',
+      'div[contenteditable="true"][data-placeholder*="mensaje" i]'
+    ];
+    const footer = document.querySelector('footer');
+    const footerEditor = queryComposerInScope(footer, selectors);
+    if (footerEditor) {
+      return footerEditor;
+    }
+
+    const sendButton = getSendButton();
+    const sendScope = sendButton ? sendButton.closest('footer, main, [role="application"]') : null;
+    const sendScopeEditor = queryComposerInScope(sendScope, selectors);
+    if (sendScopeEditor) {
+      return sendScopeEditor;
+    }
+
+    return queryComposerInScope(document, selectors);
   }
 
   function dispatchComposerInput(editor, inputType = 'insertText', data = null) {
@@ -1829,7 +1957,8 @@
   }
 
   async function sendMessageToCurrentChat(text, options = {}) {
-    const message = String(text || '').trim();
+    const normalizedMessage = normalizeOutgoingMessage(text);
+    const message = normalizedMessage.text;
     if (!message) {
       return {
         ok: false,
@@ -1893,7 +2022,8 @@
     logDebug('send_message:start', {
       chatKey: toSafeText(chatKey, 180),
       chars: message.length,
-      preview: toSafeText(message, 180)
+      preview: toSafeText(message, 180),
+      duplicateCollapsed: normalizedMessage.duplicateCollapsed
     });
 
     if (fingerprint && lastSentFingerprint === fingerprint && now - lastSentAt < SEND_DEDUPE_WINDOW_MS) {
@@ -1906,6 +2036,7 @@
         result: {
           sent: false,
           duplicatePrevented: true,
+          duplicateCollapsed: normalizedMessage.duplicateCollapsed,
           text: message
         }
       };
@@ -1923,12 +2054,16 @@
           sent: false,
           duplicatePrevented: true,
           alreadyInChat: true,
+          duplicateCollapsed: normalizedMessage.duplicateCollapsed,
           text: message
         }
       };
     }
 
-    const editor = await waitForComposerEditor(Math.max(800, Number(safeOptions.composerTimeoutMs) || 4200), 70);
+    const editor = await waitForComposerEditor(
+      Math.max(800, Number(safeOptions.composerTimeoutMs) || DEFAULT_COMPOSER_TIMEOUT_MS),
+      70
+    );
     if (!editor) {
       return {
         ok: false,
@@ -1942,6 +2077,7 @@
     const initialSendButtonDisabled = Boolean(initialSendButton?.disabled);
     let sendButtonUsed = null;
     let dispatchMethod = 'enter_key';
+    let enterLikelySent = false;
     const readySendButton = await waitForReadySendButton(950, 70);
     if (readySendButton) {
       dispatchMethod = 'send_button';
@@ -1949,15 +2085,22 @@
       readySendButton.click();
     } else {
       dispatchComposerEnter(editor);
-      const fallbackButton = await waitForReadySendButton(550, 70);
-      if (fallbackButton) {
-        dispatchMethod = 'enter_then_send_button';
-        sendButtonUsed = fallbackButton;
-        fallbackButton.click();
+      enterLikelySent = await waitForOutgoingEcho(message, 860, 120);
+      const composerAfterEnter = composerContainsText(editor, message);
+      if (!enterLikelySent && composerAfterEnter) {
+        const fallbackButton = await waitForReadySendButton(550, 70);
+        if (fallbackButton && !hasRecentOutgoingMessage(message)) {
+          dispatchMethod = 'enter_then_send_button';
+          sendButtonUsed = fallbackButton;
+          fallbackButton.click();
+        }
       }
     }
 
-    const confirmedInTimeline = await waitForOutgoingEcho(message, 2600, 180);
+    let confirmedInTimeline = enterLikelySent;
+    if (!confirmedInTimeline) {
+      confirmedInTimeline = await waitForOutgoingEcho(message, 2600, 180);
+    }
     const composerStillHasMessage = composerContainsText(editor, message);
     if (confirmedInTimeline) {
       lastSentFingerprint = fingerprint;
@@ -1976,6 +2119,7 @@
       sendButtonInitiallyDisabled: initialSendButtonDisabled,
       sendButtonDisabled,
       composerStillHasMessage,
+      enterLikelySent,
       confirmedInTimeline
     });
 
@@ -1989,6 +2133,7 @@
           dispatchMethod,
           composeMode: composeResult.mode,
           sendButtonDisabled,
+          duplicateCollapsed: normalizedMessage.duplicateCollapsed,
           text: message
         }
       };
@@ -2002,6 +2147,7 @@
         dispatchMethod,
         composeMode: composeResult.mode,
         sendButtonDisabled,
+        duplicateCollapsed: normalizedMessage.duplicateCollapsed,
         text: message
       }
     };
@@ -2768,7 +2914,7 @@
     const hasChatIndexLookup = Number.isFinite(requestedChatIndex) && requestedChatIndex >= 1;
     const hasTargetLookup = Boolean(requestedPhoneDigits || lookupQueries.length || hasChatIndexLookup);
     const verifyTimeoutMs = Math.max(700, Number(safeArgs.verifyTimeoutMs) || 5200);
-    const composerTimeoutMs = Math.max(800, Number(safeArgs.composerTimeoutMs) || 4200);
+    const composerTimeoutMs = Math.max(800, Number(safeArgs.composerTimeoutMs) || DEFAULT_COMPOSER_TIMEOUT_MS);
     logDebug('open_chat_and_send:start', {
       hasTargetLookup,
       requestedPhoneDigits,
@@ -3077,7 +3223,7 @@
         args,
         expectedPhone: getRequestedPhoneDigitsFromArgs(args),
         verifyTimeoutMs: Number(args.verifyTimeoutMs) || 4800,
-        composerTimeoutMs: Number(args.composerTimeoutMs) || 4200
+        composerTimeoutMs: Number(args.composerTimeoutMs) || DEFAULT_COMPOSER_TIMEOUT_MS
       });
     }
 

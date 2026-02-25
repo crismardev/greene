@@ -11224,6 +11224,31 @@ export function initPanelApp() {
     return text.slice(0, 1200);
   }
 
+  function collapseRepeatedWhatsappMessageText(value = '') {
+    const source = sanitizeDirectWhatsappMessageText(value);
+    if (!source || source.length < 24) {
+      return source;
+    }
+
+    const match = source.match(/^([\s\S]{12,}?)\1{1,}$/);
+    if (!match || !match[1]) {
+      return source;
+    }
+
+    const collapsed = sanitizeDirectWhatsappMessageText(match[1] || '');
+    if (!collapsed || collapsed.length < 12) {
+      return source;
+    }
+
+    const hasLetters = /[a-zA-ZáéíóúÁÉÍÓÚñÑ]/.test(collapsed);
+    const hasSeparators = /[\s.,;:!?¿¡]/.test(collapsed);
+    if (!hasLetters || !hasSeparators) {
+      return source;
+    }
+
+    return collapsed;
+  }
+
   function matchWhatsappAliasPrefixFromSegment(segmentText = '') {
     const sourceWords = splitIntentWords(segmentText);
     if (!sourceWords.length) {
@@ -15698,11 +15723,41 @@ export function initPanelApp() {
     renderAiDynamicContext();
 
     try {
-      const response = await tabContextService.runSiteActionInTab(
-        whatsappSuggestionState.tabId,
-        'whatsapp',
+      const suggestionTextRaw = String(whatsappSuggestionState.text || '');
+      const suggestionText = collapseRepeatedWhatsappMessageText(suggestionTextRaw);
+      if (!suggestionText) {
+        setWhatsappSuggestionUiStatus('No hay texto valido para enviar.', true);
+        setStatus(whatsappSuggestionStatus, 'No hay texto valido para enviar.', true);
+        renderAiDynamicContext();
+        return;
+      }
+
+      const ensuredWhatsapp = await ensureWhatsappTabForTool(
+        {
+          tabId: Number(whatsappSuggestionState.tabId) || -1
+        },
+        {
+          preferPhoneRoute: false
+        }
+      );
+      if (!ensuredWhatsapp?.ok || !ensuredWhatsapp.tab || !isWhatsappContext(ensuredWhatsapp.tab)) {
+        const ensuredError = String(ensuredWhatsapp?.error || 'No hay tab de WhatsApp disponible para enviar la sugerencia.').trim();
+        setWhatsappSuggestionUiStatus(ensuredError, true);
+        setStatus(whatsappSuggestionStatus, ensuredError, true);
+        renderAiDynamicContext();
+        return;
+      }
+
+      const ensuredTabId = Number(ensuredWhatsapp.tab?.tabId) || -1;
+      const response = await runWhatsappSiteActionWithRetries(
+        ensuredTabId,
         'sendMessage',
-        { text: whatsappSuggestionState.text }
+        { text: suggestionText },
+        {
+          openedViaUrl: ensuredWhatsapp.openedViaUrl === true,
+          expectedPhone: ensuredWhatsapp.phone || '',
+          maxAttempts: ensuredWhatsapp.openedViaUrl === true ? 4 : 3
+        }
       );
 
       if (!response || response.ok !== true) {

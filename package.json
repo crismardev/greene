@@ -1,6 +1,6 @@
 {
   "name": "greene",
-  "version": "1.0.0",
+  "version": "2.0.2",
   "description": "Extension de Chrome (Manifest V3) para abrir **Greene** en un **side panel**.",
   "scripts": {
     "build:css": "tailwindcss -c tailwind.config.js -i ./panel/tailwind.input.css -o ./panel/tailwind.generated.css --minify",
