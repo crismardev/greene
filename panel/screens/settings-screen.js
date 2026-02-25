@@ -27,6 +27,7 @@ export function createSettingsScreenController({
     settingsVoiceTtsVoiceSelect,
     settingsVoiceTtsSpeedInput,
     settingsVoiceTtsSpeedValue,
+    settingsVoiceTransportSelect,
     settingsVoicePauseMsInput,
     settingsVoicePauseMsValue,
     settingsLanguageSelect,
@@ -44,6 +45,8 @@ export function createSettingsScreenController({
   const DEFAULT_VOICE_PAUSE_MS = 650;
   const MIN_VOICE_PAUSE_MS = 300;
   const MAX_VOICE_PAUSE_MS = 5000;
+  const VOICE_TRANSPORT_REALTIME = 'realtime';
+  const VOICE_TRANSPORT_TURN = 'turn';
 
   function getPanelSettings() {
     return state.panelSettings;
@@ -106,6 +109,13 @@ export function createSettingsScreenController({
     return Math.round(clamped);
   }
 
+  function normalizeVoiceTransport(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    return token === VOICE_TRANSPORT_TURN ? VOICE_TRANSPORT_TURN : VOICE_TRANSPORT_REALTIME;
+  }
+
   function updateVoiceModeMeta() {
     const panelSettings = getPanelSettings();
     const selectedLanguage = normalizeAssistantLanguage(
@@ -113,6 +123,7 @@ export function createSettingsScreenController({
     );
     const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || '');
     const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
+    const transport = normalizeVoiceTransport(settingsVoiceTransportSelect?.value || panelSettings.voiceTransport);
     const pauseMs = normalizeVoicePauseMs(settingsVoicePauseMsInput?.value ?? panelSettings.voicePauseMs);
 
     if (settingsVoiceTtsSpeedValue) {
@@ -126,7 +137,8 @@ export function createSettingsScreenController({
       return;
     }
 
-    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
+    const transportLabel = transport === VOICE_TRANSPORT_REALTIME ? 'Realtime' : 'Turn';
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} · Transporte: ${transportLabel} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
   }
 
   function applyPanelSettingsToUi() {
@@ -158,6 +170,9 @@ export function createSettingsScreenController({
 
     if (settingsVoiceTtsSpeedInput) {
       settingsVoiceTtsSpeedInput.value = String(normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed));
+    }
+    if (settingsVoiceTransportSelect) {
+      settingsVoiceTransportSelect.value = normalizeVoiceTransport(panelSettings.voiceTransport);
     }
     if (settingsVoicePauseMsInput) {
       settingsVoicePauseMsInput.value = String(normalizeVoicePauseMs(panelSettings.voicePauseMs));
@@ -219,6 +234,9 @@ export function createSettingsScreenController({
     merged.voiceTtsVoice = normalizeVoiceTtsVoice(merged.voiceTtsVoice || defaults?.panelSettingsDefaults?.voiceTtsVoice || '');
     merged.voiceTtsSpeed = normalizeVoiceTtsSpeed(
       merged.voiceTtsSpeed ?? defaults?.panelSettingsDefaults?.voiceTtsSpeed ?? DEFAULT_VOICE_TTS_SPEED
+    );
+    merged.voiceTransport = normalizeVoiceTransport(
+      merged.voiceTransport ?? defaults?.panelSettingsDefaults?.voiceTransport ?? VOICE_TRANSPORT_REALTIME
     );
     merged.voicePauseMs = normalizeVoicePauseMs(
       merged.voicePauseMs ?? defaults?.panelSettingsDefaults?.voicePauseMs ?? DEFAULT_VOICE_PAUSE_MS
@@ -320,6 +338,9 @@ export function createSettingsScreenController({
     const nextVoiceTtsSpeed = normalizeVoiceTtsSpeed(
       settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed ?? DEFAULT_VOICE_TTS_SPEED
     );
+    const nextVoiceTransport = normalizeVoiceTransport(
+      settingsVoiceTransportSelect?.value ?? panelSettings.voiceTransport ?? VOICE_TRANSPORT_REALTIME
+    );
     const nextVoicePauseMs = normalizeVoicePauseMs(
       settingsVoicePauseMsInput?.value ?? panelSettings.voicePauseMs ?? DEFAULT_VOICE_PAUSE_MS
     );
@@ -336,6 +357,7 @@ export function createSettingsScreenController({
       language: nextLanguage,
       voiceTtsVoice: nextVoiceTtsVoice,
       voiceTtsSpeed: nextVoiceTtsSpeed,
+      voiceTransport: nextVoiceTransport,
       voicePauseMs: nextVoicePauseMs,
       onboardingDone: true,
       systemPrompt: nextPrompt

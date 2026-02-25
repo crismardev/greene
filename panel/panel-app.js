@@ -264,8 +264,11 @@ export function initPanelApp() {
   const VOICE_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
   const VOICE_TRANSCRIPTION_LANGUAGE = 'es';
   const VOICE_CHAT_RESPONSE_MODEL = 'gpt-4o-mini';
+  const VOICE_CHAT_RESPONSE_REALTIME_MODEL = 'gpt-realtime';
   const VOICE_TTS_MODEL = 'gpt-4o-mini-tts';
   const VOICE_TTS_VOICE = 'alloy';
+  const VOICE_TRANSPORT_REALTIME = 'realtime';
+  const VOICE_TRANSPORT_TURN = 'turn';
   const OPENAI_TTS_VOICE_OPTIONS = Object.freeze(['alloy', 'ash', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer']);
   const OPENAI_TTS_VOICE_SET = new Set(OPENAI_TTS_VOICE_OPTIONS);
   const VOICE_TTS_SPEED_DEFAULT = 1;
@@ -293,6 +296,9 @@ export function initPanelApp() {
   const VOICE_SESSION_RESTART_DELAY_MS = 240;
   const VOICE_SESSION_RESTART_AFTER_ERROR_MS = 780;
   const VOICE_REPLY_SYNC_FALLBACK_MS_PER_CHAR = 34;
+  const OPENAI_REALTIME_WS_ENDPOINT = 'wss://api.openai.com/v1/realtime';
+  const OPENAI_REALTIME_WS_CONNECT_TIMEOUT_MS = 10000;
+  const OPENAI_REALTIME_WS_RESPONSE_TIMEOUT_MS = 90000;
   const CHAT_INTERRUPT_WAIT_MAX_MS = 2200;
 
   const DEFAULT_OLLAMA_MODEL = 'gpt-oss:20b';
@@ -466,6 +472,7 @@ export function initPanelApp() {
     language: BROWSER_DEFAULT_ASSISTANT_LANGUAGE,
     voiceTtsVoice: VOICE_TTS_VOICE,
     voiceTtsSpeed: VOICE_TTS_SPEED_DEFAULT,
+    voiceTransport: VOICE_TRANSPORT_REALTIME,
     voicePauseMs: VOICE_PAUSE_MS_DEFAULT,
     onboardingDone: false,
     systemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
@@ -584,6 +591,7 @@ export function initPanelApp() {
   const settingsVoiceTtsVoiceSelect = document.getElementById('settingsVoiceTtsVoiceSelect');
   const settingsVoiceTtsSpeedInput = document.getElementById('settingsVoiceTtsSpeedInput');
   const settingsVoiceTtsSpeedValue = document.getElementById('settingsVoiceTtsSpeedValue');
+  const settingsVoiceTransportSelect = document.getElementById('settingsVoiceTransportSelect');
   const settingsVoicePauseMsInput = document.getElementById('settingsVoicePauseMsInput');
   const settingsVoicePauseMsValue = document.getElementById('settingsVoicePauseMsValue');
   const settingsLanguageSelect = document.getElementById('settingsLanguageSelect');
@@ -4795,6 +4803,7 @@ export function initPanelApp() {
     next.voiceActiveListening = true;
     next.voiceTtsVoice = normalizeVoiceTtsVoice(next.voiceTtsVoice || VOICE_TTS_VOICE);
     next.voiceTtsSpeed = normalizeVoiceTtsSpeed(next.voiceTtsSpeed);
+    next.voiceTransport = normalizeVoiceTransport(next.voiceTransport || VOICE_TRANSPORT_REALTIME);
     next.voicePauseMs = normalizeVoicePauseMs(next.voicePauseMs);
     next.securityConfig = pinCryptoService.isConfigured(next.securityConfig) ? next.securityConfig : null;
     next.systemVariables = normalizeSystemVariables(next.systemVariables);
@@ -6140,6 +6149,7 @@ export function initPanelApp() {
     panelSettings.voiceActiveListening = true;
     panelSettings.voiceTtsVoice = normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
     panelSettings.voiceTtsSpeed = normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed);
+    panelSettings.voiceTransport = normalizeVoiceTransport(panelSettings.voiceTransport || VOICE_TRANSPORT_REALTIME);
     panelSettings.voicePauseMs = normalizeVoicePauseMs(panelSettings.voicePauseMs);
     panelSettings.systemVariables = normalizeSystemVariables(panelSettings.systemVariables);
     panelSettings.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
@@ -6158,6 +6168,7 @@ export function initPanelApp() {
         voiceActiveListening: true,
         voiceTtsVoice: panelSettings.voiceTtsVoice,
         voiceTtsSpeed: panelSettings.voiceTtsSpeed,
+        voiceTransport: panelSettings.voiceTransport,
         voicePauseMs: panelSettings.voicePauseMs,
         systemPrompt: panelSettings.systemPrompt,
         systemVariables: { ...panelSettings.systemVariables },
@@ -6922,6 +6933,13 @@ export function initPanelApp() {
     return Number(clamped.toFixed(2));
   }
 
+  function normalizeVoiceTransport(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    return token === VOICE_TRANSPORT_TURN ? VOICE_TRANSPORT_TURN : VOICE_TRANSPORT_REALTIME;
+  }
+
   function normalizeVoicePauseMs(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
@@ -6938,6 +6956,10 @@ export function initPanelApp() {
 
   function getConfiguredVoiceTtsSpeed() {
     return normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
+  }
+
+  function getConfiguredVoiceTransport() {
+    return normalizeVoiceTransport(settingsVoiceTransportSelect?.value || panelSettings.voiceTransport);
   }
 
   function getConfiguredVoicePauseMs() {
@@ -6958,6 +6980,7 @@ export function initPanelApp() {
     );
     const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
     const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
+    const transport = normalizeVoiceTransport(settingsVoiceTransportSelect?.value || panelSettings.voiceTransport);
     const pauseMs = getConfiguredVoicePauseMs();
 
     if (settingsVoiceTtsSpeedValue) {
@@ -6971,7 +6994,8 @@ export function initPanelApp() {
       return;
     }
 
-    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
+    const transportLabel = transport === VOICE_TRANSPORT_REALTIME ? 'Realtime' : 'Turn';
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} · Transporte: ${transportLabel} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
   }
 
   function getOpenAiSpeechProfile() {
@@ -12691,6 +12715,417 @@ export function initPanelApp() {
     };
   }
 
+  function isOpenAiChatProfile(profile) {
+    const provider = aiProviderService.normalizeProviderId(profile?.provider || '');
+    return provider === AI_PROVIDER_IDS.OPENAI;
+  }
+
+  function buildRealtimeConversationPayload(messages = []) {
+    const safeMessages = (Array.isArray(messages) ? messages : [])
+      .map((item) => {
+        const role = item?.role === 'system' || item?.role === 'assistant' ? item.role : 'user';
+        const content = String(item?.content || '').trim();
+        if (!content) {
+          return null;
+        }
+        return {
+          role,
+          content
+        };
+      })
+      .filter(Boolean);
+
+    const systemBlocks = [];
+    const conversationItems = [];
+
+    for (const message of safeMessages) {
+      if (message.role === 'system') {
+        systemBlocks.push(message.content);
+        continue;
+      }
+
+      conversationItems.push({
+        type: 'message',
+        role: message.role === 'assistant' ? 'assistant' : 'user',
+        content: [
+          {
+            type: message.role === 'assistant' ? 'text' : 'input_text',
+            text: message.content
+          }
+        ]
+      });
+    }
+
+    return {
+      instructions: systemBlocks.join('\n\n').trim(),
+      items: conversationItems
+    };
+  }
+
+  function buildOpenAiRealtimeSubprotocols(apiKey) {
+    const token = String(apiKey || '').trim();
+    if (!token) {
+      return [];
+    }
+    return ['realtime', `openai-insecure-api-key.${token}`, 'openai-beta.realtime-v1'];
+  }
+
+  function extractRealtimeTextDelta(payload) {
+    if (!payload || typeof payload !== 'object') {
+      return '';
+    }
+
+    if (typeof payload.delta === 'string' && payload.delta) {
+      return payload.delta;
+    }
+
+    if (typeof payload.text === 'string' && payload.text) {
+      return payload.text;
+    }
+
+    const part = payload?.part && typeof payload.part === 'object' ? payload.part : null;
+    if (typeof part?.delta === 'string' && part.delta) {
+      return part.delta;
+    }
+    if (typeof part?.text === 'string' && part.text) {
+      return part.text;
+    }
+
+    const itemContent = Array.isArray(payload?.item?.content) ? payload.item.content : [];
+    for (const contentPart of itemContent) {
+      if (typeof contentPart?.delta === 'string' && contentPart.delta) {
+        return contentPart.delta;
+      }
+    }
+
+    return '';
+  }
+
+  function collectRealtimeTextFromContent(contentParts = []) {
+    const chunks = [];
+    for (const part of Array.isArray(contentParts) ? contentParts : []) {
+      if (typeof part === 'string' && part) {
+        chunks.push(part);
+        continue;
+      }
+      if (!part || typeof part !== 'object') {
+        continue;
+      }
+      if (typeof part.text === 'string' && part.text) {
+        chunks.push(part.text);
+      } else if (typeof part.transcript === 'string' && part.transcript) {
+        chunks.push(part.transcript);
+      } else if (typeof part.value === 'string' && part.value) {
+        chunks.push(part.value);
+      }
+    }
+    return chunks.join('');
+  }
+
+  function extractRealtimeTextFromDonePayload(payload) {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const response = safePayload?.response && typeof safePayload.response === 'object' ? safePayload.response : {};
+    const chunks = [];
+
+    const directCandidates = [
+      safePayload?.output_text,
+      safePayload?.text,
+      response?.output_text,
+      response?.text
+    ];
+    for (const candidate of directCandidates) {
+      if (typeof candidate === 'string' && candidate) {
+        chunks.push(candidate);
+      }
+    }
+
+    const responseOutput = Array.isArray(response?.output) ? response.output : [];
+    for (const item of responseOutput) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      if (typeof item?.text === 'string' && item.text) {
+        chunks.push(item.text);
+      }
+      const joinedContent = collectRealtimeTextFromContent(item?.content);
+      if (joinedContent) {
+        chunks.push(joinedContent);
+      }
+    }
+
+    const joined = chunks.join('').trim();
+    return joined;
+  }
+
+  function isRealtimeDoneEvent(payload) {
+    const type = String(payload?.type || '')
+      .trim()
+      .toLowerCase();
+    return (
+      type === 'response.done' ||
+      type === 'response.completed' ||
+      type === 'response.text.done' ||
+      type === 'response.output_text.done'
+    );
+  }
+
+  function createAbortLikeError(message = 'Operacion cancelada.') {
+    const error = new Error(String(message || 'Operacion cancelada.'));
+    error.name = 'AbortError';
+    return error;
+  }
+
+  async function streamVoiceRealtimeResponse({ messages, apiKey, onChunk, signal = null }) {
+    const token = String(apiKey || '').trim();
+    if (!token) {
+      throw new Error('Falta API key para OpenAI Realtime.');
+    }
+
+    if (typeof WebSocket !== 'function') {
+      throw new Error('Realtime voice no soportado en este navegador.');
+    }
+
+    const payload = buildRealtimeConversationPayload(messages);
+    if (!payload.items.length) {
+      throw new Error('No hay mensajes para enviar en Realtime voice.');
+    }
+
+    const wsUrl = `${OPENAI_REALTIME_WS_ENDPOINT}?model=${encodeURIComponent(VOICE_CHAT_RESPONSE_REALTIME_MODEL)}`;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let socket = null;
+      let connectTimeout = 0;
+      let responseTimeout = 0;
+      let accumulated = '';
+
+      const clearTimers = () => {
+        if (connectTimeout) {
+          window.clearTimeout(connectTimeout);
+          connectTimeout = 0;
+        }
+        if (responseTimeout) {
+          window.clearTimeout(responseTimeout);
+          responseTimeout = 0;
+        }
+      };
+
+      const cleanSignal = () => {
+        if (signal && typeof signal.removeEventListener === 'function') {
+          signal.removeEventListener('abort', handleAbortSignal);
+        }
+      };
+
+      const cleanup = () => {
+        clearTimers();
+        cleanSignal();
+      };
+
+      const settleReject = (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        reject(error instanceof Error ? error : new Error(String(error || 'OpenAI Realtime error.')));
+      };
+
+      const settleResolve = (text) => {
+        if (settled) {
+          return;
+        }
+        const output = String(text || '').trim();
+        if (!output) {
+          settleReject(new Error('OpenAI Realtime no devolvio contenido.'));
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(output);
+      };
+
+      const refreshResponseTimeout = () => {
+        if (responseTimeout) {
+          window.clearTimeout(responseTimeout);
+        }
+        responseTimeout = window.setTimeout(() => {
+          try {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+              socket.close(1000, 'timeout');
+            }
+          } catch (_) {
+            // Ignore timeout close errors.
+          }
+          settleReject(new Error('OpenAI Realtime timeout de respuesta.'));
+        }, OPENAI_REALTIME_WS_RESPONSE_TIMEOUT_MS);
+      };
+
+      const handleAbortSignal = () => {
+        try {
+          if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+            socket.close(1000, 'abort');
+          }
+        } catch (_) {
+          // Ignore abort close failures.
+        }
+        settleReject(createAbortLikeError('Respuesta interrumpida.'));
+      };
+
+      if (signal && typeof signal === 'object' && signal.aborted === true) {
+        settleReject(createAbortLikeError('Respuesta interrumpida.'));
+        return;
+      }
+
+      if (signal && typeof signal.addEventListener === 'function') {
+        signal.addEventListener('abort', handleAbortSignal, { once: true });
+      }
+
+      try {
+        socket = new WebSocket(wsUrl, buildOpenAiRealtimeSubprotocols(token));
+      } catch (error) {
+        settleReject(error instanceof Error ? error : new Error('No se pudo abrir canal Realtime.'));
+        return;
+      }
+
+      connectTimeout = window.setTimeout(() => {
+        try {
+          if (socket && socket.readyState === WebSocket.CONNECTING) {
+            socket.close(1000, 'connect_timeout');
+          }
+        } catch (_) {
+          // Ignore connection timeout close issues.
+        }
+        settleReject(new Error('OpenAI Realtime timeout de conexion.'));
+      }, OPENAI_REALTIME_WS_CONNECT_TIMEOUT_MS);
+
+      socket.addEventListener('open', () => {
+        if (connectTimeout) {
+          window.clearTimeout(connectTimeout);
+          connectTimeout = 0;
+        }
+        refreshResponseTimeout();
+
+        try {
+          socket.send(
+            JSON.stringify({
+              type: 'session.update',
+              session: {
+                modalities: ['text'],
+                instructions: payload.instructions
+              }
+            })
+          );
+
+          for (const item of payload.items) {
+            socket.send(
+              JSON.stringify({
+                type: 'conversation.item.create',
+                item
+              })
+            );
+          }
+
+          socket.send(
+            JSON.stringify({
+              type: 'response.create',
+              response: {
+                modalities: ['text']
+              }
+            })
+          );
+        } catch (error) {
+          settleReject(error instanceof Error ? error : new Error('No se pudo enviar payload Realtime.'));
+        }
+      });
+
+      socket.addEventListener('message', (event) => {
+        refreshResponseTimeout();
+        let payloadMessage = null;
+        try {
+          payloadMessage = JSON.parse(String(event?.data || '{}'));
+        } catch (_) {
+          return;
+        }
+
+        const type = String(payloadMessage?.type || '')
+          .trim()
+          .toLowerCase();
+        if (!type) {
+          return;
+        }
+
+        if (type === 'error') {
+          const errorText = String(
+            payloadMessage?.error?.message || payloadMessage?.message || payloadMessage?.detail || 'OpenAI Realtime error.'
+          ).trim();
+          settleReject(new Error(errorText || 'OpenAI Realtime error.'));
+          return;
+        }
+
+        if (type.includes('.delta')) {
+          const delta = extractRealtimeTextDelta(payloadMessage);
+          if (delta) {
+            accumulated += delta;
+            onChunk(delta);
+          }
+          return;
+        }
+
+        if (!isRealtimeDoneEvent(payloadMessage)) {
+          return;
+        }
+
+        const responseStatus = String(payloadMessage?.response?.status || '')
+          .trim()
+          .toLowerCase();
+        const failed = responseStatus === 'failed' || responseStatus === 'cancelled' || responseStatus === 'canceled';
+        if (failed && !accumulated.trim()) {
+          const statusError = String(
+            payloadMessage?.response?.status_details?.error?.message || payloadMessage?.response?.status_details?.reason || ''
+          ).trim();
+          settleReject(new Error(statusError || 'OpenAI Realtime no pudo completar la respuesta.'));
+          return;
+        }
+
+        if (!accumulated.trim()) {
+          const finalText = extractRealtimeTextFromDonePayload(payloadMessage);
+          if (finalText) {
+            accumulated = finalText;
+            onChunk(finalText);
+          }
+        }
+
+        settleResolve(accumulated);
+        try {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.close(1000, 'done');
+          }
+        } catch (_) {
+          // Ignore socket close cleanup issues.
+        }
+      });
+
+      socket.addEventListener('error', () => {
+        settleReject(new Error('No se pudo conectar con OpenAI Realtime.'));
+      });
+
+      socket.addEventListener('close', (event) => {
+        if (settled) {
+          return;
+        }
+        const output = accumulated.trim();
+        if (output) {
+          settleResolve(output);
+          return;
+        }
+        const reason = String(event?.reason || '').trim();
+        const code = Number(event?.code) || 0;
+        const detail = reason || (code ? `WS ${code}` : 'conexion cerrada');
+        settleReject(new Error(`OpenAI Realtime cerro la conexion (${detail}).`));
+      });
+    });
+  }
+
   async function streamChatResponse(userQuery, onChunk, options = {}) {
     if (selectedChatTool === 'chat' && options.refreshTabSnapshot !== false) {
       try {
@@ -12734,6 +13169,54 @@ export function initPanelApp() {
 
       onChunk(chunk);
     };
+
+    const shouldUseRealtimeVoiceTransport =
+      source === 'voice' &&
+      getConfiguredVoiceTransport() === VOICE_TRANSPORT_REALTIME &&
+      isOpenAiChatProfile(activeProfile);
+
+    if (shouldUseRealtimeVoiceTransport) {
+      const bufferedChunks = [];
+      try {
+        const realtimeOutput = await streamVoiceRealtimeResponse({
+          messages,
+          apiKey,
+          onChunk: (chunk) => {
+            if (!chunk) {
+              return;
+            }
+            bufferedChunks.push(chunk);
+          },
+          signal: options.signal || null
+        });
+
+        if (bufferedChunks.length) {
+          for (const chunk of bufferedChunks) {
+            handleChunk(chunk);
+          }
+        } else if (realtimeOutput) {
+          handleChunk(realtimeOutput);
+        }
+
+        logInfo('voice:realtime:used', {
+          model: VOICE_CHAT_RESPONSE_REALTIME_MODEL,
+          outputLength: String(realtimeOutput || '').length
+        });
+
+        return {
+          output: realtimeOutput,
+          contextUsed
+        };
+      } catch (error) {
+        if (isAbortLikeError(error)) {
+          throw error;
+        }
+
+        logWarn('voice:realtime:fallback', {
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+      }
+    }
 
     const output = await aiProviderService.streamWithProfile({
       profile: activeProfile,
@@ -12794,7 +13277,15 @@ export function initPanelApp() {
 
     try {
       const activeProfile = resolveChatProfileForSource(source);
-      const activeModel = activeProfile ? `${activeProfile.name} · ${activeProfile.model}` : getActiveModel();
+      const voiceRealtimeActive =
+        source === 'voice' &&
+        getConfiguredVoiceTransport() === VOICE_TRANSPORT_REALTIME &&
+        isOpenAiChatProfile(activeProfile);
+      const activeModel = activeProfile
+        ? `${activeProfile.name} · ${
+            voiceRealtimeActive ? `${VOICE_CHAT_RESPONSE_REALTIME_MODEL} (realtime)` : activeProfile.model
+          }`
+        : getActiveModel();
       const attachmentsPromptBlock = buildAttachmentsPromptBlock(attachmentsForTurn);
       const contentForModel = [content, attachmentsPromptBlock].filter(Boolean).join('\n\n').trim() || content;
       const memoryProfileMaxItems = Math.max(
@@ -17454,12 +17945,14 @@ export function initPanelApp() {
       const nextLanguage = normalizeAssistantLanguage(settingsLanguageSelect?.value || DEFAULT_ASSISTANT_LANGUAGE);
       const nextVoiceTtsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || VOICE_TTS_VOICE);
       const nextVoiceTtsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value);
+      const nextVoiceTransport = normalizeVoiceTransport(settingsVoiceTransportSelect?.value || VOICE_TRANSPORT_REALTIME);
       const nextVoicePauseMs = normalizeVoicePauseMs(settingsVoicePauseMsInput?.value);
       const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
       const current = settingsScreenController.getPanelSettings() || {};
       const currentLanguage = normalizeAssistantLanguage(current.language || DEFAULT_ASSISTANT_LANGUAGE);
       const currentVoiceTtsVoice = normalizeVoiceTtsVoice(current.voiceTtsVoice || VOICE_TTS_VOICE);
       const currentVoiceTtsSpeed = normalizeVoiceTtsSpeed(current.voiceTtsSpeed);
+      const currentVoiceTransport = normalizeVoiceTransport(current.voiceTransport || VOICE_TRANSPORT_REALTIME);
       const currentVoicePauseMs = normalizeVoicePauseMs(current.voicePauseMs);
       const currentPrompt = String(current.systemPrompt || '').trim();
 
@@ -17472,6 +17965,7 @@ export function initPanelApp() {
         nextLanguage === currentLanguage &&
         nextVoiceTtsVoice === currentVoiceTtsVoice &&
         nextVoiceTtsSpeed === currentVoiceTtsSpeed &&
+        nextVoiceTransport === currentVoiceTransport &&
         nextVoicePauseMs === currentVoicePauseMs &&
         nextPrompt === currentPrompt
       ) {
@@ -18259,6 +18753,13 @@ export function initPanelApp() {
       });
     });
 
+    settingsVoiceTransportSelect?.addEventListener('change', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 180
+      });
+    });
+
     settingsVoicePauseMsInput?.addEventListener('input', () => {
       updateVoiceModeMetaLabel();
       scheduleAssistantSettingsAutosave({
@@ -18674,6 +19175,7 @@ export function initPanelApp() {
           settingsVoiceTtsVoiceSelect,
           settingsVoiceTtsSpeedInput,
           settingsVoiceTtsSpeedValue,
+          settingsVoiceTransportSelect,
           settingsVoicePauseMsInput,
           settingsVoicePauseMsValue,
           settingsLanguageSelect,
