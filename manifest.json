@@ -98,7 +98,7 @@
     {
       "matches": [
         "https://nuwwe.com/login*",
-        "https://www.nuwwe.com/login*"
+        "https://*.nuwwe.com/login*"
       ],
       "js": [
         "src/tool-config.js",

@@ -813,6 +813,9 @@ export function initPanelApp() {
     isError: false
   };
   let dynamicContextMetaLogKey = '';
+  let dynamicContextRenderKey = '';
+  let dynamicRelationDetailRenderKey = '';
+  let tabsContextJsonRenderKey = '';
   let dynamicSuggestionRenderIds = new Set();
   let dynamicRelationRenderIds = new Set();
   let dynamicUiToastHideTimer = 0;
@@ -1225,6 +1228,7 @@ export function initPanelApp() {
   });
   const {
     buildDynamicRelationsSignalKey,
+    buildRelationSimpleColumns,
     collectDynamicSignalsFromTab,
     fetchDynamicRelationCards,
     fetchDynamicRelationGroups,
@@ -5905,6 +5909,7 @@ export function initPanelApp() {
   }
 
   function goToPrimaryScreen() {
+    closeDynamicRelationDetailScreen();
     const nextScreen = resolveHomeOrOnboardingScreen();
     setScreen(nextScreen);
     if (nextScreen === 'home') {
@@ -13690,10 +13695,165 @@ export function initPanelApp() {
     }
   }
 
+  function buildTabsContextJsonRenderKey() {
+    const tabs = Array.isArray(tabContextSnapshot?.tabs) ? tabContextSnapshot.tabs : [];
+    const history = Array.isArray(tabContextSnapshot?.history) ? tabContextSnapshot.history : [];
+    const runtimeContext =
+      tabContextSnapshot?.runtimeContext && typeof tabContextSnapshot.runtimeContext === 'object'
+        ? tabContextSnapshot.runtimeContext
+        : {};
+    const runtimeKeys = Object.keys(runtimeContext).sort().slice(0, 36);
+    const tabsToken = tabs
+      .slice(0, 36)
+      .map((tab) =>
+        [
+          Number(tab?.tabId) || -1,
+          toSafeLogText(tab?.site || '', 20),
+          toSafeLogText(tab?.url || '', 120),
+          toSafeLogText(tab?.title || '', 84),
+          toSafeLogText(tab?.description || '', 84),
+          toSafeLogText(getTabSummary(tab), 84)
+        ].join('~')
+      )
+      .join('||');
+    const historyToken = history
+      .slice(0, 30)
+      .map((item) =>
+        [toSafeLogText(item?.url || '', 120), toSafeLogText(item?.title || '', 84), Number(item?.lastVisitTime) || 0].join(
+          '~'
+        )
+      )
+      .join('||');
+
+    return [
+      Number(tabContextSnapshot?.activeTabId) || -1,
+      toSafeLogText(tabContextSnapshot?.reason || '', 80),
+      tabs.length,
+      history.length,
+      runtimeKeys.join(','),
+      tabsToken,
+      historyToken
+    ].join('|');
+  }
+
+  function buildDynamicContextRenderKey(options = {}) {
+    const activeSite = String(options.activeSite || 'generic').toLowerCase();
+    const phoneCount = Math.max(0, Number(options.phoneCount) || 0);
+    const emailCount = Math.max(0, Number(options.emailCount) || 0);
+    const suggestions = Array.isArray(options.suggestions) ? options.suggestions : [];
+    const relations = Array.isArray(options.relations) ? options.relations : [];
+
+    const suggestionToken = suggestions
+      .map((item) =>
+        [
+          String(item?.id || ''),
+          String(item?.loading === true ? '1' : '0'),
+          String(item?.canExecute === true ? '1' : '0'),
+          String(item?.canRegenerate === true ? '1' : '0'),
+          toSafeLogText(item?.title || '', 80),
+          toSafeLogText(item?.caption || '', 80),
+          toSafeLogText(item?.description || '', 160),
+          toSafeLogText(item?.statusText || '', 120),
+          String(item?.statusError === true ? '1' : '0')
+        ].join('~')
+      )
+      .join('||');
+
+    const relationToken = relations
+      .map((item) => {
+        const rows = Array.isArray(item?.rows) ? item.rows : [];
+        const detailFields = Array.isArray(item?.detailFields) ? item.detailFields : [];
+        const rowsToken = rows
+          .slice(0, 4)
+          .map((row) =>
+            [
+              toSafeLogText(row?.label || '', 64),
+              toSafeLogText(row?.value || '', 96),
+              Math.max(0, Number(row?.count) || 0)
+            ].join(':')
+          )
+          .join(',');
+        const detailToken = detailFields
+          .slice(0, 4)
+          .map((field) => [toSafeLogText(field?.label || '', 64), toSafeLogText(field?.value || '', 96)].join(':'))
+          .join(',');
+
+        return [
+          String(item?.id || ''),
+          toSafeLogText(item?.title || '', 80),
+          toSafeLogText(item?.caption || '', 80),
+          toSafeLogText(item?.tableQualifiedName || '', 84),
+          Math.max(0, Number(item?.totalCount) || 0),
+          rowsToken,
+          detailToken
+        ].join('~');
+      })
+      .join('||');
+
+    return [
+      activeSite,
+      phoneCount,
+      emailCount,
+      suggestionToken,
+      relationToken,
+      String(dynamicRelationsContextState.loading === true ? '1' : '0'),
+      toSafeLogText(dynamicRelationsContextState.signalKey || '', 220),
+      String(dynamicRelationsContextState.isError === true ? '1' : '0')
+    ].join('|');
+  }
+
+  function buildDynamicRelationDetailRenderKey(cardModel = null) {
+    const state = dynamicRelationsDetailState && typeof dynamicRelationsDetailState === 'object' ? dynamicRelationsDetailState : {};
+    const groups = Array.isArray(state.groups) ? state.groups : [];
+    const card = cardModel && typeof cardModel === 'object' ? cardModel : null;
+    const cardToken = card
+      ? [
+          String(card.id || ''),
+          toSafeLogText(card.title || '', 84),
+          toSafeLogText(card.caption || '', 84),
+          toSafeLogText(card.tableQualifiedName || '', 96),
+          String(card?.meta?.singleResult === true ? '1' : '0')
+        ].join('~')
+      : 'none';
+
+    const groupsToken = groups
+      .map((group) => {
+        const items = Array.isArray(group?.items) ? group.items : [];
+        const itemsToken = items
+          .slice(0, 12)
+          .map((item) =>
+            [
+              toSafeLogText(item?.label || '', 64),
+              toSafeLogText(item?.value || '', 96),
+              Math.max(0, Number(item?.count) || 0)
+            ].join(':')
+          )
+          .join(',');
+        return [toSafeLogText(group?.key || '', 64), toSafeLogText(group?.label || '', 84), items.length, itemsToken].join('~');
+      })
+      .join('||');
+
+    return [
+      String(state.open === true ? '1' : '0'),
+      String(state.loading === true ? '1' : '0'),
+      String(state.cardId || ''),
+      String(state.isError === true ? '1' : '0'),
+      toSafeLogText(state.message || '', 180),
+      cardToken,
+      groupsToken
+    ].join('|');
+  }
+
   function renderTabsContextJson() {
     if (!tabsContextJson) {
       return;
     }
+
+    const nextRenderKey = buildTabsContextJsonRenderKey();
+    if (nextRenderKey === tabsContextJsonRenderKey) {
+      return;
+    }
+    tabsContextJsonRenderKey = nextRenderKey;
 
     const tabsPayload = tabContextSnapshot.tabs.map((tab) => toJsonTabRecord(tab, getTabSummary(tab)));
     const payload = {
@@ -14540,43 +14700,6 @@ export function initPanelApp() {
     return empty;
   }
 
-  function buildRelationCardPreviewItems(cardModel, limit = 4) {
-    const card = cardModel && typeof cardModel === 'object' ? cardModel : {};
-    const maxItems = Math.max(1, Math.min(8, Number(limit) || 4));
-    const detailFields = Array.isArray(card.detailFields) ? card.detailFields : [];
-    const rows = Array.isArray(card.rows) ? card.rows : [];
-
-    const detailItems = detailFields
-      .map((item) => {
-        const label = String(item?.label || '').trim();
-        const value = String(item?.value || '').trim();
-        if (!label || !value) {
-          return null;
-        }
-        return { label, value };
-      })
-      .filter(Boolean);
-    if (detailItems.length) {
-      return detailItems.slice(0, maxItems);
-    }
-
-    return rows
-      .map((row) => {
-        const label = String(row?.label || '').trim();
-        if (!label) {
-          return null;
-        }
-        const directValue = String(row?.value || '').trim();
-        if (directValue) {
-          return { label, value: directValue };
-        }
-        const count = Math.max(0, Number(row?.count) || 0);
-        return { label, value: String(count) };
-      })
-      .filter(Boolean)
-      .slice(0, maxItems);
-  }
-
   function appendRelationListItem(list, row) {
     if (!list) {
       return;
@@ -14596,6 +14719,69 @@ export function initPanelApp() {
     }
     item.append(label, value);
     list.appendChild(item);
+  }
+
+  function buildRelationDetailItems(items, limit = 10) {
+    const safeItems = Array.isArray(items) ? items : [];
+    const maxItems = Math.max(1, Math.min(16, Number(limit) || 10));
+    return safeItems
+      .map((item) => {
+        const label = String(item?.label || '').trim();
+        if (!label) {
+          return null;
+        }
+        const directValue = String(item?.value || '').trim();
+        if (directValue) {
+          return { label, value: directValue, mode: 'value' };
+        }
+        const count = Math.max(0, Number(item?.count) || 0);
+        return { label, value: String(count), mode: 'count' };
+      })
+      .filter(Boolean)
+      .slice(0, maxItems);
+  }
+
+  function buildRelationDetailGroupViewModel(group, cardModel) {
+    const safeGroup = group && typeof group === 'object' ? group : {};
+    const card = cardModel && typeof cardModel === 'object' ? cardModel : {};
+    const groupLabel = String(safeGroup.label || safeGroup.key || '').trim();
+    const fallbackCardTitle = String(card.title || '').trim() || 'Detalle';
+    const normalizedGroupLabel = groupLabel.toLowerCase();
+    const hasSpecificGroupLabel = Boolean(
+      groupLabel &&
+        normalizedGroupLabel !== 'detalle' &&
+        normalizedGroupLabel !== 'single' &&
+        normalizedGroupLabel !== 'signal' &&
+        normalizedGroupLabel !== 'grupo'
+    );
+    const items = buildRelationDetailItems(safeGroup.items, 10);
+    const hasCountOnlyRows = items.some((item) => item.mode === 'count');
+
+    let title = hasSpecificGroupLabel ? groupLabel : fallbackCardTitle;
+    let titleFieldIndex = -1;
+    if (!hasCountOnlyRows && items.length) {
+      const preferredTitleIndex = items.findIndex((item) =>
+        /(^|[\s_-])(title|name|subject|nombre|contact|cliente|company|account)([\s_-]|$)/i.test(item.label)
+      );
+      if (preferredTitleIndex >= 0) {
+        titleFieldIndex = preferredTitleIndex;
+        title = String(items[preferredTitleIndex].value || '').trim() || title;
+      } else if (!hasSpecificGroupLabel) {
+        title = fallbackCardTitle;
+      }
+    }
+
+    const subtitle = hasSpecificGroupLabel && groupLabel !== title ? groupLabel : '';
+    const kvItems = items.filter((_, index) => index !== titleFieldIndex).map((item) => ({
+      label: item.label,
+      value: item.value
+    }));
+
+    return {
+      title: title || fallbackCardTitle,
+      subtitle,
+      kvItems
+    };
   }
 
   function showDynamicUiToast(message, isError = false, options = {}) {
@@ -14670,6 +14856,19 @@ export function initPanelApp() {
         relationCount: relations.length
       });
     }
+
+    const nextDynamicContextRenderKey = buildDynamicContextRenderKey({
+      activeSite,
+      phoneCount,
+      emailCount,
+      suggestions,
+      relations
+    });
+    if (nextDynamicContextRenderKey === dynamicContextRenderKey) {
+      renderDynamicRelationDetailScreen();
+      return;
+    }
+    dynamicContextRenderKey = nextDynamicContextRenderKey;
 
     if (dynamicSuggestionsList) {
       dynamicSuggestionsList.textContent = '';
@@ -14753,53 +14952,20 @@ export function initPanelApp() {
           card.setAttribute('role', 'button');
           const titleText = String(cardModel?.title || 'Relacion').trim() || 'Relacion';
           card.setAttribute('aria-label', `Abrir detalle de ${titleText}`);
+          const columns = buildRelationSimpleColumns(cardModel);
+          const simpleRow = document.createElement('div');
+          simpleRow.className = 'ai-dynamic-relation-simple-row';
+          const columnKinds = ['title', 'meta', 'detail'];
 
-          const head = document.createElement('div');
-          head.className = 'ai-dynamic-relation-card__head';
-
-          const title = document.createElement('p');
-          title.className = 'ai-dynamic-relation-card__title';
-          title.textContent = titleText;
-          title.title = titleText;
-
-          const captionText =
-            String(cardModel?.caption || '').trim() || String(cardModel?.tableQualifiedName || '').trim();
-          const caption = document.createElement('p');
-          caption.className = 'ai-dynamic-relation-card__caption';
-          caption.textContent = captionText || '-';
-          caption.title = caption.textContent;
-
-          head.append(title, caption);
-
-          const kvList = document.createElement('ul');
-          kvList.className = 'ai-dynamic-relation-kv';
-          const previewItems = buildRelationCardPreviewItems(cardModel, 4);
-
-          if (previewItems.length) {
-            for (const item of previewItems) {
-              const row = document.createElement('li');
-              row.className = 'ai-dynamic-relation-kv__item';
-
-              const label = document.createElement('span');
-              label.className = 'ai-dynamic-relation-kv__label';
-              label.textContent = String(item?.label || '(sin etiqueta)');
-
-              const value = document.createElement('span');
-              value.className = 'ai-dynamic-relation-kv__value';
-              value.textContent = String(item?.value || '-');
-              value.title = value.textContent;
-
-              row.append(label, value);
-              kvList.appendChild(row);
-            }
-          } else {
-            const empty = document.createElement('li');
-            empty.className = 'ai-dynamic-relation-kv__item ai-dynamic-relation-kv__item--empty';
-            empty.textContent = 'Sin detalle disponible.';
-            kvList.appendChild(empty);
+          for (let index = 0; index < 3; index += 1) {
+            const column = document.createElement('p');
+            column.className = `ai-dynamic-relation-simple-col ai-dynamic-relation-simple-col--${columnKinds[index]}`;
+            column.textContent = String(columns[index] || '');
+            column.title = column.textContent;
+            simpleRow.appendChild(column);
           }
 
-          card.append(head, kvList);
+          card.append(simpleRow);
           dynamicRelationsList.appendChild(card);
         }
       }
@@ -14845,13 +15011,20 @@ export function initPanelApp() {
       return;
     }
 
-    dynamicRelationsDetailScreen.hidden = dynamicRelationsDetailState.open !== true;
+    const isOpen = dynamicRelationsDetailState.open === true;
+    dynamicRelationsDetailScreen.hidden = !isOpen;
 
-    if (!dynamicRelationsDetailState.open) {
+    const card = isOpen ? dynamicRelationCardIndex.get(dynamicRelationsDetailState.cardId) || null : null;
+    const nextRenderKey = buildDynamicRelationDetailRenderKey(card);
+    if (nextRenderKey === dynamicRelationDetailRenderKey) {
+      return;
+    }
+    dynamicRelationDetailRenderKey = nextRenderKey;
+
+    if (!isOpen) {
       return;
     }
 
-    const card = dynamicRelationCardIndex.get(dynamicRelationsDetailState.cardId) || null;
     if (!card) {
       closeDynamicRelationDetailScreen();
       return;
@@ -14879,18 +15052,38 @@ export function initPanelApp() {
         dynamicRelationsDetailBody.appendChild(createDynamicEmptyCard('Sin grupos detectados para esta tabla.'));
       } else {
         for (const group of groups) {
+          const detailModel = buildRelationDetailGroupViewModel(group, card);
           const section = document.createElement('article');
           section.className = 'dynamic-relations-group';
+
+          const head = document.createElement('div');
+          head.className = 'dynamic-relations-group__head';
           const title = document.createElement('p');
-          title.className = 'dynamic-relations-group__title';
-          title.textContent = String(group.label || group.key || 'Signal');
+          title.className = 'dynamic-relations-group__title dynamic-relations-group__title--main';
+          title.textContent = String(detailModel.title || 'Detalle');
+          head.appendChild(title);
+
+          if (detailModel.subtitle) {
+            const subtitle = document.createElement('p');
+            subtitle.className = 'dynamic-relations-group__meta';
+            subtitle.textContent = String(detailModel.subtitle || '');
+            subtitle.title = subtitle.textContent;
+            head.appendChild(subtitle);
+          }
 
           const list = document.createElement('ul');
           list.className = 'ai-dynamic-relation-list';
-          for (const row of Array.isArray(group.items) ? group.items : []) {
-            appendRelationListItem(list, row);
+          if (detailModel.kvItems.length) {
+            for (const row of detailModel.kvItems) {
+              appendRelationListItem(list, row);
+            }
+          } else {
+            appendRelationListItem(list, {
+              label: 'Detalle',
+              value: 'Sin campos disponibles'
+            });
           }
-          section.append(title, list);
+          section.append(head, list);
           dynamicRelationsDetailBody.appendChild(section);
         }
       }
@@ -14921,7 +15114,7 @@ export function initPanelApp() {
             return { label, value };
           })
           .filter(Boolean)
-          .slice(0, 3)
+          .slice(0, 8)
       : [];
     if (card?.meta?.singleResult === true && singleDetailItems.length) {
       dynamicRelationsDetailState = {

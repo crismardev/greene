@@ -71,7 +71,7 @@
   const PIN_UNLOCK_SESSION_STORAGE_KEY = 'greene_pin_unlock_session_v1';
   const NUWWE_CREDENTIALS_STORAGE_KEY = 'greene_tool_nuwwe_login_secure_v1';
   const NUWWE_DEFAULT_KDF_ITERATIONS = 210000;
-  const NUWWE_LOGIN_HOSTS = new Set(['nuwwe.com', 'www.nuwwe.com']);
+  const NUWWE_LOGIN_BASE_HOST = 'nuwwe.com';
   const NUWWE_LOGIN_PATH_PREFIX = '/login';
   const whatsappContextLogByTab = new Map();
   const tabContextScriptInjectionPromiseByTab = new Map();
@@ -107,6 +107,11 @@
     }
 
     console.warn(`${LOG_PREFIX} ${message}`, payload);
+  }
+
+  function isNuwweLoginHost(hostname) {
+    const host = String(hostname || '').toLowerCase().trim();
+    return host === NUWWE_LOGIN_BASE_HOST || host.endsWith(`.${NUWWE_LOGIN_BASE_HOST}`);
   }
 
   function logWhatsappContextSnapshot(context, reason = 'update') {
@@ -356,23 +361,46 @@
     };
   }
 
-  function isNuwweLoginUrl(rawUrl) {
+  function buildNuwweLoginUrlMatch(rawUrl) {
     const parsed = parseSafeUrl(rawUrl);
     if (!parsed) {
-      return false;
+      return {
+        isMatch: false,
+        host: '',
+        pathname: '',
+        normalizedUrl: '',
+        matchesHost: false,
+        matchesPath: false
+      };
     }
 
     const host = String(parsed.hostname || '').toLowerCase();
     const pathname = String(parsed.pathname || '');
-    return NUWWE_LOGIN_HOSTS.has(host) && pathname.startsWith(NUWWE_LOGIN_PATH_PREFIX);
+    const matchesHost = isNuwweLoginHost(host);
+    const matchesPath = pathname.startsWith(NUWWE_LOGIN_PATH_PREFIX);
+    return {
+      isMatch: matchesHost && matchesPath,
+      host,
+      pathname,
+      normalizedUrl: `${toSafeText(parsed.origin || '', 140)}${toSafeText(pathname, 220)}`,
+      matchesHost,
+      matchesPath
+    };
   }
 
-  function isNuwweCredentialsSenderAllowed(sender) {
-    const senderUrl =
-      String(sender?.tab?.url || '').trim() ||
-      String(sender?.url || '').trim() ||
-      String(sender?.origin || '').trim();
-    return isNuwweLoginUrl(senderUrl);
+  function buildNuwweSenderSummary(sender) {
+    const tabUrl = String(sender?.tab?.url || '').trim();
+    const senderUrl = String(sender?.url || '').trim();
+    const senderOrigin = String(sender?.origin || '').trim();
+    const selectedUrl = tabUrl || senderUrl || senderOrigin;
+    const urlMatch = buildNuwweLoginUrlMatch(selectedUrl);
+    return {
+      tabId: Number(sender?.tab?.id) || -1,
+      frameId: Number(sender?.frameId) || -1,
+      origin: toSafeText(senderOrigin, 180),
+      selectedUrl: toSafeText(selectedUrl, 260),
+      urlMatch
+    };
   }
 
   async function deriveAesGcmKeyForPin(pin, securityConfig) {
@@ -444,7 +472,11 @@
   }
 
   async function readNuwweAutoLoginCredentials(sender) {
-    if (!isNuwweCredentialsSenderAllowed(sender)) {
+    const senderSummary = buildNuwweSenderSummary(sender);
+    logDebug('nuwwe_credentials:read_requested', senderSummary);
+
+    if (!senderSummary.urlMatch.isMatch) {
+      logWarn('nuwwe_credentials:sender_rejected', senderSummary);
       return {
         ok: false,
         error: 'Origen no autorizado para Nuwwe Auto Login.'
@@ -462,6 +494,9 @@
 
     const record = normalizeNuwweCredentialStorageRecord(localPayload?.[NUWWE_CREDENTIALS_STORAGE_KEY]);
     if (!record) {
+      logWarn('nuwwe_credentials:record_missing', {
+        senderTabId: senderSummary.tabId
+      });
       return {
         ok: false,
         error: 'No hay credenciales guardadas para Nuwwe Auto Login.'
@@ -470,6 +505,9 @@
 
     const pinSession = normalizePinUnlockSessionRecord(sessionPayload?.[PIN_UNLOCK_SESSION_STORAGE_KEY]);
     if (!pinSession) {
+      logWarn('nuwwe_credentials:pin_session_missing', {
+        senderTabId: senderSummary.tabId
+      });
       return {
         ok: false,
         error: 'Desbloquea tu PIN en el panel para usar Nuwwe Auto Login.'
@@ -477,6 +515,10 @@
     }
 
     if (pinSession.expiresAt <= Date.now()) {
+      logWarn('nuwwe_credentials:pin_session_expired', {
+        senderTabId: senderSummary.tabId,
+        expiresAt: pinSession.expiresAt
+      });
       return {
         ok: false,
         error: 'Sesion PIN vencida. Desbloquea PIN nuevamente.'
@@ -485,11 +527,21 @@
 
     try {
       const credentials = await decryptNuwweCredentialsRecord(record, pinSession.pin);
+      logDebug('nuwwe_credentials:read_success', {
+        senderTabId: senderSummary.tabId,
+        hasUsername: Boolean(String(credentials.username || '').trim()),
+        hasPassword: Boolean(String(credentials.password || '').trim()),
+        hasCompanyCode: Boolean(String(credentials.companyCode || '').trim())
+      });
       return {
         ok: true,
         credentials
       };
-    } catch (_) {
+    } catch (error) {
+      logWarn('nuwwe_credentials:decrypt_error', {
+        senderTabId: senderSummary.tabId,
+        error: error instanceof Error ? toSafeText(error.message, 240) : 'unknown_error'
+      });
       return {
         ok: false,
         error: 'No se pudieron descifrar credenciales de Nuwwe. Guardalas otra vez en la tool.'
@@ -2357,11 +2409,22 @@
     }
 
     if (message.type === MESSAGE_TYPES.NUWWE_GET_LOGIN_CREDENTIALS) {
+      logDebug('onMessage:NUWWE_GET_LOGIN_CREDENTIALS:received', buildNuwweSenderSummary(sender));
       Promise.resolve(readNuwweAutoLoginCredentials(sender))
         .then((result) => {
+          logDebug('onMessage:NUWWE_GET_LOGIN_CREDENTIALS:resolved', {
+            ok: Boolean(result?.ok),
+            hasCredentials: Boolean(result?.credentials && typeof result.credentials === 'object'),
+            error: toSafeText(result?.error || '', 240),
+            senderTabId: Number(sender?.tab?.id) || -1
+          });
           sendResponse(result && typeof result === 'object' ? result : { ok: false, error: 'Respuesta invalida.' });
         })
         .catch((error) => {
+          logWarn('onMessage:NUWWE_GET_LOGIN_CREDENTIALS:error', {
+            error: error instanceof Error ? toSafeText(error.message, 240) : 'unknown_error',
+            senderTabId: Number(sender?.tab?.id) || -1
+          });
           sendResponse({
             ok: false,
             error: error instanceof Error ? error.message : 'No se pudo obtener credenciales de Nuwwe.'
