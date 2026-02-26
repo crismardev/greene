@@ -28,6 +28,8 @@ export function createSettingsScreenController({
     settingsVoiceTtsSpeedInput,
     settingsVoiceTtsSpeedValue,
     settingsVoiceTransportSelect,
+    settingsChatTransportSelect,
+    settingsRealtimeModelInput,
     settingsVoicePauseMsInput,
     settingsVoicePauseMsValue,
     settingsLanguageSelect,
@@ -47,6 +49,9 @@ export function createSettingsScreenController({
   const MAX_VOICE_PAUSE_MS = 5000;
   const VOICE_TRANSPORT_REALTIME = 'realtime';
   const VOICE_TRANSPORT_TURN = 'turn';
+  const CHAT_TRANSPORT_REALTIME = 'realtime';
+  const CHAT_TRANSPORT_COMPLETIONS = 'completions';
+  const DEFAULT_REALTIME_MODEL = 'gpt-realtime';
 
   function getPanelSettings() {
     return state.panelSettings;
@@ -116,6 +121,19 @@ export function createSettingsScreenController({
     return token === VOICE_TRANSPORT_TURN ? VOICE_TRANSPORT_TURN : VOICE_TRANSPORT_REALTIME;
   }
 
+  function normalizeChatTransport(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    return token === CHAT_TRANSPORT_COMPLETIONS ? CHAT_TRANSPORT_COMPLETIONS : CHAT_TRANSPORT_REALTIME;
+  }
+
+  function normalizeRealtimeModel(value) {
+    return String(value || '')
+      .trim()
+      .slice(0, 120) || DEFAULT_REALTIME_MODEL;
+  }
+
   function updateVoiceModeMeta() {
     const panelSettings = getPanelSettings();
     const selectedLanguage = normalizeAssistantLanguage(
@@ -124,6 +142,8 @@ export function createSettingsScreenController({
     const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || '');
     const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
     const transport = normalizeVoiceTransport(settingsVoiceTransportSelect?.value || panelSettings.voiceTransport);
+    const chatTransport = normalizeChatTransport(settingsChatTransportSelect?.value || panelSettings.chatTransport);
+    const realtimeModel = normalizeRealtimeModel(settingsRealtimeModelInput?.value || panelSettings.realtimeModel);
     const pauseMs = normalizeVoicePauseMs(settingsVoicePauseMsInput?.value ?? panelSettings.voicePauseMs);
 
     if (settingsVoiceTtsSpeedValue) {
@@ -138,7 +158,8 @@ export function createSettingsScreenController({
     }
 
     const transportLabel = transport === VOICE_TRANSPORT_REALTIME ? 'Realtime' : 'Turn';
-    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} · Transporte: ${transportLabel} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
+    const chatTransportLabel = chatTransport === CHAT_TRANSPORT_REALTIME ? 'Realtime' : 'Completions';
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${selectedLanguage.toUpperCase()} · Voice: ${transportLabel} · Chat: ${chatTransportLabel} · RT model: ${realtimeModel} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
   }
 
   function applyPanelSettingsToUi() {
@@ -173,6 +194,12 @@ export function createSettingsScreenController({
     }
     if (settingsVoiceTransportSelect) {
       settingsVoiceTransportSelect.value = normalizeVoiceTransport(panelSettings.voiceTransport);
+    }
+    if (settingsChatTransportSelect) {
+      settingsChatTransportSelect.value = normalizeChatTransport(panelSettings.chatTransport);
+    }
+    if (settingsRealtimeModelInput) {
+      settingsRealtimeModelInput.value = normalizeRealtimeModel(panelSettings.realtimeModel);
     }
     if (settingsVoicePauseMsInput) {
       settingsVoicePauseMsInput.value = String(normalizeVoicePauseMs(panelSettings.voicePauseMs));
@@ -237,6 +264,12 @@ export function createSettingsScreenController({
     );
     merged.voiceTransport = normalizeVoiceTransport(
       merged.voiceTransport ?? defaults?.panelSettingsDefaults?.voiceTransport ?? VOICE_TRANSPORT_REALTIME
+    );
+    merged.chatTransport = normalizeChatTransport(
+      merged.chatTransport ?? defaults?.panelSettingsDefaults?.chatTransport ?? CHAT_TRANSPORT_REALTIME
+    );
+    merged.realtimeModel = normalizeRealtimeModel(
+      merged.realtimeModel ?? defaults?.panelSettingsDefaults?.realtimeModel ?? DEFAULT_REALTIME_MODEL
     );
     merged.voicePauseMs = normalizeVoicePauseMs(
       merged.voicePauseMs ?? defaults?.panelSettingsDefaults?.voicePauseMs ?? DEFAULT_VOICE_PAUSE_MS
@@ -341,6 +374,12 @@ export function createSettingsScreenController({
     const nextVoiceTransport = normalizeVoiceTransport(
       settingsVoiceTransportSelect?.value ?? panelSettings.voiceTransport ?? VOICE_TRANSPORT_REALTIME
     );
+    const nextChatTransport = normalizeChatTransport(
+      settingsChatTransportSelect?.value ?? panelSettings.chatTransport ?? CHAT_TRANSPORT_REALTIME
+    );
+    const nextRealtimeModel = normalizeRealtimeModel(
+      settingsRealtimeModelInput?.value ?? panelSettings.realtimeModel ?? DEFAULT_REALTIME_MODEL
+    );
     const nextVoicePauseMs = normalizeVoicePauseMs(
       settingsVoicePauseMsInput?.value ?? panelSettings.voicePauseMs ?? DEFAULT_VOICE_PAUSE_MS
     );
@@ -358,6 +397,8 @@ export function createSettingsScreenController({
       voiceTtsVoice: nextVoiceTtsVoice,
       voiceTtsSpeed: nextVoiceTtsSpeed,
       voiceTransport: nextVoiceTransport,
+      chatTransport: nextChatTransport,
+      realtimeModel: nextRealtimeModel,
       voicePauseMs: nextVoicePauseMs,
       onboardingDone: true,
       systemPrompt: nextPrompt

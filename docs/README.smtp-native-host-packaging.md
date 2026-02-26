@@ -74,6 +74,30 @@ La extension SI puede:
 Crear `native-host/` con un host minimo:
 - comando `PING`
 - comando `GREENE_SMTP_SEND`
+- comando `GREENE_DB_QUERY`
 - respuesta estandar `{ ok, result|error }`
 
 Con eso puedes probar instalacion real y luego extender a otras funciones locales.
+
+Nota DB:
+- Para `GREENE_DB_QUERY` en Python necesitas `psycopg` (recomendado: `pip install "psycopg[binary]"`) o `psycopg2`.
+
+## Comandos de ejecucion (post download)
+
+### macOS
+
+```bash
+chmod +x "$HOME/Downloads/greene-native-host-macos.sh"
+"$HOME/Downloads/greene-native-host-macos.sh"
+# opcional para db native_host
+python3 -m pip install "psycopg[binary]"
+```
+
+### Windows (PowerShell)
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+& "$env:USERPROFILE\Downloads\greene-native-host-windows.ps1"
+# opcional para db native_host
+py -3 -m pip install "psycopg[binary]"
+```

@@ -30,5 +30,8 @@ Pasos manuales requeridos por Chrome:
 Nota:
 - Este script no puede instalar la extension automaticamente por restricciones del navegador.
 - Extension orientada a entorno de desarrollo/controlado.
+- Este script NO instala el Native Host local.
+- Para Native Host (SMTP/DB bridge), usa "Settings > Local Connector > Descargar complemento (macOS .sh)".
+- Si usaras DB con `native_host`, instala driver Python: `pip3 install "psycopg[binary]"` o `psycopg2`.
 
 EOF

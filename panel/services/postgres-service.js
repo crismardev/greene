@@ -1,121 +1,12 @@
-import { neon } from '../../node_modules/@neondatabase/serverless/index.mjs';
-
 const READ_ONLY_MAX_ROWS = 200;
 const WRITE_RESULT_MAX_ROWS = 80;
+const DB_QUERY_MESSAGE_TYPE = 'GREENE_DB_QUERY';
 
-const TABLE_LIST_SQL = `
-SELECT
-  t.table_schema,
-  t.table_name,
-  t.table_type
-FROM information_schema.tables t
-WHERE t.table_type IN ('BASE TABLE', 'VIEW')
-  AND t.table_schema NOT IN ('information_schema', 'pg_catalog')
-  AND t.table_schema NOT LIKE 'pg_toast%'
-  AND t.table_schema NOT LIKE 'pg_temp_%'
-ORDER BY t.table_schema, t.table_name;
-`;
-
-const TABLE_SCHEMA_JSON_SQL = `
-SELECT json_build_object(
-    'table', $2::text,
-    'schema', $1::text,
-    'columns', COALESCE(
-      json_agg(
-        json_build_object(
-            'name', column_info.column_name,
-            'type', column_info.data_type,
-            'udt_name', column_info.udt_name,
-            'is_list', column_info.is_list,
-            'enum_options', CASE
-                                WHEN column_info.enum_values IS NOT NULL
-                                THEN string_to_array(column_info.enum_values, ', ')
-                                ELSE NULL
-                            END,
-            'foreign_key', CASE
-                                WHEN column_info.foreign_table IS NOT NULL
-                                THEN json_build_object(
-                                    'target_schema', column_info.foreign_schema,
-                                    'target_table', column_info.foreign_table,
-                                    'target_column', column_info.foreign_column
-                                )
-                                ELSE NULL
-                            END,
-            'nullable', column_info.is_nullable,
-            'default', column_info.column_default,
-            'is_primary_key', column_info.is_primary_key
-        )
-        ORDER BY column_info.ordinal_position
-      ),
-      '[]'::json
-    )
-) AS table_schema_json
-FROM (
-    SELECT
-        cols.column_name,
-        cols.data_type,
-        cols.udt_name,
-        cols.is_nullable,
-        cols.column_default,
-        cols.ordinal_position,
-        (
-          SELECT string_agg(enumlabel, ', ' ORDER BY enumsortorder)
-          FROM pg_enum
-          JOIN pg_type ON pg_enum.enumtypid = pg_type.oid
-          WHERE pg_type.typname = CASE
-            WHEN LEFT(cols.udt_name, 1) = '_' THEN SUBSTRING(cols.udt_name FROM 2)
-            ELSE cols.udt_name
-          END
-        ) AS enum_values,
-        CASE WHEN LEFT(cols.udt_name, 1) = '_' THEN 'YES' ELSE 'NO' END AS is_list,
-        fk.foreign_schema,
-        fk.foreign_table,
-        fk.foreign_column,
-        COALESCE(pk.is_primary_key, false) AS is_primary_key
-    FROM information_schema.columns cols
-    LEFT JOIN (
-        SELECT
-            kcu.column_name,
-            ccu.table_schema AS foreign_schema,
-            ccu.table_name AS foreign_table,
-            ccu.column_name AS foreign_column
-        FROM information_schema.key_column_usage AS kcu
-        JOIN information_schema.constraint_column_usage AS ccu
-          ON ccu.constraint_name = kcu.constraint_name
-         AND ccu.constraint_schema = kcu.constraint_schema
-        WHERE kcu.table_schema = $1
-          AND kcu.table_name = $2
-    ) fk ON cols.column_name = fk.column_name
-    LEFT JOIN (
-        SELECT
-            kcu.column_name,
-            true AS is_primary_key
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name
-         AND tc.constraint_schema = kcu.constraint_schema
-        WHERE tc.table_schema = $1
-          AND tc.table_name = $2
-          AND tc.constraint_type = 'PRIMARY KEY'
-    ) pk ON cols.column_name = pk.column_name
-    WHERE cols.table_name = $2
-      AND cols.table_schema = $1
-) column_info;
-`;
-
-const TABLE_ESTIMATE_SQL = `
-SELECT
-  n.nspname AS table_schema,
-  c.relname AS table_name,
-  c.reltuples::bigint AS estimated_rows
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind = 'r'
-  AND n.nspname NOT IN ('information_schema', 'pg_catalog')
-  AND n.nspname NOT LIKE 'pg_toast%'
-  AND n.nspname NOT LIKE 'pg_temp_%'
-ORDER BY n.nspname, c.relname;
-`;
+const DEFAULT_DB_BRIDGE_CONFIG = Object.freeze({
+  transport: 'http_agent',
+  nativeHostName: 'com.greene.smtp_bridge',
+  agentUrl: 'http://127.0.0.1:4395/db/query'
+});
 
 function toSafeText(value, limit = 6000) {
   const text = String(value || '').trim();
@@ -160,9 +51,7 @@ function toSafeReadSql(rawSql) {
   }
 
   if (
-    /\b(insert|update|delete|create|alter|drop|truncate|grant|revoke|comment)\b/i.test(
-      statement
-    )
+    /\b(insert|update|delete|create|alter|drop|truncate|grant|revoke|comment)\b/i.test(statement)
   ) {
     throw new Error('db.queryRead bloqueo una operacion de escritura o DDL.');
   }
@@ -231,26 +120,25 @@ function assertConnectionUrl(value) {
   return connectionUrl;
 }
 
-function createSqlClient(connectionUrl) {
-  return neon(assertConnectionUrl(connectionUrl), {
-    fetchOptions: {
-      cache: 'no-store'
-    }
-  });
+function normalizeDbBridgeTransport(value) {
+  const token = String(value || '')
+    .trim()
+    .toLowerCase();
+  return token === 'native_host' ? 'native_host' : 'http_agent';
 }
 
-function normalizeTableRow(rawRow) {
-  const row = rawRow && typeof rawRow === 'object' ? rawRow : {};
-  const schema = toSafeText(row.table_schema || '', 120);
-  const table = toSafeText(row.table_name || '', 120);
-  if (!schema || !table) {
-    return null;
-  }
-
+function normalizeDbBridgeConfig(rawConfig) {
+  const source = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
   return {
-    schema,
-    name: table,
-    tableType: toSafeText(row.table_type || 'BASE TABLE', 40) || 'BASE TABLE'
+    transport: normalizeDbBridgeTransport(source.transport || DEFAULT_DB_BRIDGE_CONFIG.transport),
+    nativeHostName:
+      String(source.nativeHostName || DEFAULT_DB_BRIDGE_CONFIG.nativeHostName || '')
+        .trim()
+        .slice(0, 180) || DEFAULT_DB_BRIDGE_CONFIG.nativeHostName,
+    agentUrl:
+      String(source.agentUrl || DEFAULT_DB_BRIDGE_CONFIG.agentUrl || '')
+        .trim()
+        .slice(0, 500) || DEFAULT_DB_BRIDGE_CONFIG.agentUrl
   };
 }
 
@@ -277,11 +165,7 @@ function parseJsonObject(value) {
 }
 
 function normalizeEnumOptions(value, limit = 80) {
-  const source = Array.isArray(value)
-    ? value
-    : typeof value === 'string'
-      ? value.split(',')
-      : [];
+  const source = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
 
   return source
     .map((item) => toSafeText(item || '', 120))
@@ -324,8 +208,7 @@ function normalizeSchemaColumn(rawColumn, index = 0) {
     name,
     type,
     udtName,
-    nullable:
-      column.nullable === true || String(column.nullable || '').toUpperCase() === 'YES',
+    nullable: column.nullable === true || String(column.nullable || '').toUpperCase() === 'YES',
     defaultValue: toSafeText(column.default || column.defaultValue || '', 320),
     ordinal: Math.max(1, Number(column.ordinal_position) || Number(column.ordinal) || index + 1),
     isPrimaryKey: column.is_primary_key === true || column.isPrimaryKey === true,
@@ -335,133 +218,238 @@ function normalizeSchemaColumn(rawColumn, index = 0) {
   };
 }
 
-function normalizeTableSchemaPayload(rawPayload, fallbackSchema, fallbackTable) {
-  const payload = parseJsonObject(rawPayload);
-  if (!payload) {
-    return {
-      schema: fallbackSchema,
-      table: fallbackTable,
-      columns: []
-    };
+function normalizeSchemaTable(rawTable, maxColumnsPerTable = 120) {
+  const source = rawTable && typeof rawTable === 'object' ? rawTable : {};
+  const schema = toSafeText(source.schema || source.table_schema || '', 120);
+  const name = toSafeText(source.name || source.table_name || source.table || '', 120);
+  if (!schema || !name) {
+    return null;
   }
 
-  const schema = toSafeText(payload.schema || fallbackSchema || '', 120) || fallbackSchema;
-  const table = toSafeText(payload.table || fallbackTable || '', 120) || fallbackTable;
-  const rawColumns = Array.isArray(payload.columns) ? payload.columns : [];
+  const schemaPayload = parseJsonObject(source.table_schema_json);
+  const rawColumns = Array.isArray(source.columns)
+    ? source.columns
+    : Array.isArray(schemaPayload?.columns)
+      ? schemaPayload.columns
+      : [];
+  const columns = rawColumns
+    .map((rawColumn, index) => normalizeSchemaColumn(rawColumn, index))
+    .filter(Boolean)
+    .sort((left, right) => left.ordinal - right.ordinal)
+    .slice(0, maxColumnsPerTable);
 
   return {
     schema,
-    table,
-    columns: rawColumns
+    name,
+    qualifiedName: `${schema}.${name}`,
+    tableType: toSafeText(source.tableType || source.table_type || 'BASE TABLE', 40) || 'BASE TABLE',
+    estimatedRows: Number.isFinite(Number(source.estimatedRows ?? source.estimated_rows))
+      ? Math.max(0, Math.round(Number(source.estimatedRows ?? source.estimated_rows)))
+      : null,
+    columns
   };
 }
 
-export function createPostgresService() {
+function normalizeSchemaSnapshot(rawSnapshot, options = {}) {
+  const source = rawSnapshot && typeof rawSnapshot === 'object' ? rawSnapshot : {};
+  const maxTables = Math.max(1, Math.min(500, Number(options.maxTables) || 300));
+  const maxColumnsPerTable = Math.max(1, Math.min(250, Number(options.maxColumnsPerTable) || 120));
+  const tables = (Array.isArray(source.tables) ? source.tables : [])
+    .map((rawTable) => normalizeSchemaTable(rawTable, maxColumnsPerTable))
+    .filter(Boolean)
+    .slice(0, maxTables);
+
+  const schemaCount = new Map();
+  for (const table of tables) {
+    const known = schemaCount.get(table.schema) || 0;
+    schemaCount.set(table.schema, known + 1);
+  }
+  const fallbackSchemas = Array.from(schemaCount.entries())
+    .map(([name, tableCount]) => ({ name, tableCount }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  const schemas = (Array.isArray(source.schemas) ? source.schemas : [])
+    .map((item) => {
+      const row = item && typeof item === 'object' ? item : {};
+      const name = toSafeText(row.name || row.schema || '', 120);
+      if (!name) {
+        return null;
+      }
+      return {
+        name,
+        tableCount: Math.max(0, Number(row.tableCount) || Number(row.table_count) || 0)
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    analyzedAt: Math.max(0, Number(source.analyzedAt) || Date.now()),
+    schemas: schemas.length ? schemas : fallbackSchemas,
+    tableCount:
+      Math.max(0, Number(source.tableCount) || Number(source.table_count) || 0) || tables.length,
+    tables
+  };
+}
+
+function normalizeReadResult(rawResult, maxRows) {
+  const source = rawResult && typeof rawResult === 'object' ? rawResult : {};
+  const rows = Array.isArray(source.rows) ? source.rows : [];
+  const limitedRows = rows.slice(0, maxRows);
+  const rowCount = Math.max(0, Number(source.rowCount) || rows.length);
+  const truncated =
+    source.truncated === true || rowCount > limitedRows.length || rows.length > limitedRows.length;
+
+  return {
+    rowCount,
+    truncated,
+    rows: limitedRows
+  };
+}
+
+function normalizeWriteResult(rawResult, maxRows) {
+  const source = rawResult && typeof rawResult === 'object' ? rawResult : {};
+  const rows = Array.isArray(source.rows) ? source.rows : [];
+  const limitedRows = rows.slice(0, maxRows);
+  const rowCount = Math.max(0, Number(source.rowCount) || rows.length);
+  const truncated =
+    source.truncated === true || rowCount > limitedRows.length || rows.length > limitedRows.length;
+
+  return {
+    command: toSafeText(source.command || '', 40).toUpperCase() || 'WRITE',
+    rowCount,
+    truncated,
+    rows: limitedRows
+  };
+}
+
+function runDbBridgeRequest(payload = {}) {
+  if (!globalThis?.chrome?.runtime || typeof globalThis.chrome.runtime.sendMessage !== 'function') {
+    return Promise.reject(
+      new Error('Bridge DB no disponible: runtime de extension no accesible.')
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    try {
+      globalThis.chrome.runtime.sendMessage(
+        {
+          type: DB_QUERY_MESSAGE_TYPE,
+          payload: payload && typeof payload === 'object' ? payload : {}
+        },
+        (response) => {
+          if (globalThis.chrome.runtime.lastError) {
+            const runtimeMessage = String(
+              globalThis.chrome.runtime.lastError.message ||
+                'Error comunicando con background DB bridge.'
+            ).trim();
+            reject(new Error(runtimeMessage));
+            return;
+          }
+
+          const safeResponse = response && typeof response === 'object' ? response : null;
+          if (!safeResponse || safeResponse.ok !== true) {
+            const errorMessage = String(
+              safeResponse?.error || 'Error ejecutando DB bridge en background.'
+            ).trim();
+            reject(new Error(errorMessage));
+            return;
+          }
+
+          resolve(safeResponse.result);
+        }
+      );
+    } catch (error) {
+      reject(
+        error instanceof Error
+          ? error
+          : new Error('Error ejecutando DB bridge en background.')
+      );
+    }
+  });
+}
+
+export function createPostgresService(options = {}) {
+  const cfg = options && typeof options === 'object' ? options : {};
+  const resolveBridgeConfig =
+    typeof cfg.resolveBridgeConfig === 'function' ? cfg.resolveBridgeConfig : () => null;
+
+  function getBridgeConfig(override) {
+    if (override && typeof override === 'object') {
+      return normalizeDbBridgeConfig(override);
+    }
+
+    try {
+      return normalizeDbBridgeConfig(resolveBridgeConfig());
+    } catch (_) {
+      return normalizeDbBridgeConfig(null);
+    }
+  }
+
   async function inspectSchema(connectionUrl, options = {}) {
+    const safeConnectionUrl = assertConnectionUrl(connectionUrl);
     const maxTables = Math.max(1, Math.min(500, Number(options.maxTables) || 300));
     const maxColumnsPerTable = Math.max(
       1,
       Math.min(250, Number(options.maxColumnsPerTable) || 120)
     );
 
-    const sql = createSqlClient(connectionUrl);
-    const tableRows = await sql.query(TABLE_LIST_SQL);
-    const estimateRows = await sql.query(TABLE_ESTIMATE_SQL);
-
-    const estimatesByTable = new Map();
-    for (const rawRow of Array.isArray(estimateRows) ? estimateRows : []) {
-      const row = rawRow && typeof rawRow === 'object' ? rawRow : {};
-      const schema = toSafeText(row.table_schema || '', 120);
-      const table = toSafeText(row.table_name || '', 120);
-      if (!schema || !table) {
-        continue;
+    const bridgeResult = await runDbBridgeRequest({
+      action: 'inspectSchema',
+      connectionUrl: safeConnectionUrl,
+      bridge: getBridgeConfig(options.bridge || options.dbBridge),
+      options: {
+        maxTables,
+        maxColumnsPerTable
       }
+    });
 
-      estimatesByTable.set(`${schema}.${table}`, Math.max(0, Math.round(Number(row.estimated_rows) || 0)));
-    }
-
-    const selectedTables = (Array.isArray(tableRows) ? tableRows : [])
-      .map((rawRow) => normalizeTableRow(rawRow))
-      .filter(Boolean)
-      .slice(0, maxTables);
-
-    const tables = [];
-    for (const table of selectedTables) {
-      const key = `${table.schema}.${table.name}`;
-      const schemaRows = await sql.query(TABLE_SCHEMA_JSON_SQL, [table.schema, table.name]);
-      const schemaPayload = normalizeTableSchemaPayload(
-        schemaRows?.[0]?.table_schema_json,
-        table.schema,
-        table.name
-      );
-
-      const columns = (Array.isArray(schemaPayload.columns) ? schemaPayload.columns : [])
-        .map((rawColumn, index) => normalizeSchemaColumn(rawColumn, index))
-        .filter(Boolean)
-        .sort((left, right) => left.ordinal - right.ordinal)
-        .slice(0, maxColumnsPerTable);
-
-      tables.push({
-        schema: table.schema,
-        name: table.name,
-        qualifiedName: key,
-        tableType: table.tableType,
-        estimatedRows: estimatesByTable.get(key) ?? null,
-        columns
-      });
-    }
-
-    const schemaCount = new Map();
-    for (const table of tables) {
-      const count = schemaCount.get(table.schema) || 0;
-      schemaCount.set(table.schema, count + 1);
-    }
-
-    const schemas = Array.from(schemaCount.entries())
-      .map(([name, tableCount]) => ({ name, tableCount }))
-      .sort((left, right) => left.name.localeCompare(right.name));
-
-    return {
-      analyzedAt: Date.now(),
-      schemas,
-      tableCount: tables.length,
-      tables
-    };
+    return normalizeSchemaSnapshot(bridgeResult, {
+      maxTables,
+      maxColumnsPerTable
+    });
   }
 
   async function queryRead(connectionUrl, rawSql, rawParams, options = {}) {
     const maxRows = Math.max(1, Math.min(500, Number(options.maxRows) || READ_ONLY_MAX_ROWS));
-    const sql = createSqlClient(connectionUrl);
+    const safeConnectionUrl = assertConnectionUrl(connectionUrl);
     const queryText = toSafeReadSql(rawSql);
     const params = normalizeSqlParams(rawParams);
-    const rows = await sql.query(queryText, params);
-    const safeRows = Array.isArray(rows) ? rows : [];
 
-    return {
-      rowCount: safeRows.length,
-      truncated: safeRows.length > maxRows,
-      rows: safeRows.slice(0, maxRows)
-    };
+    const bridgeResult = await runDbBridgeRequest({
+      action: 'queryRead',
+      connectionUrl: safeConnectionUrl,
+      sql: queryText,
+      params,
+      bridge: getBridgeConfig(options.bridge || options.dbBridge),
+      options: {
+        maxRows
+      }
+    });
+
+    return normalizeReadResult(bridgeResult, maxRows);
   }
 
   async function queryWrite(connectionUrl, rawSql, rawParams, options = {}) {
     const maxRows = Math.max(1, Math.min(200, Number(options.maxRows) || WRITE_RESULT_MAX_ROWS));
-    const sql = createSqlClient(connectionUrl);
+    const safeConnectionUrl = assertConnectionUrl(connectionUrl);
     const queryText = toSafeWriteSql(rawSql, {
       allowFullTableWrite: options.allowFullTableWrite === true
     });
     const params = normalizeSqlParams(rawParams);
-    const result = await sql.query(queryText, params, { fullResults: true });
 
-    const outputRows = Array.isArray(result?.rows) ? result.rows : [];
-    const rowCount = Math.max(0, Number(result?.rowCount) || outputRows.length);
+    const bridgeResult = await runDbBridgeRequest({
+      action: 'queryWrite',
+      connectionUrl: safeConnectionUrl,
+      sql: queryText,
+      params,
+      bridge: getBridgeConfig(options.bridge || options.dbBridge),
+      options: {
+        maxRows,
+        allowFullTableWrite: options.allowFullTableWrite === true
+      }
+    });
 
-    return {
-      command: toSafeText(result?.command || '', 40).toUpperCase() || 'WRITE',
-      rowCount,
-      truncated: outputRows.length > maxRows,
-      rows: outputRows.slice(0, maxRows)
-    };
+    return normalizeWriteResult(bridgeResult, maxRows);
   }
 
   return {

@@ -264,11 +264,13 @@ export function initPanelApp() {
   const VOICE_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
   const VOICE_TRANSCRIPTION_LANGUAGE = 'es';
   const VOICE_CHAT_RESPONSE_MODEL = 'gpt-4o-mini';
-  const VOICE_CHAT_RESPONSE_REALTIME_MODEL = 'gpt-realtime';
+  const DEFAULT_OPENAI_REALTIME_MODEL = 'gpt-realtime';
   const VOICE_TTS_MODEL = 'gpt-4o-mini-tts';
   const VOICE_TTS_VOICE = 'alloy';
   const VOICE_TRANSPORT_REALTIME = 'realtime';
   const VOICE_TRANSPORT_TURN = 'turn';
+  const CHAT_TRANSPORT_REALTIME = 'realtime';
+  const CHAT_TRANSPORT_COMPLETIONS = 'completions';
   const OPENAI_TTS_VOICE_OPTIONS = Object.freeze(['alloy', 'ash', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer']);
   const OPENAI_TTS_VOICE_SET = new Set(OPENAI_TTS_VOICE_OPTIONS);
   const VOICE_TTS_SPEED_DEFAULT = 1;
@@ -423,6 +425,11 @@ export function initPanelApp() {
         password: '',
         from: ''
       },
+      dbBridge: {
+        transport: 'http_agent',
+        nativeHostName: 'com.greene.smtp_bridge',
+        agentUrl: 'http://127.0.0.1:4395/db/query'
+      },
       maps: {
         apiKey: '',
         nearbyType: 'restaurant',
@@ -473,6 +480,8 @@ export function initPanelApp() {
     voiceTtsVoice: VOICE_TTS_VOICE,
     voiceTtsSpeed: VOICE_TTS_SPEED_DEFAULT,
     voiceTransport: VOICE_TRANSPORT_REALTIME,
+    chatTransport: CHAT_TRANSPORT_REALTIME,
+    realtimeModel: DEFAULT_OPENAI_REALTIME_MODEL,
     voicePauseMs: VOICE_PAUSE_MS_DEFAULT,
     onboardingDone: false,
     systemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,
@@ -592,6 +601,8 @@ export function initPanelApp() {
   const settingsVoiceTtsSpeedInput = document.getElementById('settingsVoiceTtsSpeedInput');
   const settingsVoiceTtsSpeedValue = document.getElementById('settingsVoiceTtsSpeedValue');
   const settingsVoiceTransportSelect = document.getElementById('settingsVoiceTransportSelect');
+  const settingsChatTransportSelect = document.getElementById('settingsChatTransportSelect');
+  const settingsRealtimeModelInput = document.getElementById('settingsRealtimeModelInput');
   const settingsVoicePauseMsInput = document.getElementById('settingsVoicePauseMsInput');
   const settingsVoicePauseMsValue = document.getElementById('settingsVoicePauseMsValue');
   const settingsLanguageSelect = document.getElementById('settingsLanguageSelect');
@@ -642,6 +653,8 @@ export function initPanelApp() {
   const settingsNativeHostPlatformMeta = document.getElementById('settingsNativeHostPlatformMeta');
   const settingsNativeHostInstallMd = document.getElementById('settingsNativeHostInstallMd');
   const settingsNativeHostDownloadBtn = document.getElementById('settingsNativeHostDownloadBtn');
+  const settingsNativeHostCopyMacCmdBtn = document.getElementById('settingsNativeHostCopyMacCmdBtn');
+  const settingsNativeHostCopyWindowsCmdBtn = document.getElementById('settingsNativeHostCopyWindowsCmdBtn');
   const settingsNativeHostPingBtn = document.getElementById('settingsNativeHostPingBtn');
   const settingsNativeHostHeaderMeta = document.getElementById('settingsNativeHostHeaderMeta');
   const settingsNativeHostStatus = document.getElementById('settingsNativeHostStatus');
@@ -936,7 +949,9 @@ export function initPanelApp() {
     localKeepAlive: LOCAL_MODEL_KEEP_ALIVE
   });
   const pinCryptoService = createPinCryptoService();
-  const postgresService = createPostgresService();
+  const postgresService = createPostgresService({
+    resolveBridgeConfig: () => getIntegrationsConfig().dbBridge
+  });
   const tabContextService = createTabContextService({
     onSnapshot: handleTabContextSnapshot
   });
@@ -1170,6 +1185,15 @@ export function initPanelApp() {
     }
 
     console.info(`${LOG_PREFIX} ${message}`, payload);
+  }
+
+  function logRealtimeEvent(message, payload) {
+    if (payload === undefined) {
+      console.info(`${LOG_PREFIX} realtime:${message}`);
+      return;
+    }
+
+    console.info(`${LOG_PREFIX} realtime:${message}`, payload);
   }
 
   function toSafeLogText(value, limit = 180) {
@@ -1841,6 +1865,7 @@ export function initPanelApp() {
     const defaults = createDefaultIntegrationsConfig();
     const source = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
     const rawSmtp = source.smtp && typeof source.smtp === 'object' ? source.smtp : {};
+    const rawDbBridge = source.dbBridge && typeof source.dbBridge === 'object' ? source.dbBridge : {};
     const rawMaps = source.maps && typeof source.maps === 'object' ? source.maps : {};
     const rawPermissions = source.permissions && typeof source.permissions === 'object' ? source.permissions : {};
     const rawLocation = rawMaps.lastKnownLocation && typeof rawMaps.lastKnownLocation === 'object' ? rawMaps.lastKnownLocation : null;
@@ -1859,6 +1884,21 @@ export function initPanelApp() {
         username: String(rawSmtp.username || '').trim().slice(0, 220),
         password: String(rawSmtp.password || '').trim().slice(0, 220),
         from: String(rawSmtp.from || '').trim().slice(0, 220)
+      },
+      dbBridge: {
+        transport: ['http_agent', 'native_host'].includes(String(rawDbBridge.transport || rawSmtp.transport || '').trim())
+          ? String(rawDbBridge.transport || rawSmtp.transport || '').trim()
+          : String(defaults.dbBridge.transport || 'http_agent'),
+        nativeHostName: String(
+          rawDbBridge.nativeHostName || rawSmtp.nativeHostName || defaults.dbBridge.nativeHostName || ''
+        )
+          .trim()
+          .slice(0, 180),
+        agentUrl: String(
+          rawDbBridge.agentUrl || rawDbBridge.endpoint || rawSmtp.agentUrl || defaults.dbBridge.agentUrl || ''
+        )
+          .trim()
+          .slice(0, 500)
       },
       maps: {
         apiKey: String(rawMaps.apiKey || '').trim().slice(0, 240),
@@ -2445,22 +2485,39 @@ export function initPanelApp() {
       };
     }
 
+    const currentIntegrations = getIntegrationsConfig();
+    const nextSmtp = {
+      ...currentIntegrations.smtp,
+      transport: String(settingsSmtpTransportSelect?.value || 'http_agent'),
+      nativeHostName: String(settingsSmtpNativeHostInput?.value || ''),
+      agentUrl: String(settingsSmtpAgentUrlInput?.value || ''),
+      host: String(settingsSmtpHostInput?.value || ''),
+      port: Number(settingsSmtpPortInput?.value || 587),
+      secure: String(settingsSmtpSecureSelect?.value || 'auto'),
+      username: String(settingsSmtpUsernameInput?.value || ''),
+      password: String(settingsSmtpPasswordInput?.value || ''),
+      from: String(settingsSmtpFromInput?.value || '')
+    };
+    const currentDbBridgeAgentUrl = String(currentIntegrations.dbBridge?.agentUrl || '').trim();
+    const smtpAgentUrl = String(nextSmtp.agentUrl || '').trim();
+    const derivedDbBridgeAgentUrl =
+      (smtpAgentUrl && /\/smtp\/send\/?$/i.test(smtpAgentUrl)
+        ? smtpAgentUrl.replace(/\/smtp\/send\/?$/i, '/db/query')
+        : '') ||
+      currentDbBridgeAgentUrl ||
+      'http://127.0.0.1:4395/db/query';
+
     const nextIntegrations = normalizeIntegrationsConfig({
-      ...getIntegrationsConfig(),
-      smtp: {
-        ...getIntegrationsConfig().smtp,
-        transport: String(settingsSmtpTransportSelect?.value || 'http_agent'),
-        nativeHostName: String(settingsSmtpNativeHostInput?.value || ''),
-        agentUrl: String(settingsSmtpAgentUrlInput?.value || ''),
-        host: String(settingsSmtpHostInput?.value || ''),
-        port: Number(settingsSmtpPortInput?.value || 587),
-        secure: String(settingsSmtpSecureSelect?.value || 'auto'),
-        username: String(settingsSmtpUsernameInput?.value || ''),
-        password: String(settingsSmtpPasswordInput?.value || ''),
-        from: String(settingsSmtpFromInput?.value || '')
+      ...currentIntegrations,
+      smtp: nextSmtp,
+      dbBridge: {
+        ...currentIntegrations.dbBridge,
+        transport: String(nextSmtp.transport || 'http_agent'),
+        nativeHostName: String(nextSmtp.nativeHostName || ''),
+        agentUrl: derivedDbBridgeAgentUrl
       },
       maps: {
-        ...getIntegrationsConfig().maps,
+        ...currentIntegrations.maps,
         apiKey: String(settingsMapsApiKeyInput?.value || ''),
         nearbyType: String(settingsMapsNearbyTypeSelect?.value || 'restaurant')
       },
@@ -4337,6 +4394,28 @@ export function initPanelApp() {
 
     voiceRuntimeDependenciesPromise = (async () => {
       await ensureRuntimeScriptLoaded(VOICE_ORT_SCRIPT_PATH, () => typeof window?.ort !== 'undefined');
+      const ortWasmEnv = window?.ort?.env?.wasm;
+      if (ortWasmEnv && typeof ortWasmEnv === 'object') {
+        try {
+          if (!ortWasmEnv.wasmPaths || typeof ortWasmEnv.wasmPaths !== 'string') {
+            ortWasmEnv.wasmPaths = VOICE_VAD_WASM_BASE_PATH;
+          }
+          if (window.crossOriginIsolated !== true) {
+            ortWasmEnv.numThreads = 1;
+          }
+          ortWasmEnv.proxy = false;
+          logInfo('voice:ort:wasm_env_configured', {
+            wasmPaths: String(ortWasmEnv.wasmPaths || ''),
+            numThreads: Number(ortWasmEnv.numThreads) || 0,
+            proxy: Boolean(ortWasmEnv.proxy),
+            crossOriginIsolated: window.crossOriginIsolated === true
+          });
+        } catch (error) {
+          logWarn('voice:ort:wasm_env_config_failed', {
+            error: error instanceof Error ? error.message : String(error || '')
+          });
+        }
+      }
       await ensureRuntimeScriptLoaded(VOICE_VAD_SCRIPT_PATH, () => Boolean(getVoiceVadLibrary()));
       return Boolean(getVoiceVadLibrary());
     })()
@@ -4804,6 +4883,8 @@ export function initPanelApp() {
     next.voiceTtsVoice = normalizeVoiceTtsVoice(next.voiceTtsVoice || VOICE_TTS_VOICE);
     next.voiceTtsSpeed = normalizeVoiceTtsSpeed(next.voiceTtsSpeed);
     next.voiceTransport = normalizeVoiceTransport(next.voiceTransport || VOICE_TRANSPORT_REALTIME);
+    next.chatTransport = normalizeChatTransport(next.chatTransport || CHAT_TRANSPORT_REALTIME);
+    next.realtimeModel = normalizeRealtimeModel(next.realtimeModel || DEFAULT_OPENAI_REALTIME_MODEL);
     next.voicePauseMs = normalizeVoicePauseMs(next.voicePauseMs);
     next.securityConfig = pinCryptoService.isConfigured(next.securityConfig) ? next.securityConfig : null;
     next.systemVariables = normalizeSystemVariables(next.systemVariables);
@@ -6150,6 +6231,8 @@ export function initPanelApp() {
     panelSettings.voiceTtsVoice = normalizeVoiceTtsVoice(panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
     panelSettings.voiceTtsSpeed = normalizeVoiceTtsSpeed(panelSettings.voiceTtsSpeed);
     panelSettings.voiceTransport = normalizeVoiceTransport(panelSettings.voiceTransport || VOICE_TRANSPORT_REALTIME);
+    panelSettings.chatTransport = normalizeChatTransport(panelSettings.chatTransport || CHAT_TRANSPORT_REALTIME);
+    panelSettings.realtimeModel = normalizeRealtimeModel(panelSettings.realtimeModel || DEFAULT_OPENAI_REALTIME_MODEL);
     panelSettings.voicePauseMs = normalizeVoicePauseMs(panelSettings.voicePauseMs);
     panelSettings.systemVariables = normalizeSystemVariables(panelSettings.systemVariables);
     panelSettings.crmErpDatabaseUrl = postgresService.normalizeConnectionUrl(panelSettings.crmErpDatabaseUrl || '');
@@ -6169,6 +6252,8 @@ export function initPanelApp() {
         voiceTtsVoice: panelSettings.voiceTtsVoice,
         voiceTtsSpeed: panelSettings.voiceTtsSpeed,
         voiceTransport: panelSettings.voiceTransport,
+        chatTransport: panelSettings.chatTransport,
+        realtimeModel: panelSettings.realtimeModel,
         voicePauseMs: panelSettings.voicePauseMs,
         systemPrompt: panelSettings.systemPrompt,
         systemVariables: { ...panelSettings.systemVariables },
@@ -6940,6 +7025,19 @@ export function initPanelApp() {
     return token === VOICE_TRANSPORT_TURN ? VOICE_TRANSPORT_TURN : VOICE_TRANSPORT_REALTIME;
   }
 
+  function normalizeChatTransport(value) {
+    const token = String(value || '')
+      .trim()
+      .toLowerCase();
+    return token === CHAT_TRANSPORT_COMPLETIONS ? CHAT_TRANSPORT_COMPLETIONS : CHAT_TRANSPORT_REALTIME;
+  }
+
+  function normalizeRealtimeModel(value) {
+    return String(value || '')
+      .trim()
+      .slice(0, 120) || DEFAULT_OPENAI_REALTIME_MODEL;
+  }
+
   function normalizeVoicePauseMs(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
@@ -6962,6 +7060,14 @@ export function initPanelApp() {
     return normalizeVoiceTransport(settingsVoiceTransportSelect?.value || panelSettings.voiceTransport);
   }
 
+  function getConfiguredChatTransport() {
+    return normalizeChatTransport(settingsChatTransportSelect?.value || panelSettings.chatTransport);
+  }
+
+  function getConfiguredRealtimeModel() {
+    return normalizeRealtimeModel(settingsRealtimeModelInput?.value || panelSettings.realtimeModel);
+  }
+
   function getConfiguredVoicePauseMs() {
     return normalizeVoicePauseMs(settingsVoicePauseMsInput?.value ?? panelSettings.voicePauseMs);
   }
@@ -6981,6 +7087,8 @@ export function initPanelApp() {
     const ttsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || panelSettings.voiceTtsVoice || VOICE_TTS_VOICE);
     const ttsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value ?? panelSettings.voiceTtsSpeed);
     const transport = normalizeVoiceTransport(settingsVoiceTransportSelect?.value || panelSettings.voiceTransport);
+    const chatTransport = normalizeChatTransport(settingsChatTransportSelect?.value || panelSettings.chatTransport);
+    const realtimeModel = normalizeRealtimeModel(settingsRealtimeModelInput?.value || panelSettings.realtimeModel);
     const pauseMs = getConfiguredVoicePauseMs();
 
     if (settingsVoiceTtsSpeedValue) {
@@ -6995,7 +7103,8 @@ export function initPanelApp() {
     }
 
     const transportLabel = transport === VOICE_TRANSPORT_REALTIME ? 'Realtime' : 'Turn';
-    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} · Transporte: ${transportLabel} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
+    const chatTransportLabel = chatTransport === CHAT_TRANSPORT_REALTIME ? 'Realtime' : 'Completions';
+    settingsVoiceModeMeta.textContent = `Idioma voz: ${inputLanguage.toUpperCase()} · Voice: ${transportLabel} · Chat: ${chatTransportLabel} · RT model: ${realtimeModel} · TTS: ${ttsVoice} · Velocidad: ${ttsSpeed.toFixed(2)}x · Pausa: ${pauseMs} ms`;
   }
 
   function getOpenAiSpeechProfile() {
@@ -10567,12 +10676,108 @@ export function initPanelApp() {
     };
   }
 
+  function getDbBridgeAvailability() {
+    const connectionUrl = getCrmErpDatabaseConnectionUrl();
+    const integrations = getIntegrationsConfig();
+    const dbBridge = integrations.dbBridge || {};
+    const platform = detectHostPlatform();
+    const transport = normalizeSmtpTransport(dbBridge.transport || 'http_agent');
+
+    if (!connectionUrl) {
+      return {
+        enabled: false,
+        reason: 'No hay URL PostgreSQL configurada.',
+        transport
+      };
+    }
+
+    if (transport === 'http_agent') {
+      const agentUrl = String(dbBridge.agentUrl || '').trim();
+      if (!agentUrl) {
+        return {
+          enabled: false,
+          reason: 'Falta DB Bridge URL (http_agent).',
+          transport
+        };
+      }
+      return {
+        enabled: true,
+        reason: '',
+        transport
+      };
+    }
+
+    if (!platform.supported) {
+      return {
+        enabled: false,
+        reason: `native_host solo soportado en ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL} (actual: ${platform.label}).`,
+        transport
+      };
+    }
+
+    const expectedHostName = String(dbBridge.nativeHostName || '').trim();
+    const checkedSameHost = expectedHostName && nativeHostDiagnostics.hostName === expectedHostName;
+    const hasRecentPing =
+      Date.now() - Math.max(0, Number(nativeHostDiagnostics.checkedAt) || 0) <= NATIVE_HOST_PING_STALE_MS;
+    if (!(nativeHostDiagnostics.ok && checkedSameHost && hasRecentPing)) {
+      return {
+        enabled: false,
+        reason: 'Complemento local no conectado para DB bridge. Ejecuta Ping complemento.',
+        transport
+      };
+    }
+
+    const capabilities = Array.isArray(nativeHostDiagnostics.capabilities)
+      ? nativeHostDiagnostics.capabilities
+          .map((item) => String(item || '').trim().toLowerCase())
+          .filter(Boolean)
+      : [];
+    const hasDbCapability = capabilities.includes('db.query');
+    if (!hasDbCapability) {
+      return {
+        enabled: false,
+        reason: 'El complemento local no reporta db.query. Instala psycopg/psycopg2 y vuelve a hacer Ping.',
+        transport
+      };
+    }
+
+    return {
+      enabled: true,
+      reason: '',
+      transport
+    };
+  }
+
+  function getNativeHostInstallCommandTemplates() {
+    const macCommand = [
+      '# macOS (despues de descargar el .sh)',
+      'chmod +x "$HOME/Downloads/greene-native-host-macos.sh"',
+      '"$HOME/Downloads/greene-native-host-macos.sh"',
+      '# opcional para db native_host',
+      'python3 -m pip install "psycopg[binary]"'
+    ].join('\n');
+
+    const windowsCommand = [
+      '# Windows PowerShell (despues de descargar el .ps1)',
+      'Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass',
+      '& "$env:USERPROFILE\\Downloads\\greene-native-host-windows.ps1"',
+      '# opcional para db native_host',
+      'py -3 -m pip install "psycopg[binary]"'
+    ].join('\n');
+
+    return {
+      macCommand,
+      windowsCommand
+    };
+  }
+
   function buildNativeHostInstallMarkdown() {
     const platform = detectHostPlatform();
     const smtp = getSmtpDraftConfigFromScreen();
     const extensionId = String(chrome?.runtime?.id || '').trim() || '[extension_id]';
     const hostName = String(smtp.nativeHostName || 'com.greene.smtp_bridge').trim();
     const supportLabel = platform.supported ? 'soportado' : 'no_soportado';
+    const commands = getNativeHostInstallCommandTemplates();
 
     if (platform.id === 'windows') {
       return [
@@ -10580,7 +10785,11 @@ export function initPanelApp() {
         'Instalacion corta:',
         '1) Descargar complemento Windows (.ps1).',
         '2) Ejecutar script en PowerShell.',
-        '3) Regresar y usar Ping complemento.',
+        '3) (Opcional DB native_host) pip install "psycopg[binary]" o psycopg2.',
+        '4) Regresar y usar Ping complemento.',
+        '',
+        'Comando recomendado:',
+        commands.windowsCommand,
         `Host: ${hostName}`,
         `Ext: ${extensionId}`
       ].join('\n');
@@ -10592,7 +10801,11 @@ export function initPanelApp() {
         'Instalacion corta:',
         '1) Descargar complemento macOS (.sh).',
         '2) Ejecutar script en Terminal.',
-        '3) Regresar y usar Ping complemento.',
+        '3) (Opcional DB native_host) pip3 install "psycopg[binary]" o psycopg2.',
+        '4) Regresar y usar Ping complemento.',
+        '',
+        'Comando recomendado:',
+        commands.macCommand,
         `Host: ${hostName}`,
         `Ext: ${extensionId}`
       ].join('\n');
@@ -10603,7 +10816,15 @@ export function initPanelApp() {
       'Instalacion corta:',
       `1) Usa un equipo ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL}.`,
       '2) Descarga el instalador correspondiente (.sh o .ps1).',
-      '3) Ejecuta el script y luego usa Ping complemento.',
+      '3) Ejecuta el script.',
+      '4) (Opcional DB native_host) instala psycopg/binary en Python.',
+      '5) Regresa y usa Ping complemento.',
+      '',
+      'Comando macOS:',
+      commands.macCommand,
+      '',
+      'Comando Windows:',
+      commands.windowsCommand,
       `Host: ${hostName}`,
       `Ext: ${extensionId}`
     ].join('\n');
@@ -10611,11 +10832,23 @@ export function initPanelApp() {
 
   function buildNativeHostDependencyLabel() {
     const availability = getSmtpToolAvailability();
-    if (availability.enabled) {
-      return 'Dependencias locales: smtp.sendMail habilitada.';
+    const dbAvailability = getDbBridgeAvailability();
+    const labels = [];
+    labels.push(
+      availability.enabled
+        ? 'smtp.sendMail habilitada'
+        : `smtp.sendMail deshabilitada (${availability.reason})`
+    );
+
+    if (getCrmErpDatabaseConnectionUrl()) {
+      labels.push(
+        dbAvailability.enabled
+          ? 'db.* bridge habilitado'
+          : `db.* bridge deshabilitado (${dbAvailability.reason})`
+      );
     }
 
-    return `Dependencias locales: smtp.sendMail deshabilitada (${availability.reason})`;
+    return `Dependencias locales: ${labels.join(' · ')}.`;
   }
 
   function getNativeHostIndicatorState() {
@@ -10715,6 +10948,16 @@ export function initPanelApp() {
             : `Complemento local descargable solo para ${NATIVE_HOST_SUPPORTED_PLATFORMS_LABEL} por ahora.`;
         }
 
+        if (settingsNativeHostCopyMacCmdBtn) {
+          settingsNativeHostCopyMacCmdBtn.disabled = false;
+          settingsNativeHostCopyMacCmdBtn.title = 'Copiar comando de ejecucion para macOS (script descargado en Downloads).';
+        }
+
+        if (settingsNativeHostCopyWindowsCmdBtn) {
+          settingsNativeHostCopyWindowsCmdBtn.disabled = false;
+          settingsNativeHostCopyWindowsCmdBtn.title = 'Copiar comando de ejecucion para Windows PowerShell (script descargado en Downloads).';
+        }
+
         if (settingsNativeHostPingBtn) {
           settingsNativeHostPingBtn.disabled = !platform.supported || nativeHostPingInFlight;
         }
@@ -10801,6 +11044,41 @@ export function initPanelApp() {
     }
 
     return false;
+  }
+
+  async function copyTextToClipboard(text) {
+    const payload = String(text || '');
+    if (!payload.trim()) {
+      throw new Error('No hay texto para copiar.');
+    }
+
+    if (navigator?.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(payload);
+      return;
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = payload;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+
+    let copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } catch (_) {
+      copied = false;
+    } finally {
+      textarea.remove();
+    }
+
+    if (!copied) {
+      throw new Error('No se pudo copiar al portapapeles.');
+    }
   }
 
   function sanitizeToolErrorArgs(value, depth = 0) {
@@ -11515,6 +11793,7 @@ export function initPanelApp() {
   function buildLocalToolSystemPrompt() {
     const hasCrmErpDbConnection = Boolean(getCrmErpDatabaseConnectionUrl());
     const integrations = getIntegrationsConfig();
+    const dbAvailability = getDbBridgeAvailability();
     const smtpAvailability = getSmtpToolAvailability();
     const hasMapsApiKey = Boolean(String(integrations.maps?.apiKey || '').trim());
     const hasCustomTools = normalizeCustomIntegrationTools(integrations.customTools).length > 0;
@@ -11551,6 +11830,9 @@ export function initPanelApp() {
             '- db.queryWrite (args: sql, params opcional array, maxRows opcional; solo INSERT/UPDATE/DELETE y UPDATE/DELETE requieren WHERE)'
           ]
         : ['- db.* requiere configurar la URL de PostgreSQL en Settings > CRM/ERP Database.']),
+      ...(hasCrmErpDbConnection && !dbAvailability.enabled
+        ? [`- db.* bridge temporalmente no disponible: ${dbAvailability.reason}`]
+        : []),
       ...(smtpAvailability.enabled
         ? [
             '- smtp.sendMail (args: to, subject, text|html, cc opcional, bcc opcional, from opcional; envia por SMTP configurado)'
@@ -11579,6 +11861,13 @@ export function initPanelApp() {
       'Si el usuario usa alias de contacto en WhatsApp, usa query/name/chat normalmente; el sistema puede resolver alias guardados a phone.',
       'Tambien puedes resolver contactos por nombres almacenados en el indice local de chats WhatsApp (IndexedDB) para obtener su phone.',
       'Para preguntas de CRM/ERP, usa db.refreshSchema si falta contexto y luego db.queryRead/db.queryWrite segun corresponda.',
+      `Estado actual db.* bridge: ${
+        hasCrmErpDbConnection
+          ? dbAvailability.enabled
+            ? 'habilitado'
+            : `deshabilitado (${dbAvailability.reason})`
+          : 'sin URL PostgreSQL'
+      }.`,
       'smtp.sendMail usa bridge interno en background y transporte SMTP configurable (http_agent o native_host).',
       `Estado actual smtp.sendMail: ${smtpAvailability.enabled ? 'habilitada' : `deshabilitada (${smtpAvailability.reason})`}.`,
       'Para "donde estamos", usa maps.getCurrentLocation y maps.reverseGeocode cuando haya API key.',
@@ -12875,7 +13164,14 @@ export function initPanelApp() {
     return error;
   }
 
-  async function streamVoiceRealtimeResponse({ messages, apiKey, onChunk, signal = null }) {
+  async function streamOpenAiRealtimeResponse({
+    messages,
+    apiKey,
+    onChunk,
+    signal = null,
+    realtimeModel = DEFAULT_OPENAI_REALTIME_MODEL,
+    source = 'text'
+  }) {
     const token = String(apiKey || '').trim();
     if (!token) {
       throw new Error('Falta API key para OpenAI Realtime.');
@@ -12887,10 +13183,12 @@ export function initPanelApp() {
 
     const payload = buildRealtimeConversationPayload(messages);
     if (!payload.items.length) {
-      throw new Error('No hay mensajes para enviar en Realtime voice.');
+      throw new Error('No hay mensajes para enviar en Realtime.');
     }
 
-    const wsUrl = `${OPENAI_REALTIME_WS_ENDPOINT}?model=${encodeURIComponent(VOICE_CHAT_RESPONSE_REALTIME_MODEL)}`;
+    const safeRealtimeModel = normalizeRealtimeModel(realtimeModel);
+    const sourceLabel = String(source || 'text').trim().toLowerCase() === 'voice' ? 'voice' : 'text';
+    const wsUrl = `${OPENAI_REALTIME_WS_ENDPOINT}?model=${encodeURIComponent(safeRealtimeModel)}`;
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -13004,6 +13302,11 @@ export function initPanelApp() {
           connectTimeout = 0;
         }
         refreshResponseTimeout();
+        logRealtimeEvent('start', {
+          source: sourceLabel,
+          model: safeRealtimeModel,
+          messageCount: payload.items.length
+        });
 
         try {
           socket.send(
@@ -13170,15 +13473,25 @@ export function initPanelApp() {
       onChunk(chunk);
     };
 
-    const shouldUseRealtimeVoiceTransport =
-      source === 'voice' &&
-      getConfiguredVoiceTransport() === VOICE_TRANSPORT_REALTIME &&
-      isOpenAiChatProfile(activeProfile);
+    const voiceRealtimeEnabled = source === 'voice' && getConfiguredVoiceTransport() === VOICE_TRANSPORT_REALTIME;
+    const textRealtimeEnabled = source === 'text' && getConfiguredChatTransport() === CHAT_TRANSPORT_REALTIME;
+    const realtimeRequested = voiceRealtimeEnabled || textRealtimeEnabled;
+    const realtimeModel = getConfiguredRealtimeModel();
+    const canUseRealtime = realtimeRequested && isOpenAiChatProfile(activeProfile);
 
-    if (shouldUseRealtimeVoiceTransport) {
+    if (realtimeRequested && !canUseRealtime) {
+      logRealtimeEvent('skip', {
+        source,
+        requested: true,
+        provider: String(activeProfile?.provider || '').trim() || 'unknown',
+        reason: 'provider_not_openai'
+      });
+    }
+
+    if (canUseRealtime) {
       const bufferedChunks = [];
       try {
-        const realtimeOutput = await streamVoiceRealtimeResponse({
+        const realtimeOutput = await streamOpenAiRealtimeResponse({
           messages,
           apiKey,
           onChunk: (chunk) => {
@@ -13187,7 +13500,9 @@ export function initPanelApp() {
             }
             bufferedChunks.push(chunk);
           },
-          signal: options.signal || null
+          signal: options.signal || null,
+          realtimeModel,
+          source
         });
 
         if (bufferedChunks.length) {
@@ -13198,21 +13513,31 @@ export function initPanelApp() {
           handleChunk(realtimeOutput);
         }
 
-        logInfo('voice:realtime:used', {
-          model: VOICE_CHAT_RESPONSE_REALTIME_MODEL,
-          outputLength: String(realtimeOutput || '').length
+        logRealtimeEvent('success', {
+          source,
+          model: realtimeModel,
+          outputLength: String(realtimeOutput || '').length,
+          chunkCount: bufferedChunks.length
         });
 
         return {
           output: realtimeOutput,
-          contextUsed
+          contextUsed,
+          transport: 'realtime',
+          modelUsed: realtimeModel
         };
       } catch (error) {
         if (isAbortLikeError(error)) {
+          logRealtimeEvent('aborted', {
+            source,
+            model: realtimeModel
+          });
           throw error;
         }
 
-        logWarn('voice:realtime:fallback', {
+        logRealtimeEvent('fallback', {
+          source,
+          model: realtimeModel,
           error: error instanceof Error ? error.message : String(error || '')
         });
       }
@@ -13227,9 +13552,19 @@ export function initPanelApp() {
       signal: options.signal || null
     });
 
+    if (realtimeRequested) {
+      logRealtimeEvent('fallback_success', {
+        source,
+        model: String(activeProfile?.model || '').trim(),
+        outputLength: String(output || '').length
+      });
+    }
+
     return {
       output,
-      contextUsed
+      contextUsed,
+      transport: 'completions',
+      modelUsed: String(activeProfile?.model || '').trim()
     };
   }
 
@@ -13277,13 +13612,14 @@ export function initPanelApp() {
 
     try {
       const activeProfile = resolveChatProfileForSource(source);
-      const voiceRealtimeActive =
-        source === 'voice' &&
-        getConfiguredVoiceTransport() === VOICE_TRANSPORT_REALTIME &&
-        isOpenAiChatProfile(activeProfile);
+      const realtimeRequestedForSource =
+        (source === 'voice' && getConfiguredVoiceTransport() === VOICE_TRANSPORT_REALTIME) ||
+        (source === 'text' && getConfiguredChatTransport() === CHAT_TRANSPORT_REALTIME);
+      const realtimeModelForSource = getConfiguredRealtimeModel();
+      const realtimeActiveForSource = realtimeRequestedForSource && isOpenAiChatProfile(activeProfile);
       const activeModel = activeProfile
         ? `${activeProfile.name} · ${
-            voiceRealtimeActive ? `${VOICE_CHAT_RESPONSE_REALTIME_MODEL} (realtime)` : activeProfile.model
+            realtimeActiveForSource ? `${realtimeModelForSource} (realtime)` : activeProfile.model
           }`
         : getActiveModel();
       const attachmentsPromptBlock = buildAttachmentsPromptBlock(attachmentsForTurn);
@@ -13437,6 +13773,13 @@ export function initPanelApp() {
           signal: generationAbortController.signal
         }
       );
+      let generationTransport = String(streamPayload?.transport || 'completions')
+        .trim()
+        .toLowerCase();
+      if (generationTransport !== 'realtime') {
+        generationTransport = 'completions';
+      }
+      let generationModelUsed = String(streamPayload?.modelUsed || activeProfile?.model || '').trim();
 
       const output = String(streamPayload?.output || '').trim();
       const contextUsed = Array.isArray(streamPayload?.contextUsed)
@@ -13542,6 +13885,13 @@ export function initPanelApp() {
         const finalStreamOutput = String(finalStream?.output || '').trim();
         finalAssistantOutput =
           (shouldSyncVoiceText ? streamedAssistantText.trim() : '') || finalStreamOutput || fallbackFromTools;
+        generationTransport = String(finalStream?.transport || generationTransport)
+          .trim()
+          .toLowerCase();
+        if (generationTransport !== 'realtime') {
+          generationTransport = 'completions';
+        }
+        generationModelUsed = String(finalStream?.modelUsed || generationModelUsed || activeProfile?.model || '').trim();
         logDebug('sendChatMessage:final_after_tools', {
           outputPreview: finalAssistantOutput.slice(0, 600),
           outputLength: finalAssistantOutput.length
@@ -13550,6 +13900,8 @@ export function initPanelApp() {
 
       assistantMessage.pending = false;
       assistantMessage.content = assistantMessage.content.trim() || finalAssistantOutput.trim();
+      assistantMessage.response_transport = generationTransport;
+      assistantMessage.response_model = generationModelUsed;
       if (!assistantMessage.content) {
         throw new Error('El provider no devolvio contenido.');
       }
@@ -13590,7 +13942,10 @@ export function initPanelApp() {
         allowAutoScroll: false
       });
       await saveChatHistory();
-      setStatus(chatStatus, `Respuesta generada con ${activeModel}.`);
+      const modelLabel = activeProfile
+        ? `${activeProfile.name} · ${generationModelUsed || activeProfile.model}${generationTransport === 'realtime' ? ' (realtime)' : ''}`
+        : activeModel;
+      setStatus(chatStatus, `Respuesta generada con ${modelLabel}.`);
       if (source === 'voice') {
         const playbackTask = speakAssistantReply({
           message: assistantMessage,
@@ -17946,6 +18301,8 @@ export function initPanelApp() {
       const nextVoiceTtsVoice = normalizeVoiceTtsVoice(settingsVoiceTtsVoiceSelect?.value || VOICE_TTS_VOICE);
       const nextVoiceTtsSpeed = normalizeVoiceTtsSpeed(settingsVoiceTtsSpeedInput?.value);
       const nextVoiceTransport = normalizeVoiceTransport(settingsVoiceTransportSelect?.value || VOICE_TRANSPORT_REALTIME);
+      const nextChatTransport = normalizeChatTransport(settingsChatTransportSelect?.value || CHAT_TRANSPORT_REALTIME);
+      const nextRealtimeModel = normalizeRealtimeModel(settingsRealtimeModelInput?.value || DEFAULT_OPENAI_REALTIME_MODEL);
       const nextVoicePauseMs = normalizeVoicePauseMs(settingsVoicePauseMsInput?.value);
       const nextPrompt = String(settingsSystemPrompt?.value || '').trim();
       const current = settingsScreenController.getPanelSettings() || {};
@@ -17953,6 +18310,8 @@ export function initPanelApp() {
       const currentVoiceTtsVoice = normalizeVoiceTtsVoice(current.voiceTtsVoice || VOICE_TTS_VOICE);
       const currentVoiceTtsSpeed = normalizeVoiceTtsSpeed(current.voiceTtsSpeed);
       const currentVoiceTransport = normalizeVoiceTransport(current.voiceTransport || VOICE_TRANSPORT_REALTIME);
+      const currentChatTransport = normalizeChatTransport(current.chatTransport || CHAT_TRANSPORT_REALTIME);
+      const currentRealtimeModel = normalizeRealtimeModel(current.realtimeModel || DEFAULT_OPENAI_REALTIME_MODEL);
       const currentVoicePauseMs = normalizeVoicePauseMs(current.voicePauseMs);
       const currentPrompt = String(current.systemPrompt || '').trim();
 
@@ -17966,6 +18325,8 @@ export function initPanelApp() {
         nextVoiceTtsVoice === currentVoiceTtsVoice &&
         nextVoiceTtsSpeed === currentVoiceTtsSpeed &&
         nextVoiceTransport === currentVoiceTransport &&
+        nextChatTransport === currentChatTransport &&
+        nextRealtimeModel === currentRealtimeModel &&
         nextVoicePauseMs === currentVoicePauseMs &&
         nextPrompt === currentPrompt
       ) {
@@ -18574,6 +18935,30 @@ export function initPanelApp() {
       }
     });
 
+    settingsNativeHostCopyMacCmdBtn?.addEventListener('click', () => {
+      const commands = getNativeHostInstallCommandTemplates();
+      void copyTextToClipboard(commands.macCommand)
+        .then(() => {
+          setStatus(settingsIntegrationsStatus, 'Comando macOS copiado al portapapeles.');
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : 'No se pudo copiar comando macOS.';
+          setStatus(settingsIntegrationsStatus, message, true);
+        });
+    });
+
+    settingsNativeHostCopyWindowsCmdBtn?.addEventListener('click', () => {
+      const commands = getNativeHostInstallCommandTemplates();
+      void copyTextToClipboard(commands.windowsCommand)
+        .then(() => {
+          setStatus(settingsIntegrationsStatus, 'Comando Windows copiado al portapapeles.');
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : 'No se pudo copiar comando Windows.';
+          setStatus(settingsIntegrationsStatus, message, true);
+        });
+    });
+
     settingsNativeHostPingBtn?.addEventListener('click', () => {
       void pingNativeHostBridge({ silent: false });
     });
@@ -18754,6 +19139,27 @@ export function initPanelApp() {
     });
 
     settingsVoiceTransportSelect?.addEventListener('change', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 180
+      });
+    });
+
+    settingsChatTransportSelect?.addEventListener('change', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 180
+      });
+    });
+
+    settingsRealtimeModelInput?.addEventListener('input', () => {
+      updateVoiceModeMetaLabel();
+      scheduleAssistantSettingsAutosave({
+        delayMs: 300
+      });
+    });
+
+    settingsRealtimeModelInput?.addEventListener('change', () => {
       updateVoiceModeMetaLabel();
       scheduleAssistantSettingsAutosave({
         delayMs: 180
@@ -19176,6 +19582,8 @@ export function initPanelApp() {
           settingsVoiceTtsSpeedInput,
           settingsVoiceTtsSpeedValue,
           settingsVoiceTransportSelect,
+          settingsChatTransportSelect,
+          settingsRealtimeModelInput,
           settingsVoicePauseMsInput,
           settingsVoicePauseMsValue,
           settingsLanguageSelect,

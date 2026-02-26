@@ -3,6 +3,7 @@
 
   importScripts('background/background-browser-actions-controller.js');
   importScripts('background/background-smtp-bridge-service.js');
+  importScripts('background/background-db-bridge-service.js');
 
   const MESSAGE_TYPES = Object.freeze({
     GET_TAB_CONTEXT: 'GREENE_GET_TAB_CONTEXT',
@@ -14,6 +15,7 @@
     BROWSER_ACTION: 'GREENE_BROWSER_ACTION',
     LOCATION_CONTEXT_UPDATE: 'GREENE_LOCATION_CONTEXT_UPDATE',
     SMTP_SEND: 'GREENE_SMTP_SEND',
+    DB_QUERY: 'GREENE_DB_QUERY',
     NATIVE_HOST_PING: 'GREENE_NATIVE_HOST_PING',
     NUWWE_GET_LOGIN_CREDENTIALS: 'GREENE_NUWWE_GET_LOGIN_CREDENTIALS'
   });
@@ -65,7 +67,12 @@
     'http://127.0.0.1:4395/smtp/send',
     'http://localhost:4395/smtp/send'
   ]);
+  const DB_HTTP_AGENT_FALLBACK_ENDPOINTS = Object.freeze([
+    'http://127.0.0.1:4395/db/query',
+    'http://localhost:4395/db/query'
+  ]);
   const DEFAULT_SMTP_NATIVE_HOST_NAME = 'com.greene.smtp_bridge';
+  const DEFAULT_DB_NATIVE_HOST_NAME = 'com.greene.smtp_bridge';
   const LOCAL_CONNECTOR_PING_ALARM_NAME = 'greene_local_connector_ping';
   const LOCAL_CONNECTOR_PING_PERIOD_MINUTES = 3;
   const PIN_UNLOCK_SESSION_STORAGE_KEY = 'greene_pin_unlock_session_v1';
@@ -555,6 +562,14 @@
     logWarn,
     parseSafeUrl,
     smtpHttpAgentFallbackEndpoints: SMTP_HTTP_AGENT_FALLBACK_ENDPOINTS,
+    toSafeText
+  });
+  const dbBridgeService = self.GreeneBackgroundDbBridge.createBackgroundDbBridgeService({
+    defaultDbNativeHostName: DEFAULT_DB_NATIVE_HOST_NAME,
+    dbHttpAgentFallbackEndpoints: DB_HTTP_AGENT_FALLBACK_ENDPOINTS,
+    logDebug,
+    logWarn,
+    parseSafeUrl,
     toSafeText
   });
 
@@ -2486,6 +2501,40 @@
         .catch((error) => {
           const messageText = error instanceof Error ? error.message : 'Error ejecutando SMTP bridge.';
           logWarn('onMessage:SMTP_SEND:error', {
+            request: requestSummary,
+            error: messageText
+          });
+          sendResponse({
+            ok: false,
+            error: messageText
+          });
+        });
+
+      return true;
+    }
+
+    if (message.type === MESSAGE_TYPES.DB_QUERY) {
+      const payload = message.payload && typeof message.payload === 'object' ? message.payload : {};
+      const requestSummary = dbBridgeService.buildDbBridgeLogSummary(payload);
+
+      logDebug('onMessage:DB_QUERY:received', {
+        senderTabId: Number(sender?.tab?.id) || -1,
+        request: requestSummary
+      });
+
+      Promise.resolve(dbBridgeService.runDbBridgeQuery(payload))
+        .then((result) => {
+          logDebug('onMessage:DB_QUERY:resolved', {
+            request: requestSummary
+          });
+          sendResponse({
+            ok: true,
+            result
+          });
+        })
+        .catch((error) => {
+          const messageText = error instanceof Error ? error.message : 'Error ejecutando DB bridge.';
+          logWarn('onMessage:DB_QUERY:error', {
             request: requestSummary,
             error: messageText
           });

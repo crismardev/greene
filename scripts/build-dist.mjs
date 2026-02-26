@@ -27,6 +27,7 @@ const COPY_ENTRIES = [
   'node_modules/@ricky0123/vad-web/dist/silero_vad_v5.onnx',
   'node_modules/@ricky0123/vad-web/dist/silero_vad_legacy.onnx',
   'node_modules/onnxruntime-web/dist/ort.min.js',
+  'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs',
   'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'
 ];
 

@@ -444,6 +444,19 @@
                 </label>
 
                 <label class="field">
+                  <span>Chat transport (text)</span>
+                  <select id="settingsChatTransportSelect">
+                    <option value="realtime">Realtime (OpenAI WebSocket)</option>
+                    <option value="completions">Completions (SSE/HTTP)</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>Realtime model (OpenAI)</span>
+                  <input id="settingsRealtimeModelInput" type="text" value="gpt-realtime" placeholder="gpt-realtime" autocomplete="off" />
+                </label>
+
+                <label class="field">
                   <span>Voice pause before send (ms)</span>
                   <input id="settingsVoicePauseMsInput" type="number" min="300" max="5000" step="50" value="650" />
                   <p id="settingsVoicePauseMsValue" class="tool-copy">650 ms</p>
@@ -748,6 +761,8 @@
 3) Vuelve y haz Ping.</pre>
                   <div class="actions actions--tight">
                     <button id="settingsNativeHostDownloadBtn" class="btn btn--ghost" type="button">Descargar complemento</button>
+                    <button id="settingsNativeHostCopyMacCmdBtn" class="btn btn--ghost" type="button">Copiar comando (macOS)</button>
+                    <button id="settingsNativeHostCopyWindowsCmdBtn" class="btn btn--ghost" type="button">Copiar comando (Windows)</button>
                     <button id="settingsNativeHostPingBtn" class="btn btn--ghost" type="button">Ping complemento</button>
                   </div>
                   <p id="settingsNativeHostHeaderMeta" class="tool-copy">Estado header: desconectado.</p>
